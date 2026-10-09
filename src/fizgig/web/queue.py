@@ -14,13 +14,14 @@ import uuid
 from pathlib import Path
 
 from fizgig.families.registry import by_gui_label
-from fizgig.web.jobs import JobError, _now, jobs_root
+from fizgig.web.jobs import JobError, _device_index, _now, jobs_root
 
 _LOCK = threading.Lock()
 _SEEN: dict[str, str] = {}
 _ACTIVE_SEEN: set[str] = set()
 _READY: set[str] = set()
-_HOLD = False
+_HOLD: set[int] = set()
+_DEVICE: dict[str, int] = {}
 
 # LoRATrainerGUI._canon_arch / _ARCH_ALIASES. Old Base Model labels.
 _ARCH_ALIASES = {
@@ -92,6 +93,7 @@ def _public(item: dict) -> dict:
         "context": item.get("context") or {},
         "added": item.get("added") or "",
         "label": _label(item),
+        "device": _device_index(item.get("device")),
     }
 
 
@@ -103,7 +105,7 @@ def _folder_of(values: dict, context: dict) -> str:
     return str(values.get("image_folder") or context.get("image_folder") or "").strip()
 
 
-def add(family: str, values: dict, context: dict) -> dict:
+def add(family: str, values: dict, context: dict, device: int = 0) -> dict:
     from fizgig.families.registry import get as get_family
 
     if get_family(family) is None:
@@ -121,37 +123,35 @@ def add(family: str, values: dict, context: dict) -> dict:
         "values": values,
         "context": context,
         "added": _now(),
+        "device": _device_index(device),
     }
     with _LOCK:
-        global _HOLD
         items = _read()
         items.append(item)
         _write(items)
-        _HOLD = False
+        _HOLD.clear()
     return _public(item)
 
 
 def reorder(ids: list[str]) -> dict:
     with _LOCK:
-        global _HOLD
         items = _read()
         by_id = {item["id"]: item for item in items}
         if sorted(ids) != sorted(by_id) or len(ids) != len(by_id):
             raise JobError(422, {"problems": ["the order must list every queued item once"]})
         _write([by_id[item_id] for item_id in ids])
-        _HOLD = False
+        _HOLD.clear()
     return list_items()
 
 
 def remove(item_id: str) -> dict:
     with _LOCK:
-        global _HOLD
         items = _read()
         kept = [item for item in items if item.get("id") != item_id]
         if len(kept) == len(items):
             raise JobError(404, {"detail": "no such queue item"})
         _write(kept)
-        _HOLD = False
+        _HOLD.clear()
     return list_items()
 
 
@@ -212,6 +212,7 @@ def from_desktop(item: dict) -> dict | None:
         "values": values,
         "context": context,
         "added": _now(),
+        "device": 0,
     }
 
 
@@ -241,11 +242,10 @@ def import_desktop() -> dict:
         else:
             imported.append(mapped)
     with _LOCK:
-        global _HOLD
         items = _read()
         items.extend(imported)
         _write(items)
-        _HOLD = False
+        _HOLD.clear()
     body = list_items()
     body["imported"] = len(imported)
     body["skipped"] = skipped
@@ -260,53 +260,63 @@ def arm(job_id: str) -> None:
 
 
 def observe(rows: list[dict]) -> None:
-    """Start the next queued run when a training job this process watched finishes cleanly."""
+    """Start the next queued run on each device whose training job this process watched finishes cleanly."""
+    launches = []
     with _LOCK:
-        if _HOLD:
-            return
-        busy = False
+        busy: set[int] = set()
         for job in rows:
             if (job.get("kind") or "train") != "train":
                 continue
             status = job.get("status") or ""
             job_id = job.get("id") or ""
+            device = _device_index(job.get("device"))
+            _DEVICE[job_id] = device
             _SEEN[job_id] = status
             if status in {"queued", "running"}:
-                busy = True
+                busy.add(device)
                 _ACTIVE_SEEN.add(job_id)
             elif status == "done" and job_id in _ACTIVE_SEEN:
                 _READY.add(job_id)
-        if busy or not _READY:
+        armed = {_DEVICE[job_id] for job_id in _READY if job_id in _DEVICE}
+        if not armed:
             return
-        items = _read()
-        if not items:
-            return
-        head = items[0]
-    _launch(head)
+        picked: set[int] = set()
+        for item in _read():
+            device = _device_index(item.get("device"))
+            if device in picked or device in busy or device in _HOLD or device not in armed:
+                continue
+            picked.add(device)
+            launches.append(item)
+    for head in launches:
+        _launch(head)
 
 
-def advance(confirm: list[str] | None = None) -> dict:
-    """Start the head now. A refusal leaves the item queued."""
-    global _HOLD
+def advance(confirm: list[str] | None = None, device: int | None = None) -> dict:
+    """Start one item now. ``device`` None is the head. A refusal leaves the item queued."""
     with _LOCK:
         items = _read()
-        if not items:
+        if device is None:
+            head = items[0] if items else None
+        else:
+            want = _device_index(device)
+            head = next((item for item in items if _device_index(item.get("device")) == want), None)
+        if head is None:
             raise JobError(404, {"detail": "the queue is empty"})
-        head = items[0]
-        _HOLD = False
+        _HOLD.discard(_device_index(head.get("device")))
     return _launch(head, confirm or [], manual=True)
 
 
 def _launch(head: dict, confirm: list[str] | None = None, manual: bool = False) -> dict:
-    global _HOLD
     from fizgig.web import jobs
 
+    device = _device_index(head.get("device"))
     try:
         created = jobs.start(
             head.get("family") or "",
             dict(head.get("values") or {}),
             dict(head.get("context") or {}),
             list(confirm or []),
+            device=device,
         )
     except JobError as exc:
         detail = (exc.body or {}).get("detail")
@@ -315,12 +325,12 @@ def _launch(head: dict, confirm: list[str] | None = None, manual: bool = False) 
             return {}
         if not retry:
             with _LOCK:
-                _HOLD = True
+                _HOLD.add(device)
         if manual:
             raise
         return {}
     with _LOCK:
         items = [item for item in _read() if item.get("id") != head.get("id")]
         _write(items)
-        _HOLD = False
+        _HOLD.discard(device)
     return created

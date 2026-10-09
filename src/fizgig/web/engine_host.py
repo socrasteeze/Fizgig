@@ -507,6 +507,7 @@ class Worker:
         self.emit({"event": "unloaded"})
 
     def _status(self, msg: dict) -> None:
+        from fizgig.gpu_lock import device_index
         with self.wake:
             body = {
                 "id": msg.get("id"),
@@ -517,6 +518,7 @@ class Worker:
                 "family": self.family,
                 "busy": self.busy or self.pending is not None,
                 "gen": self.gen,
+                "device": device_index(),
             }
         self.emit(body)
 
@@ -647,6 +649,7 @@ class EngineHost:
         self.profile: dict | None = None
         self.last = time.monotonic()
         self._next_id = 1
+        self.device = 0
         self._replies: dict[int, dict] = {}
         self._waiters: dict[int, threading.Event] = {}
         self._state = threading.Lock()
@@ -655,6 +658,26 @@ class EngineHost:
         self._announced = False
         self._watch_started = False
         self._stderr = None
+
+    def set_device(self, index: int) -> None:
+        """Use this card for the next worker. A loaded engine stays where it is."""
+        index = int(index)
+        with self._state:
+            if self.loaded:
+                raise EngineError("An engine is loaded. Unload it before changing the device.")
+            if index == int(self.device):
+                return
+            self.device = index
+            proc = self.proc
+            self.proc = None
+        if proc is None:
+            return
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+        self._reap(proc)
 
     def _jobs_root(self) -> Path:
         from fizgig.web.jobs import jobs_root
@@ -715,6 +738,7 @@ class EngineHost:
         env = os.environ.copy()
         env["FIZGIG_WEB_ENGINE_DIR"] = str(self.session)
         env["PYTHONUNBUFFERED"] = "1"
+        env["CUDA_VISIBLE_DEVICES"] = str(self.device)
         src = str(Path(__file__).resolve().parents[2])
         previous = env.get("PYTHONPATH") or ""
         env["PYTHONPATH"] = src + (os.pathsep + previous if previous else "")
@@ -906,11 +930,14 @@ class EngineHost:
                 return {
                     "loaded": False, "engine": "", "family": "", "busy": False,
                     "gen": self.latest, "restarted": self.restarted, "profile": self.profile,
+                    "device": self.device,
                 }
         reply = self.request({"op": "status"}, timeout=10)
         reply["restarted"] = self.restarted
         reply["profile"] = self.profile
         reply["result"] = self.result
+        if "device" not in reply:
+            reply["device"] = self.device
         return reply
 
     def drain(self) -> list[dict]:
@@ -955,6 +982,16 @@ def get_host() -> EngineHost:
 
 def engine_loaded() -> bool:
     return _HOST is not None and bool(_HOST.loaded)
+
+
+def engine_device() -> int:
+    """The card the host will lock. 0 when no host has been created."""
+    if _HOST is None:
+        return 0
+    try:
+        return int(_HOST.device)
+    except (TypeError, ValueError):
+        return 0
 
 
 def drain() -> list[dict]:

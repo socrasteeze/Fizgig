@@ -168,6 +168,7 @@ class JobOut(BaseModel):
     ended: str = ""
     output_dir: str = ""
     kind: str = "train"
+    device: int = 0
 
 
 class JobCreate(BaseModel):
@@ -175,10 +176,16 @@ class JobCreate(BaseModel):
     values: dict = Field(default_factory=dict)
     context: dict = Field(default_factory=dict)
     confirm: list[str] = Field(default_factory=list)
+    device: int = 0
 
 
 class ConfirmIn(BaseModel):
     confirm: list[str] = Field(default_factory=list)
+
+
+class AdvanceIn(BaseModel):
+    confirm: list[str] = Field(default_factory=list)
+    device: int | None = None
 
 
 class WarningItem(BaseModel):
@@ -240,6 +247,7 @@ class QueueItem(BaseModel):
     context: dict
     added: str = ""
     label: str = ""
+    device: int = 0
 
 
 class QueueOut(BaseModel):
@@ -308,6 +316,18 @@ class SystemOut(BaseModel):
     ram: MemoryOut | None = None
 
 
+class DevicesOut(BaseModel):
+    devices: list[int]
+
+
+class EngineDeviceIn(BaseModel):
+    device: int
+
+
+class EngineDeviceOut(BaseModel):
+    device: int
+
+
 def _call(fn, *args):
     from fizgig.web.jobs import JobError
     try:
@@ -341,7 +361,7 @@ def form(family: str):
 @app.post("/api/jobs", response_model=JobOut, responses={409: {"model": ConflictOut}, 422: {"model": ProblemsOut}})
 def create_job(body: JobCreate):
     from fizgig.web import jobs
-    return _call(jobs.start, body.family, body.values, body.context, body.confirm)
+    return _call(jobs.start, body.family, body.values, body.context, body.confirm, None, body.device)
 
 
 @app.get("/api/jobs", response_model=JobList)
@@ -410,6 +430,12 @@ def read_sample(job_id: str, name: str):
 def system():
     from fizgig.web.system import stats
     return stats()
+
+
+@app.get("/api/devices", response_model=DevicesOut)
+def read_devices():
+    from fizgig.web.devices import visible_devices
+    return {"devices": visible_devices()}
 
 
 def _event_round(seen_status, seen_samples, first):
@@ -505,7 +531,7 @@ def read_queue():
 @app.post("/api/queue", response_model=QueueItem)
 def add_queue(body: JobCreate):
     from fizgig.web.queue import add
-    return _call(add, body.family, body.values, body.context)
+    return _call(add, body.family, body.values, body.context, body.device)
 
 
 @app.post("/api/queue/order", response_model=QueueOut)
@@ -521,9 +547,11 @@ def delete_queue_item(item_id: str):
 
 
 @app.post("/api/queue/advance", response_model=JobOut, responses={409: {"model": ConflictOut}, 422: {"model": ProblemsOut}})
-def advance_queue(body: ConfirmIn | None = None):
+def advance_queue(body: AdvanceIn | None = None):
     from fizgig.web.queue import advance
-    return _call(advance, [] if body is None else body.confirm)
+    if body is None:
+        return _call(advance, [], None)
+    return _call(advance, list(body.confirm), body.device)
 
 
 @app.post("/api/queue/import", response_model=QueueImport)
@@ -1005,6 +1033,22 @@ def engine_status():
 def engine_unload():
     from fizgig.web.repair import unload as repair_unload_for
     return _call(repair_unload_for)
+
+
+@app.post("/api/engine/device", response_model=EngineDeviceOut)
+def engine_set_device(body: EngineDeviceIn):
+    from fizgig.web.engine_host import EngineError, get_host
+    from fizgig.web.jobs import JobError
+
+    def apply(index: int) -> dict:
+        try:
+            get_host().set_device(int(index))
+        except EngineError as exc:
+            status = 409 if "loaded" in exc.message.lower() else 422
+            raise JobError(status, {"detail": exc.message}) from exc
+        return {"device": int(index)}
+
+    return _call(apply, body.device)
 
 
 @app.get("/api/engine/file")

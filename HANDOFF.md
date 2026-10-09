@@ -1,31 +1,32 @@
 # HANDOFF
 
-**Updated:** 2026-10-09 · **Branch:** master · **HEAD:** 78705e1 · **Tree:** dirty (Phase 4 uncommitted)
+**Updated:** 2026-10-09 · **Branch:** master · **HEAD:** 9b92794 · **Tree:** dirty (Phase 5 uncommitted)
 
 ## State
-Phase 4 is uncommitted on 78705e1. Gizmo and the checkpoint-to-LoRA converter run as web jobs. Checks use fakes. A real cut, Whisper, and a phone recording are still manual (`docs/WEBUI_PHASE4.md`).
-The next step is Phase 5: running as a service.
+Phase 5 is uncommitted on 9b92794. The five build phases are complete. Checks use fakes. Real GPU, phone, and two-GPU runs are still manual (`docs/WEBUI_PHASE5.md`).
+The next step is those manual checks.
 
 ## Done this session
-- Gizmo: pick or upload inside the roots, Range playback, the desktop cut argv, scene chop, voice names, a recording upload, and Whisper as a lock-holding job. `gizmo.py` is not imported.
-- Converter: desktop ranks and name, output in the LoRA folder, fake script in tests, real call is `extract_diff_loras`.
-- `docs/WEBUI_PHASE1.md` now describes the hidden-console runner launch.
-- Default suite: 93 tests, 91 passed, 2 skipped. Three runs (222.647s, 219.261s, 221.160s). Golden: 2 passed (12.692s). `npm --prefix webui run build` passed. `checks\check_appearance.py` passed.
+- Linux launcher `run_webui.sh`. Docker web image under `docker/webui/` (Tailscale userspace, `serve --bg 8081`, loopback only).
+- One queue per GPU: `src/fizgig/web/devices.py`, job and queue `device`, training-form picker, per-device queue view.
+- No autostart. Decision is row 7 in `docs/WEBUI_SCOPE.md`. User guide is `docs/WEBUI.md`.
+- Default suite: 103 tests, 101 passed, 2 skipped. Three runs (163.468s, 158.956s, 157.624s). Golden: 2 passed (10.013s). `npm --prefix webui run build` passed. `checks\check_appearance.py` passed.
 
 ## Open
-1. Phase 5: running as a service.
-2. Review the dialogs (Queue, Gallery, Browse, preset windows) at 100%, 125%, and 150%; none were opened.
-3. At 150% the fixed 1580x1124 window truncates tab labels in both appearances (`lora_trainer_gui.py:1327`).
-4. A real GPU run from the page: cut a clip, run Whisper, record from a phone, and diff two checkpoints. Phone access through `tailscale serve` is still open.
+1. Manual checks in `docs/WEBUI_PHASE5.md`: a real training run, `tailscale serve` from a phone, a phone recording, Whisper, a clip, and a checkpoint diff.
+2. Two real GPUs at once: one job on each, and no overlap on one GPU. Not run.
+3. Review the dialogs (Queue, Gallery, Browse, preset windows) at 100%, 125%, and 150%; none were opened.
+4. At 150% the fixed 1580x1124 window truncates tab labels in both appearances (`lora_trainer_gui.py:1327`).
+5. Page gaps that stay desktop-only are listed in `docs/WEBUI.md`.
 
 ## Decisions
 - Fork-only, nothing offered upstream. New files only. Do not import `lora_trainer_gui.py`, `gizmo.py`, or `diff_to_lora_gui.py`. GUI logic is mirrored and pinned.
-- One worker, one engine. RefMod, Explorer, and Royale register on it. The epoch crossfade stays in the browser.
+- One worker, one engine, on one chosen device. Training is one job per GPU. RefMod, Explorer, and Royale register on the worker. The epoch crossfade stays in the browser.
 - The page bakes with `save_repaired_lora`. The desktop's live `save_repaired` path stays on the desktop.
 - Quick and Thorough run on the host, not as queue jobs. Weights stays on `profile_lora.py`.
 - Likeness and bleed scores stay on the desktop. The page's profile measures picture change.
 - Preference values for API access are never sent and never overwritten by a web save.
-- No login (user): the server listens on loopback only. Tailscale Serve is the only way in.
+- No login and no autostart (user, 2026-10-09). The server listens on loopback only. Tailscale Serve is the only way in. It runs only from `run_webui.bat`, `run_webui.sh`, or the container.
 - Whisper on the page holds the GPU lock and still runs on CPU, as the desktop pipeline does.
 
 ## Traps
@@ -34,7 +35,7 @@ The next step is Phase 5: running as a service.
 - The golden test fills the edit Originals folder and the slider -1 end folder before it compares commands. Do not change `launch.py` or the GUI to hide a difference.
 - Never post on upstream issues or PRs, and never open one. If a sync brings in `src/fizgig/web` (#165 is open), stop and ask the user whether to switch to it.
 - `plan()` does not point `--dit` at a fine-tune checkpoint. A fine-tune resume from the page is not the desktop's continuation.
-- The engine worker holds `cache/gpu/<index>.lock` while loaded. Unload it before a training, Gizmo, Whisper, or convert job. Deleting a job record removes only the job folder.
+- The engine worker holds `cache/gpu/<index>.lock` while loaded. Unload it before a job on that GPU. Do not add a scheduled task, service, or unit. Deleting a job record removes only the job folder.
 
 ## Verify
 ```powershell

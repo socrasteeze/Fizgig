@@ -38,7 +38,13 @@ def run_folder(folder: Path) -> None:
         save(folder, job)
         return
 
-    lock = GpuLock()
+    raw = job.get("device")
+    try:
+        device = 0 if raw is None or raw == "" else int(raw)
+    except (TypeError, ValueError):
+        device = 0
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(device)
+    lock = GpuLock(device)
     if not lock.acquire():
         output = Path(job.get("output_dir") or "")
         resuming = bool(str((job.get("values") or {}).get("RESUME_TRAINING") or ""))

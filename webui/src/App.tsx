@@ -124,6 +124,8 @@ export function App() {
   const [width, setWidth] = useState("768");
   const [height, setHeight] = useState("768");
   const [tab, setTab] = useState("Training");
+  const [devices, setDevices] = useState<number[]>([0]);
+  const [device, setDevice] = useState(0);
   const [sampleForm, setSampleForm] = useState<{ fields: Array<Record<string, unknown>>; wording: Record<string, string>; gaps: string[] } | null>(null);
   const [sampleValues, setSampleValues] = useState<Record<string, unknown>>({});
   const tabs = ["Training", "Start", "Captions", "Image Prep", "Samples", "Queue", "History", "Profiler", "Repair Studio", "RefMod Studio", "LoRA the Explorer", "LoRA Royale", "Extract", "Metadata", "Gizmo", "Checkpoint to LoRA", "Preferences"];
@@ -186,6 +188,33 @@ export function App() {
       cancelled = true;
     };
   }, [family]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/devices")
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error("devices failed");
+        }
+        return response.json() as Promise<{ devices?: unknown }>;
+      })
+      .then((body) => {
+        if (cancelled) {
+          return;
+        }
+        const raw = Array.isArray(body.devices) ? body.devices : [];
+        const list = raw.filter((item): item is number => Number.isInteger(item));
+        setDevices(list.length ? list : [0]);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setDevices([0]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     fetch("/api/jobs")
@@ -312,6 +341,7 @@ export function App() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         family,
+        device,
         values: hasFolder ? { ...values, image_folder: folder } : values,
         context: { models: modelPaths, image_folder: folder, ...samplePayload() },
       }),
@@ -333,6 +363,7 @@ export function App() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         family,
+        device,
         values: hasFolder ? { ...values, image_folder: folder } : values,
         confirm,
         context: {
@@ -449,6 +480,14 @@ export function App() {
           <select value={family} onChange={(event) => setFamily(event.target.value)}>
             {FAMILIES.map((item) => (
               <option key={item.id} value={item.id}>{item.name}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          GPU
+          <select value={device} onChange={(event) => setDevice(Number(event.target.value))}>
+            {devices.map((item) => (
+              <option key={item} value={item}>{item}</option>
             ))}
           </select>
         </label>
@@ -602,7 +641,7 @@ export function App() {
           <h2>Monitor</h2>
           {job ? (
             <>
-              <p className="status">{job.status}{job.stage ? ` · ${job.stage}` : ""} · {job.step}/{job.total}{job.loss == null ? "" : ` · loss ${job.loss}`}</p>
+              <p className="status">{job.status}{job.stage ? ` · ${job.stage}` : ""} · {job.step}/{job.total}{job.loss == null ? "" : ` · loss ${job.loss}`}{job.device == null ? "" : ` · GPU ${job.device}`}</p>
               <div className="progress"><div style={{ width: `${fraction * 100}%` }} /></div>
               <div className="controls">
                 <button type="button" onClick={() => control("pause")} disabled={job.status !== "running"}>Pause</button>

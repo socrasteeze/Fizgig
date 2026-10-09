@@ -18,6 +18,7 @@
 | 4 | Access and login | **Decided: no login; reach it over Tailscale.** The server listens on `127.0.0.1` only, and `tailscale serve 8081` publishes it to your tailnet over HTTPS. | Tailscale already decides which devices get in, so a password would only duplicate it. Listening on localhost only means the server is never reachable from the LAN or the internet by accident. |
 | 5 | Server | **Decided: Python with FastAPI + uvicorn**, in a new `requirements-web.txt` | The server must be Python: the trainer, the model descriptions, `launch.plan()`, the progress parser and the workbench engines are all Python. A Node server would have to hand every one of those calls to a Python process anyway. FastAPI is the most widely used async Python framework, so streaming logs is cheap and agents know it well. The separate requirements file leaves upstream's `requirements.txt` untouched. |
 | 6 | Frontend | **Decided: React + TypeScript, built with Vite (npm)** into static files that FastAPI serves | 13 tabs of interactive UI need real components and state. TypeScript gives agent-written code a compile check on every change, and types generated from FastAPI's API description keep the page and server in step. Node runs only for the build, never in production. Forms are still generated from `/api/schema`, so each upstream sync's new families and options appear without hand edits; hand-written forms drift, which is why upstream closed PR #164. |
+| 7 | Autostart | **Decided: no.** Nothing starts Fizgig, or anything else, on its own. | Decided 2026-10-09. No scheduled task, no startup-folder shortcut, no registry Run key, no systemd unit, no service, and no restart-on-failure supervisor. The web server runs only when you run `run_webui.bat` or `run_webui.sh`, or start the Docker container. A queue may still start the next job it already holds. |
 
 ## Keeping the fork mergeable
 
@@ -100,7 +101,7 @@ Sizes are one experienced engineer's time; agent-built speed differs. GPU time f
 | 3a | Batch tools | Profiler, Extract, Metadata, Samples settings | 2-3 weeks |
 | 3b | Interactive workbench | Engine host process; Repair Studio (debounced sliders, early-step frames, clip player as `<video>`), RefMod Studio, LoRA the Explorer (mutation mirrored), LoRA Royale (the crossfade runs in the browser) | 6-10 weeks |
 | 4 | Side tools | Gizmo (ffmpeg clip cutting, recording in the browser, Whisper, scene chop; 5,275 lines of Tk) and the checkpoint-to-LoRA converter | 3-5 weeks |
-| 5 | Running as a service | Windows autostart, a Linux systemd unit, a Docker service mode with Tailscale inside the container (can replace KasmVNC on pods), one queue per GPU set | 1-2 weeks |
+| 5 | Running as a service | A Linux launcher, a Docker mode with Tailscale inside the container (can replace KasmVNC on pods), one queue per GPU. Nothing starts on its own. | 1-2 weeks |
 
 ## Acceptance checks
 

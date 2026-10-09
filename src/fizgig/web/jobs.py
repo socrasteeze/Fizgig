@@ -3,7 +3,7 @@
 Mirrors the desktop pieces named on each function. ``lora_trainer_gui.py`` is not imported.
 Hashes live in ``mirrors.py``.
 
-One run at a time. A stale ``.pause_requested`` and ``.sample_override.json`` are removed
+One run at a time on each device. A stale ``.pause_requested`` and ``.sample_override.json`` are removed
 before a launch. Low disk and a resume already at max epochs are warnings: the client
 sends them back in ``confirm`` to start anyway, which is the desktop's Yes on those dialogs.
 """
@@ -33,6 +33,15 @@ _IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 # LoRATrainerGUI.DISK_WARN_GB
 DISK_WARN_GB = 15
 _ACTIVE = frozenset({"queued", "running"})
+
+
+def _device_index(value) -> int:
+    try:
+        if value is None or value == "":
+            return 0
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 class JobError(Exception):
@@ -193,6 +202,7 @@ def public(job: dict) -> dict:
         "ended": shown.get("ended") or "",
         "output_dir": shown.get("output_dir") or "",
         "kind": shown.get("kind") or "train",
+        "device": _device_index(shown.get("device")),
     }
 
 
@@ -305,8 +315,12 @@ def reconcile() -> None:
         _write(folder, job)
 
 
-def _busy() -> bool:
-    return any(job.get("status") in _ACTIVE for job in _each())
+def _busy(device: int = 0) -> bool:
+    device = _device_index(device)
+    return any(
+        job.get("status") in _ACTIVE and _device_index(job.get("device")) == device
+        for job in _each()
+    )
 
 
 def disk_warning(out_dir: str) -> str | None:
@@ -422,21 +436,25 @@ def _write_plan_files(planned, output: Path) -> None:
         dest.write_text(text, encoding="utf-8")
 
 
-def _engine_blocks() -> None:
-    """A loaded workbench engine holds the GPU lock. The user unloads it first."""
-    from fizgig.web.engine_host import engine_loaded
-    if engine_loaded():
+def _engine_blocks(device: int) -> None:
+    """A loaded engine on this device holds that device's lock. The user unloads it first."""
+    from fizgig.web.engine_host import engine_device, engine_loaded
+    if engine_loaded() and engine_device() == _device_index(device):
         raise JobError(409, {"detail": "An engine is loaded. Unload it before starting a job."})
 
 
-def start(family: str, values: dict, context: dict, confirm: list[str], existing: dict | None = None) -> dict:
-    _engine_blocks()
+def start(
+    family: str, values: dict, context: dict, confirm: list[str],
+    existing: dict | None = None, device: int = 0,
+) -> dict:
+    device = _device_index(device)
+    _engine_blocks(device)
     desc = get_family(family)
     if desc is None:
         raise JobError(404, {"detail": "unknown family"})
-    if _busy():
+    if _busy(device):
         raise JobError(409, {"detail": "a run is already active"})
-    if held():
+    if held(device):
         raise JobError(409, {"detail": "the GPU is in use"})
 
     values = dict(values or {})
@@ -469,16 +487,17 @@ def start(family: str, values: dict, context: dict, confirm: list[str], existing
     stop_file = folder / "STOP"
     if stop_file.is_file():
         stop_file.unlink()
-    _engine_blocks()
-    if _busy():
+    _engine_blocks(device)
+    if _busy(device):
         raise JobError(409, {"detail": "a run is already active"})
-    if held():
+    if held(device):
         raise JobError(409, {"detail": "the GPU is in use"})
     fake = os.environ.get("FIZGIG_WEB_FAKE_TRAINER", "").strip()
     job = {
         "id": job_id,
         "kind": "train",
         "family": family,
+        "device": device,
         "values": values,
         "context": context,
         "plan": {
@@ -511,12 +530,13 @@ def _train_only(job: dict) -> None:
         raise JobError(409, {"detail": "not a training run"})
 
 
-def start_task(kind: str, family: str, values: dict, output_dir: str, before_spawn) -> dict:
+def start_task(kind: str, family: str, values: dict, output_dir: str, before_spawn, device: int = 0) -> dict:
     """A caption, prep, profile or extract job. Same folder, lock, and runner as a training job."""
-    _engine_blocks()
-    if _busy():
+    device = _device_index(device)
+    _engine_blocks(device)
+    if _busy(device):
         raise JobError(409, {"detail": "a run is already active"})
-    if held():
+    if held(device):
         raise JobError(409, {"detail": "the GPU is in use"})
     job_id = uuid.uuid4().hex[:12]
     folder = jobs_root() / job_id
@@ -524,6 +544,7 @@ def start_task(kind: str, family: str, values: dict, output_dir: str, before_spa
         "id": job_id,
         "kind": kind,
         "family": family,
+        "device": device,
         "values": values,
         "context": {},
         "plan": {"summary": [kind], "stages": []},
@@ -540,10 +561,10 @@ def start_task(kind: str, family: str, values: dict, output_dir: str, before_spa
         "output_dir": output_dir,
         "exit_code": None,
     }
-    _engine_blocks()
-    if _busy():
+    _engine_blocks(device)
+    if _busy(device):
         raise JobError(409, {"detail": "a run is already active"})
-    if held():
+    if held(device):
         raise JobError(409, {"detail": "the GPU is in use"})
     _write(folder, job)
     try:
@@ -680,7 +701,10 @@ def resume(job_id: str, confirm: list[str] | None = None) -> dict:
             raise JobError(409, {"detail": f"Paused state directory not found:\n{state_path}"})
         values["RESUME_TRAINING"] = state_path
         context["resuming"] = True
-    return start(job["family"], values, context, list(confirm or []), existing=job)
+    return start(
+        job["family"], values, context, list(confirm or []),
+        existing=job, device=_device_index(job.get("device")),
+    )
 
 
 def stop(job_id: str) -> dict:

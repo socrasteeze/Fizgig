@@ -527,7 +527,8 @@ function PrepPanel({ folder }: { folder: string }) {
 }
 
 function QueuePanel({ queueCurrent }: { queueCurrent: () => Promise<string> }) {
-  const [items, setItems] = useState<Array<{ id: string; family: string; label: string }>>([]);
+  const [items, setItems] = useState<Array<{ id: string; family: string; label: string; device?: number }>>([]);
+  const [devices, setDevices] = useState<number[]>([0]);
   const [error, setError] = useState("");
 
   function reload() {
@@ -535,6 +536,14 @@ function QueuePanel({ queueCurrent }: { queueCurrent: () => Promise<string> }) {
       .then((response) => response.json())
       .then((body) => setItems(body.items))
       .catch(() => setError("queue failed"));
+    fetch("/api/devices")
+      .then((response) => response.json())
+      .then((body) => {
+        const raw = Array.isArray(body.devices) ? body.devices : [];
+        const list = raw.filter((item: number) => Number.isInteger(item));
+        setDevices(list.length ? list : [0]);
+      })
+      .catch(() => setDevices([0]));
   }
 
   useEffect(() => { reload(); }, []);
@@ -552,22 +561,38 @@ function QueuePanel({ queueCurrent }: { queueCurrent: () => Promise<string> }) {
     setItems((await response.json()).items);
   }
 
-  function move(index: number, delta: number) {
-    const next = items.map((item) => item.id);
+  function move(device: number, index: number, delta: number) {
+    const group = items.filter((item) => (item.device ?? 0) === device);
     const target = index + delta;
-    if (target < 0 || target >= next.length) {
+    if (target < 0 || target >= group.length) {
       return;
     }
-    const [id] = next.splice(index, 1);
-    next.splice(target, 0, id);
-    void order(next);
+    const nextGroup = group.slice();
+    const [picked] = nextGroup.splice(index, 1);
+    nextGroup.splice(target, 0, picked);
+    let cursor = 0;
+    const ids = items.map((item) => {
+      if ((item.device ?? 0) !== device) {
+        return item.id;
+      }
+      const id = nextGroup[cursor].id;
+      cursor += 1;
+      return id;
+    });
+    void order(ids);
   }
+
+  const shown = new Set(devices);
+  for (const item of items) {
+    shown.add(item.device ?? 0);
+  }
+  const gpus = Array.from(shown).sort((left, right) => left - right);
 
   return (
     <main>
       <section>
         <h2>Training queue</h2>
-        <p className="help">One GPU job at a time. The next item starts when a training run finishes cleanly. Sample settings come from the Samples tab.</p>
+        <p className="help">Each GPU has its own queue. A run on one GPU does not wait for another. The next item on a GPU starts when a training run on that GPU finishes cleanly. Sample settings come from the Samples tab.</p>
         <div className="controls">
           <button type="button" onClick={() => void queueCurrent().then((message) => { setError(message); reload(); })}>Queue current training form</button>
           <button type="button" onClick={() => void fetch("/api/queue/import", { method: "POST" }).then(async (response) => {
@@ -579,22 +604,36 @@ function QueuePanel({ queueCurrent }: { queueCurrent: () => Promise<string> }) {
             setItems(body.items);
             setError(`Imported ${body.imported}, skipped ${body.skipped}.`);
           })}>Import desktop queue</button>
-          <button type="button" onClick={() => void fetch("/api/queue/advance", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }).then(async (response) => {
-            if (!response.ok) {
-              setError(await readError(response));
-            }
-            reload();
-          })}>Start next</button>
         </div>
         {error ? <p className="error">{error}</p> : null}
-        {items.map((item, index) => (
-          <div key={item.id} className="controls">
-            <span>{index + 1}. {item.label} · {item.family}</span>
-            <button type="button" onClick={() => move(index, -1)}>Up</button>
-            <button type="button" onClick={() => move(index, 1)}>Down</button>
-            <button type="button" onClick={() => void fetch(`/api/queue/${item.id}`, { method: "DELETE" }).then(() => reload())}>Remove</button>
-          </div>
-        ))}
+        {gpus.map((gpu) => {
+          const group = items.filter((item) => (item.device ?? 0) === gpu);
+          return (
+            <div key={gpu}>
+              <h3>GPU {gpu}</h3>
+              <div className="controls">
+                <button type="button" onClick={() => void fetch("/api/queue/advance", {
+                  method: "POST",
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify({ device: gpu }),
+                }).then(async (response) => {
+                  if (!response.ok) {
+                    setError(await readError(response));
+                  }
+                  reload();
+                })}>Start next</button>
+              </div>
+              {group.map((item, index) => (
+                <div key={item.id} className="controls">
+                  <span>{index + 1}. {item.label} · {item.family}</span>
+                  <button type="button" onClick={() => move(gpu, index, -1)}>Up</button>
+                  <button type="button" onClick={() => move(gpu, index, 1)}>Down</button>
+                  <button type="button" onClick={() => void fetch(`/api/queue/${item.id}`, { method: "DELETE" }).then(() => reload())}>Remove</button>
+                </div>
+              ))}
+            </div>
+          );
+        })}
         {items.length === 0 ? <p className="status">The queue is empty.</p> : null}
       </section>
     </main>
