@@ -1,0 +1,87 @@
+/* Desktop palette: the COLORS dict in lora_trainer_gui.py. */
+:root {
+  --bg: #1e2530;
+  --surface: #252d38;
+  --text: #f0f4f8;
+  --secondary: #8a9bae;
+  --explain: #c3cdd9;
+  --accent: #3b82f6;
+  --border: #3a4555;
+  --error: #ef4444;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", sans-serif;
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+main {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 28px 20px 48px;
+}
+
+h1 {
+  margin: 0 0 16px;
+  font-size: 22px;
+  font-weight: 650;
+}
+
+label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--secondary);
+}
+
+select {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+}
+
+.status {
+  color: var(--explain);
+}
+
+.error {
+  color: var(--error);
+}
+
+section {
+  margin-top: 22px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px 8px;
+}
+
+h2 {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+ul {
+  margin: 0;
+  padding: 0 0 8px 18px;
+}
+
+li {
+  margin: 2px 0;
+}
+
+.meta {
+  color: var(--secondary);
+}

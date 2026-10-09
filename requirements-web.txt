@@ -1,0 +1,4 @@
+# Web server and its tests. Kept separate so the desktop requirements file stays untouched.
+fastapi==0.143.0
+uvicorn==0.54.0
+httpx==0.28.1
