@@ -217,7 +217,7 @@ def _render(params: dict, body: dict) -> int:
     if not host.loaded or host.engine_name != "explorer":
         raise JobError(422, {"problems": ["Load a LoRA before rendering."]})
     try:
-        gen = host.render(params, None if body.get("gen") is None else int(body.get("gen")))
+        gen = host.render(params)
     except EngineError as exc:
         raise JobError(422, {"problems": [exc.message]}) from exc
     return gen
@@ -445,16 +445,19 @@ def reset(body: dict) -> dict:
 
 
 def save(body: dict | None = None) -> dict:
-    """``LoRATrainerGUI._explorer_save``: ``save_repaired_lora`` with no donor."""
+    """``LoRATrainerGUI._explorer_save``: the loaded engine's ``save_repaired``, else the file baker."""
     del body
     state = _require_baseline()
     if not _S["primary"]:
         raise JobError(422, {"problems": ["Load a LoRA before saving."]})
     from pathlib import Path
-    from fizgig.repair_studio.bake import save_repaired_lora
-    from fizgig.web.repair import _free, _output_dir
+    from fizgig.web.repair import _free, _output_dir, _refuse_unmapped, engine_bake
     dest = _free(_output_dir() / f"{Path(_S['primary']).stem}_explored.safetensors")
-    summary = save_repaired_lora(str(_S["primary"]), state, str(dest))
+    summary = engine_bake("explorer", state, str(dest), False)
+    if summary is None:
+        _refuse_unmapped(str(_S.get("family") or ""))
+        from fizgig.repair_studio.bake import save_repaired_lora
+        summary = save_repaired_lora(str(_S["primary"]), state, str(dest))
     return {"path": str(dest), "summary": summary}
 
 
@@ -487,6 +490,10 @@ class ExplorerFake:
 
     def unload(self) -> None:
         self.args = {}
+
+    def save_repaired(self, out_path, state, include_donor=True):
+        from fizgig.web.engine_host import FakeEngine
+        return FakeEngine.save_repaired(self, out_path, state, include_donor)
 
     def _sleep(self, delay: float) -> None:
         from fizgig.web.engine_host import Cancelled
@@ -578,6 +585,17 @@ class ExplorerAdapter:
 
     def render(self, _gen: int, params: dict, on_frame) -> dict:
         """``LoRATrainerGUI._explorer_worker``: one preview per state, cache cleared between variants."""
+        from fizgig.web.engine_host import Cancelled
+        try:
+            return self._previews(params, on_frame)
+        except Cancelled:
+            raise
+        except Exception as exc:
+            if type(exc).__name__ in {"RenderCancelled", "PreviewAborted", "SampleAborted"}:
+                raise Cancelled() from exc
+            raise
+
+    def _previews(self, params: dict, on_frame) -> dict:
         import io
         from fizgig.repair_studio.state import SliderState
         from fizgig.web.engine_host import Cancelled

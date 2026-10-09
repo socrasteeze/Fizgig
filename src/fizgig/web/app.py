@@ -11,6 +11,7 @@ import asyncio
 import dataclasses
 import json
 import os
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -28,11 +29,37 @@ _FAMILIES = Path(__file__).resolve().parents[1] / "families"
 _ADVANCED: list | None = None
 
 
+def _queue_loop(stop: threading.Event) -> None:
+    """Continue queued training while this process is serving.
+
+    A finished run can start the next job that is already queued. Closing the
+    browser is not involved. This does not start the server, and it does not
+    start a job nobody queued.
+    """
+    from fizgig.web import jobs
+    from fizgig.web.queue import observe
+
+    while not stop.is_set():
+        try:
+            observe(jobs.list_jobs())
+        except Exception:
+            pass
+        if stop.wait(2.0):
+            return
+
+
 @asynccontextmanager
 async def _lifespan(_app):
-    yield
-    from fizgig.web.engine_host import shutdown
-    shutdown()
+    stop = threading.Event()
+    thread = threading.Thread(target=_queue_loop, args=(stop,), name="fizgig-queue", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=30)
+        from fizgig.web.engine_host import shutdown
+        shutdown()
 
 
 app = FastAPI(title="Fizgig", lifespan=_lifespan)
@@ -49,16 +76,39 @@ def _allowed_names() -> set[str]:
 def _host_name(value: str) -> str:
     text = value.strip().lower()
     if text.startswith("[") and "]" in text:
-        return text[1:text.index("]")]
+        return text[1:text.index("]")].rstrip(".")
     if text.count(":") == 1:
         name, _, port = text.partition(":")
         if port.isdigit():
-            return name
-    return text
+            return name.rstrip(".")
+    return text.rstrip(".")
 
 
-def _origin_name(value: str) -> str:
-    return (urlsplit(value.strip()).hostname or "").lower()
+def _serialized_origin(value: str) -> str:
+    """scheme://host[:port], with a trailing DNS dot removed. Default ports stay omitted."""
+    parts = urlsplit(value.strip())
+    scheme = (parts.scheme or "").lower()
+    host = (parts.hostname or "").lower().rstrip(".")
+    if not scheme or not host:
+        return ""
+    port = parts.port
+    if port is None:
+        return f"{scheme}://{host}"
+    return f"{scheme}://{host}:{port}"
+
+
+def _allowed_origins() -> set[str]:
+    allowed = {
+        f"http://{LOOPBACK}:{PORT}",
+        f"http://localhost:{PORT}",
+    }
+    extra = os.environ.get("FIZGIG_WEB_TAILNET_HOST", "").strip().lower().rstrip(".")
+    if extra:
+        if extra.count(":") == 1 and extra.partition(":")[2].isdigit():
+            allowed.add("https://" + extra)
+        else:
+            allowed.add("https://" + _host_name(extra))
+    return allowed
 
 
 @app.middleware("http")
@@ -68,7 +118,7 @@ async def check_host_origin(request, call_next):
         return JSONResponse({"detail": "forbidden host"}, status_code=403)
     if request.method in _STATE_CHANGING:
         origin = request.headers.get("origin")
-        if origin is not None and _origin_name(origin) not in allowed:
+        if origin is not None and _serialized_origin(origin) not in _allowed_origins():
             return JSONResponse({"detail": "forbidden origin"}, status_code=403)
     return await call_next(request)
 
@@ -367,10 +417,7 @@ def create_job(body: JobCreate):
 @app.get("/api/jobs", response_model=JobList)
 def list_jobs():
     from fizgig.web import jobs
-    from fizgig.web.queue import observe
 
-    rows = jobs.list_jobs()
-    observe(rows)
     return {"jobs": jobs.list_jobs()}
 
 
@@ -438,8 +485,12 @@ def read_devices():
     return {"devices": visible_devices()}
 
 
-def _event_round(seen_status, seen_samples, first):
-    """One SSE snapshot. ``once=1`` on the route returns a single round and closes."""
+def _event_round(seen_status, seen_samples, first, engine_after):
+    """One SSE snapshot. ``once=1`` on the route returns a single round and closes.
+
+    Engine events are a broadcast. ``engine_after`` is this stream's cursor.
+    Reading does not remove events, so another stream still receives them.
+    """
     from fizgig.web import jobs
     from fizgig.web.system import stats
 
@@ -448,12 +499,6 @@ def _event_round(seen_status, seen_samples, first):
         current = jobs.list_jobs()
     except Exception:
         current = []
-    try:
-        from fizgig.web.queue import observe
-        observe(current)
-        current = jobs.list_jobs()
-    except Exception:
-        pass
     for job in current:
         lines.append(f"event: job\ndata: {json.dumps(job)}\n\n")
         progress = {
@@ -481,12 +526,13 @@ def _event_round(seen_status, seen_samples, first):
                 lines.append(f"event: sample\ndata: {json.dumps(body)}\n\n")
     lines.append(f"event: system\ndata: {json.dumps(stats())}\n\n")
     try:
-        from fizgig.web.engine_host import drain
-        for event in drain():
+        from fizgig.web.engine_host import events_since
+        batch, engine_after = events_since(int(engine_after))
+        for event in batch:
             lines.append(f"event: engine\ndata: {json.dumps(event)}\n\n")
     except Exception:
         pass
-    return lines
+    return lines, int(engine_after)
 
 
 @app.get("/api/events")
@@ -494,13 +540,17 @@ async def events(request: Request, once: int = 0):
     """Server-sent events: job, progress, sample, system, notice, engine.
 
     ``once=1`` sends a single round and closes. The page leaves it off and keeps the stream open.
+    The round reads logs and job files, so it runs off the event loop.
     """
     async def stream():
         seen_status = {}
         seen_samples = {}
         first = True
+        engine_after = 0
         while True:
-            for line in _event_round(seen_status, seen_samples, first):
+            lines, engine_after = await asyncio.to_thread(
+                _event_round, seen_status, seen_samples, first, engine_after)
+            for line in lines:
                 yield line
             first = False
             if once:

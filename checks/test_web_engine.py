@@ -34,7 +34,7 @@ class WebEngineTests(unittest.TestCase):
     def setUp(self):
         shutdown()
         self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name)
+        self.root = Path(self._tmp.name).resolve()
         self.output = self.root / "output"
         self.output.mkdir()
         self.images = self.root / "images"
@@ -54,7 +54,7 @@ class WebEngineTests(unittest.TestCase):
                 "FIZGIG_WEB_JOBS", "FIZGIG_PREFS_FILE", "FIZGIG_NO_PERSIST",
                 "FIZGIG_WEB_FAKE_ENGINE", "FIZGIG_WEB_FAKE_STEP", "FIZGIG_WEB_ENGINE_IDLE",
                 "FIZGIG_WEB_FAKE_TRAINER", "FIZGIG_FAKE_STEPS", "FIZGIG_FAKE_SLEEP",
-                "FIZGIG_WEB_PRESET_ROOT",
+                "FIZGIG_WEB_PRESET_ROOT", "FIZGIG_WEB_ROOTS",
             )
         }
         os.environ["FIZGIG_WEB_JOBS"] = str(self.root / "jobs")
@@ -67,6 +67,7 @@ class WebEngineTests(unittest.TestCase):
         os.environ["FIZGIG_FAKE_STEPS"] = "40"
         os.environ["FIZGIG_FAKE_SLEEP"] = "0.1"
         os.environ["FIZGIG_WEB_PRESET_ROOT"] = str(self.root / "presets")
+        os.environ["FIZGIG_WEB_ROOTS"] = str(self.root)
         self._client = TestClient(app, base_url="http://127.0.0.1")
         self.client = self._client.__enter__()
 
@@ -133,16 +134,17 @@ class WebEngineTests(unittest.TestCase):
         host = get_host()
         host.load("repair", "klein", {"primary": str(self.lora)})
         first = host.render({"steps": 6}, gen=1)
-        second = host.render({"steps": 2}, gen=2)
-        self.assertEqual((first, second), (1, 2))
+        second = host.render({"steps": 2}, gen=1)
+        self.assertEqual(second, first + 1)
+        self.assertNotEqual(first, 1)
         seen = []
         self._wait(lambda: seen.extend(host.drain()) or any(
-            item.get("event") == "done" and item.get("gen") == 2 for item in seen))
+            item.get("event") == "done" and item.get("gen") == second for item in seen))
         dones = [item for item in seen if item.get("event") == "done"]
         frames = [item for item in seen if item.get("event") == "frame"]
-        self.assertEqual([item["gen"] for item in dones], [2])
+        self.assertEqual([item["gen"] for item in dones], [second])
         self.assertTrue(frames)
-        self.assertTrue(all(item["gen"] == 2 for item in frames))
+        self.assertTrue(all(item["gen"] == second for item in frames))
 
     def test_idle_unload(self):
         os.environ["FIZGIG_WEB_ENGINE_IDLE"] = "0.35"
@@ -208,6 +210,196 @@ class WebEngineTests(unittest.TestCase):
         self._wait(lambda: not held())
         later = self.client.post("/api/jobs", json={"family": "klein", "values": {}})
         self.assertNotIn("Unload it", later.text)
+
+    def test_events_since_does_not_consume(self):
+        from fizgig.web.engine_host import events_since, get_host
+        shutdown()
+        self.assertEqual(events_since(4), ([], 4))
+        host = get_host()
+        seq = host.publish({"event": "frame", "gen": 3, "_token": "hidden", "private": "hidden"})
+        self.assertEqual(seq, 1)
+        first, cursor = host.events_since(0)
+        second, _again = host.events_since(0)
+        self.assertEqual(first, second)
+        self.assertEqual(cursor, 1)
+        self.assertEqual(first[0]["event"], "frame")
+        self.assertNotIn("_token", first[0])
+        self.assertNotIn("private", first[0])
+        self.assertEqual(host.drain(), first)
+        self.assertEqual(host.drain(), [])
+        self.assertEqual(host.events_since(0)[0], first)
+        for index in range(200):
+            host.publish({"event": "tick", "n": index})
+        batch, _cursor = host.events_since(0)
+        self.assertEqual(len(batch), 200)
+        self.assertNotIn(1, [item.get("seq") for item in batch])
+        host.publish({"event": "old"})
+        host._times[:] = [time.monotonic() - 121] * len(host._times)
+        host.publish({"event": "fresh"})
+        kept = [item.get("event") for item in host.events_since(0)[0]]
+        self.assertNotIn("old", kept)
+        self.assertEqual(kept, ["fresh"])
+
+    def test_stale_render_raises(self):
+        from fizgig.web.engine_host import EngineError, get_host
+        host = get_host()
+        host.request = lambda payload, timeout=30: {"ok": True, "stale": True, "gen": payload.get("gen")}
+        with self.assertRaises(EngineError):
+            host.render({"steps": 1}, gen=9)
+        self.assertFalse(host.busy)
+
+    def test_failed_load_unloads_before_unlock(self):
+        from fizgig.web.engine_host import EngineError, get_host
+        marker = self.root / "unloaded.txt"
+        host = get_host()
+        with self.assertRaises(EngineError):
+            host.load("repair", "klein", {"fail_load": True, "fail_marker": str(marker), "primary": str(self.lora)})
+        self.assertTrue(marker.is_file())
+        self.assertFalse(held())
+        self.assertFalse(host.loaded)
+
+    def test_set_device_refuses_while_a_request_is_in_flight(self):
+        import threading
+        from fizgig.web.engine_host import EngineError, get_host
+        host = get_host()
+        errors = []
+
+        def loader():
+            try:
+                host.load("repair", "klein", {"primary": str(self.lora), "delay": 0.6})
+            except Exception as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=loader)
+        thread.start()
+        self._wait(lambda: bool(host._waiters), timeout=3)
+        with self.assertRaises(EngineError) as caught:
+            host.set_device(1)
+        self.assertIn("busy", caught.exception.message.lower())
+        thread.join(3)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(host.loaded)
+
+    def test_long_load_and_render_are_not_idle_immediately(self):
+        os.environ["FIZGIG_WEB_ENGINE_IDLE"] = "0.25"
+        shutdown()
+        host = get_host()
+        host.load("repair", "klein", {"primary": str(self.lora), "delay": 0.7})
+        time.sleep(0.1)
+        self.assertTrue(host.status()["loaded"])
+        os.environ["FIZGIG_WEB_FAKE_STEP"] = "0.2"
+        shutdown()
+        host = get_host()
+        host.load("repair", "klein", {"primary": str(self.lora)})
+        host.render({"steps": 3})
+        self._wait(lambda: host.busy is False, timeout=5)
+        time.sleep(0.1)
+        self.assertTrue(host.loaded)
+
+    def test_stuck_render_is_not_unloaded(self):
+        from fizgig.web.engine_host import EngineError, get_host
+        marker = self.root / "stuck.txt"
+        host = get_host()
+        host.load("repair", "klein", {"primary": str(self.lora), "stuck_marker": str(marker)})
+        host.render({"stuck": True, "steps": 1})
+        self._wait(lambda: host.busy, timeout=3)
+        started = time.time()
+        try:
+            host.unload()
+        except EngineError:
+            pass
+        self.assertLess(time.time() - started, 20)
+        self.assertFalse(marker.exists())
+        self._wait(lambda: not held(), timeout=5)
+
+    def test_spawn_drops_old_sessions_and_sets_pci_order(self):
+        from fizgig.web import engine_host as hostmod
+        from fizgig.web.jobs import jobs_root
+        old = jobs_root() / "engine" / "old-session"
+        old.mkdir(parents=True)
+        (old / "junk.txt").write_text("x", encoding="utf-8")
+        host = hostmod.get_host()
+        host.load("repair", "klein", {"primary": str(self.lora)})
+        self.assertFalse(old.exists())
+        self.assertTrue(host.session is not None and host.session.is_dir())
+        bare = hostmod.EngineHost()
+        seen = {}
+
+        def spy(*_args, **kwargs):
+            seen["env"] = kwargs.get("env") or {}
+            raise RuntimeError("stop")
+
+        original = hostmod.subprocess.Popen
+        hostmod.subprocess.Popen = spy
+        try:
+            with self.assertRaises(RuntimeError):
+                bare._spawn()
+        finally:
+            hostmod.subprocess.Popen = original
+            if bare._stderr is not None:
+                bare._stderr.close()
+        self.assertEqual(seen["env"].get("CUDA_DEVICE_ORDER"), "PCI_BUS_ID")
+        self.assertEqual(seen["env"].get("CUDA_VISIBLE_DEVICES"), str(bare.device))
+
+    def test_old_preview_files_are_dropped(self):
+        from fizgig.web.engine_host import get_host
+        os.environ["FIZGIG_WEB_FAKE_STEP"] = "0.01"
+        shutdown()
+        host = get_host()
+        host.load("repair", "klein", {"primary": str(self.lora)})
+        gens = []
+        for _ in range(4):
+            gen = host.render({"steps": 1})
+            gens.append(gen)
+            self._wait(lambda gen=gen: any(
+                item.get("event") == "done" and item.get("gen") == gen for item in host.drain()
+            ))
+        folder = host.session
+        self.assertIsNotNone(folder)
+        names = [path.name for path in folder.iterdir()]
+        self.assertFalse(any(name.startswith(f"g{gens[0]}-") for name in names))
+        self.assertTrue(any(name.startswith(f"g{gens[-1]}-") for name in names))
+
+    def test_repair_clip_uses_worker_gen(self):
+        from fizgig.web.engine_host import WorkbenchAdapter, _clip_file
+        folder = self.root / "clips"
+        folder.mkdir()
+        previous = os.environ.get("FIZGIG_WEB_ENGINE_DIR")
+        os.environ["FIZGIG_WEB_ENGINE_DIR"] = str(folder)
+
+        class Img:
+            def save(self, target, format=None):
+                if hasattr(target, "write"):
+                    target.write(b"png")
+                else:
+                    Path(target).write_bytes(b"png")
+
+        try:
+            stale = folder / "g7-clip-frames"
+            stale.mkdir()
+            (stale / "stale.png").write_bytes(b"old")
+            _clip_file([Img()], folder / "g7-clip.mp4", 24)
+            self.assertFalse((stale / "stale.png").exists())
+            self.assertTrue((stale / "f0000.png").is_file())
+
+            class Eng:
+                def baseline_clip(self, state, frames=None, with_audio=False):
+                    return {"middle": Img()}
+
+                def render_clip(self, state, frames=None, with_audio=False, early_step=0, on_early=None):
+                    return {"middle": Img(), "frames": [Img()]}
+
+            adapter = WorkbenchAdapter("repair")
+            adapter.engine = Eng()
+            adapter._repair({"video": True, "state": {}, "fps": 24}, lambda *_args: None, 7)
+            self.assertTrue((folder / "g7-clip-frames" / "f0000.png").is_file())
+            self.assertFalse((folder / "g0-clip.mp4").exists())
+        finally:
+            if previous is None:
+                os.environ.pop("FIZGIG_WEB_ENGINE_DIR", None)
+            else:
+                os.environ["FIZGIG_WEB_ENGINE_DIR"] = previous
 
 
 if __name__ == "__main__":

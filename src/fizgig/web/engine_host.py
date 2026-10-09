@@ -88,6 +88,12 @@ class FakeEngine:
             runpy.run_path(probe, run_name="__main__")
         self.family = family
         self.args = dict(args or {})
+        if self.args.get("fail_load"):
+            self._failed = True
+            raise RuntimeError("load failed")
+        pause = self.args.get("delay")
+        if pause:
+            time.sleep(float(pause))
 
     def request_cancel(self) -> None:
         self._cancel.set()
@@ -96,7 +102,40 @@ class FakeEngine:
         self._cancel.clear()
 
     def unload(self) -> None:
+        marker = str(self.args.get("fail_marker") or "")
+        if marker and getattr(self, "_failed", False):
+            Path(marker).write_text("unloaded", encoding="utf-8")
+        stuck = str(self.args.get("stuck_marker") or "")
+        if stuck:
+            Path(stuck).write_text("unloaded", encoding="utf-8")
         self.args = {}
+
+    def save_repaired(self, out_path, state, include_donor=True) -> dict:
+        """File bake stand-in. No torch. The host calls this through the bake op."""
+        payload = {
+            "engine": True,
+            "prompt": str(getattr(state, "prompt", "") or ""),
+            "primary": str(self.args.get("primary") or self.args.get("lora") or ""),
+            "include_donor": bool(include_donor),
+            "donor": str(self.args.get("donor") or ""),
+        }
+        dest = Path(out_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(json.dumps(payload), encoding="utf-8")
+        return {
+            "dropped_blocks": [],
+            "rescaled_blocks": [],
+            "blended_blocks": [],
+            "keys_in": 1,
+            "keys_out": 1,
+            "donor_path": payload["donor"] if include_donor and payload["donor"] else None,
+            "format_out": "standard",
+            "lycoris_converted": 0,
+            "use_at": 1.0,
+            "strengths_baked": False,
+            "engine": True,
+            "prompt": payload["prompt"],
+        }
 
     def _sleep(self, delay: float) -> None:
         end = time.monotonic() + delay
@@ -106,6 +145,9 @@ class FakeEngine:
             time.sleep(min(0.01, max(0.0, end - time.monotonic())))
 
     def render(self, gen: int, params: dict, on_frame) -> dict:
+        if params.get("stuck"):
+            time.sleep(30)
+            return {"baseline": png(1, 2, 3), "image": png(4, 5, 6), "clip": None}
         if params.get("profile"):
             return self._profile(params, on_frame)
         steps = max(1, int(params.get("steps") or 3))
@@ -199,6 +241,8 @@ def _clip_file(frames, dest: Path, fps: int) -> str | None:
     if not frames:
         return None
     folder = dest.parent / f"{dest.stem}-frames"
+    if folder.exists():
+        shutil.rmtree(folder)
     folder.mkdir(parents=True, exist_ok=True)
     for index, frame in enumerate(frames):
         frame.save(folder / f"f{index:04d}.png")
@@ -277,7 +321,7 @@ class WorkbenchAdapter:
         try:
             if self.kind == "profiler" or params.get("profile"):
                 return self._profile(params, on_frame)
-            return self._repair(params, on_frame)
+            return self._repair(params, on_frame, gen)
         except Cancelled:
             raise
         except Exception as exc:
@@ -289,12 +333,11 @@ class WorkbenchAdapter:
         from fizgig.repair_studio.state import SliderState
         return SliderState.from_json(params.get("state") or {})
 
-    def _repair(self, params: dict, on_frame) -> dict:
+    def _repair(self, params: dict, on_frame, gen: int = 0) -> dict:
         engine = self.engine
         if self.follows and params.get("preview_settings"):
             engine.preview_settings = dict(params["preview_settings"])
         state = self._state(params)
-        self.clear_cancel()
         video = bool(params.get("video")) and hasattr(engine, "render_clip")
         if video:
             early = int(params.get("early_step") or 0)
@@ -308,7 +351,7 @@ class WorkbenchAdapter:
                 state, frames=params.get("frames") or None, with_audio=False,
                 early_step=early, on_early=on_early if early else None,
             )
-            dest = Path(os.environ["FIZGIG_WEB_ENGINE_DIR"]) / f"g{params.get('gen') or 0}-clip.mp4"
+            dest = Path(os.environ["FIZGIG_WEB_ENGINE_DIR"]) / f"g{int(gen)}-clip.mp4"
             clip_name = _clip_file(tweak.get("frames") or [], dest, int(params.get("fps") or 24))
             return {
                 "baseline": _pil_png(base["middle"]),
@@ -360,6 +403,22 @@ class WorkbenchAdapter:
         }
 
 
+def bake_target(engine):
+    """The loaded engine's ``save_repaired``, or None when the file baker should run.
+
+    A wrapper that holds the real engine on ``.engine`` uses that object's method.
+    The wrapper's own method counts only when there is no inner engine.
+    """
+    if engine is None:
+        return None
+    inner = getattr(engine, "engine", None)
+    if inner is not None:
+        found = getattr(inner, "save_repaired", None)
+        return found if callable(found) else None
+    found = getattr(engine, "save_repaired", None)
+    return found if callable(found) else None
+
+
 def make_engine(kind: str):
     if kind not in ENGINES:
         raise RuntimeError(f"unknown engine {kind}")
@@ -405,6 +464,8 @@ class Worker:
             self._cancel(msg)
         elif op == "unload":
             self._unload(msg)
+        elif op == "bake":
+            self._bake(msg)
         elif op == "status":
             self._status(msg)
         else:
@@ -424,21 +485,37 @@ class Worker:
         if lock is not None:
             lock.release()
 
-    def _wait_idle(self, timeout: float = 10) -> None:
+    def _wait_idle(self, timeout: float = 10) -> bool:
+        """True once the render loop has left the engine. False if it is still inside."""
         end = time.monotonic() + timeout
-        while time.monotonic() < end:
+        while True:
             with self.wake:
                 if not self.busy and self.pending is None:
-                    return
+                    return True
+            if time.monotonic() >= end:
+                return False
             time.sleep(0.01)
+
+    def _abort_stuck(self, msg: dict, op: str) -> None:
+        """The render ignored cancel. Die without unloading or dropping the GPU lock."""
+        self.emit({
+            "id": msg.get("id"), "op": op, "ok": False, "error": "the render did not stop",
+        })
+        try:
+            sys.stdout.flush()
+        except Exception:
+            pass
+        os._exit(1)
 
     def _load(self, msg: dict) -> None:
         with self.wake:
             self.gen += 1
+            load_gen = self.gen
             if self.engine is not None:
                 self.engine.request_cancel()
             self.pending = None
-        self._wait_idle()
+        if not self._wait_idle():
+            self._abort_stuck(msg, "load")
         if self.engine is not None:
             try:
                 self.engine.unload()
@@ -449,6 +526,7 @@ class Worker:
         kind = str(msg.get("engine") or "")
         family = str(msg.get("family") or "")
         self.emit({"event": "loading", "engine": kind, "family": family})
+        engine = None
         try:
             engine = make_engine(kind)
             if not self._acquire():
@@ -456,14 +534,22 @@ class Worker:
                 return
             engine.load(family, msg.get("args") or {})
         except Exception as exc:
+            if engine is not None:
+                try:
+                    engine.unload()
+                except Exception:
+                    pass
             self._release()
-            self.emit({"id": msg.get("id"), "op": "load", "ok": False, "error": str(exc)})
+            self.emit({"id": msg.get("id"), "op": "load", "ok": False, "error": str(exc), "gen": load_gen})
             self.emit({"event": "error", "message": str(exc)})
             return
         self.engine = engine
         self.kind = kind
         self.family = family
-        self.emit({"id": msg.get("id"), "op": "load", "ok": True, "engine": kind, "family": family})
+        self.emit({
+            "id": msg.get("id"), "op": "load", "ok": True,
+            "engine": kind, "family": family, "gen": load_gen,
+        })
 
     def _accept_render(self, msg: dict) -> None:
         gen = int(msg.get("gen") or 0)
@@ -490,10 +576,12 @@ class Worker:
     def _unload(self, msg: dict) -> None:
         with self.wake:
             self.gen += 1
+            unload_gen = self.gen
             if self.engine is not None:
                 self.engine.request_cancel()
             self.pending = None
-        self._wait_idle()
+        if not self._wait_idle():
+            self._abort_stuck(msg, "unload")
         if self.engine is not None:
             try:
                 self.engine.unload()
@@ -503,8 +591,30 @@ class Worker:
         self._release()
         self.kind = ""
         self.family = ""
-        self.emit({"id": msg.get("id"), "op": "unload", "ok": True})
+        self.emit({"id": msg.get("id"), "op": "unload", "ok": True, "gen": unload_gen})
         self.emit({"event": "unloaded"})
+
+    def _bake(self, msg: dict) -> None:
+        if not self._wait_idle():
+            self.emit({"id": msg.get("id"), "op": "bake", "ok": False, "error": "the engine is busy"})
+            return
+        save = bake_target(self.engine)
+        if save is None:
+            self.emit({
+                "id": msg.get("id"), "op": "bake", "ok": False, "fallback": True,
+                "error": "no save_repaired",
+            })
+            return
+        try:
+            from fizgig.repair_studio.state import SliderState
+            raw = msg.get("state") if isinstance(msg.get("state"), dict) else {}
+            state = SliderState.from_json(raw)
+            dest = str(msg.get("dest") or "")
+            summary = save(dest, state, include_donor=bool(msg.get("include_donor")))
+        except Exception as exc:
+            self.emit({"id": msg.get("id"), "op": "bake", "ok": False, "error": str(exc)})
+            return
+        self.emit({"id": msg.get("id"), "op": "bake", "ok": True, "summary": summary, "path": dest})
 
     def _status(self, msg: dict) -> None:
         from fizgig.gpu_lock import device_index
@@ -557,6 +667,7 @@ class Worker:
                     if data:
                         name = f"g{_gen}-s{int(step)}.png"
                         (self.out_dir / name).write_bytes(data)
+                        self._drop_old_previews(_gen)
                     self.emit({
                         "event": "frame", "gen": _gen, "step": int(step), "total": int(total),
                         "file": name, "side": side,
@@ -582,6 +693,7 @@ class Worker:
                     done["profile"] = result["profile"]
                 if result.get("records") is not None:
                     done["records"] = result["records"]
+                self._drop_old_previews(gen)
                 self.emit(done)
             except Cancelled:
                 self.emit({"event": "cancelled", "gen": gen})
@@ -589,8 +701,33 @@ class Worker:
                 self.emit({"event": "error", "gen": gen, "message": str(exc)})
             finally:
                 with self.wake:
-                    if gen == self.gen:
+                    if self.pending is None:
                         self.busy = False
+
+    def _drop_old_previews(self, gen: int) -> None:
+        """Drop preview files from gens older than the latest few."""
+        import shutil
+        floor = int(gen) - 3
+        if floor < 1:
+            return
+        try:
+            names = list(self.out_dir.iterdir())
+        except OSError:
+            return
+        for path in names:
+            name = path.name
+            if not name.startswith("g"):
+                continue
+            head, sep, _rest = name[1:].partition("-")
+            if not sep or not head.isdigit() or int(head) > floor:
+                continue
+            try:
+                if path.is_dir():
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    path.unlink()
+            except OSError:
+                pass
 
     def shutdown(self) -> None:
         self.stop = True
@@ -600,7 +737,8 @@ class Worker:
                 self.engine.request_cancel()
             self.pending = None
             self.wake.notify()
-        self._wait_idle(2)
+        if not self._wait_idle(2):
+            os._exit(0)
         if self.engine is not None:
             try:
                 self.engine.unload()
@@ -649,10 +787,13 @@ class EngineHost:
         self.profile: dict | None = None
         self.last = time.monotonic()
         self._next_id = 1
+        self._seq = 0
+        self._times: list[float] = []
+        self._drain_at = 0
         self.device = 0
         self._replies: dict[int, dict] = {}
         self._waiters: dict[int, threading.Event] = {}
-        self._state = threading.Lock()
+        self._state = threading.RLock()
         self._io = threading.Lock()
         self._stop = threading.Event()
         self._announced = False
@@ -663,6 +804,8 @@ class EngineHost:
         """Use this card for the next worker. A loaded engine stays where it is."""
         index = int(index)
         with self._state:
+            if self._waiters or self.busy:
+                raise EngineError("The engine is busy. Wait for it to finish before changing the device.")
             if self.loaded:
                 raise EngineError("An engine is loaded. Unload it before changing the device.")
             if index == int(self.device):
@@ -670,13 +813,14 @@ class EngineHost:
             self.device = index
             proc = self.proc
             self.proc = None
-        if proc is None:
-            return
-        if proc.poll() is None:
+            waiters = list(self._waiters.values())
+        if proc is not None and proc.poll() is None:
             try:
                 proc.terminate()
             except OSError:
                 pass
+            for waiter in waiters:
+                waiter.set()
         self._reap(proc)
 
     def _jobs_root(self) -> Path:
@@ -714,7 +858,7 @@ class EngineHost:
                 self.busy = False
                 self.engine_name = ""
                 self.restarted = True
-                self.events.append({
+                self.publish({
                     "event": "error",
                     "message": "The engine worker stopped. It will start again on the next request.",
                     "restarted": True,
@@ -733,12 +877,20 @@ class EngineHost:
             except Exception:
                 pass
             self._stderr = None
-        self.session = self._jobs_root() / "engine" / uuid.uuid4().hex[:12]
+        import shutil
+        root = self._jobs_root() / "engine"
+        root.mkdir(parents=True, exist_ok=True)
+        self.session = root / uuid.uuid4().hex[:12]
         self.session.mkdir(parents=True, exist_ok=True)
+        for child in list(root.iterdir()):
+            if child == self.session or not child.is_dir():
+                continue
+            shutil.rmtree(child, ignore_errors=True)
         env = os.environ.copy()
         env["FIZGIG_WEB_ENGINE_DIR"] = str(self.session)
         env["PYTHONUNBUFFERED"] = "1"
         env["CUDA_VISIBLE_DEVICES"] = str(self.device)
+        env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         src = str(Path(__file__).resolve().parents[2])
         previous = env.get("PYTHONPATH") or ""
         env["PYTHONPATH"] = src + (os.pathsep + previous if previous else "")
@@ -812,14 +964,17 @@ class EngineHost:
             else:
                 if event:
                     shown = self._public(msg)
-                    self.events.append(shown)
+                    self.publish(shown)
+                    stored = self.events[-1] if self.events else shown
                     if event == "done" and gen == self.latest:
                         self.busy = False
-                        self.result = shown
-                        if shown.get("profile"):
-                            self.profile = shown["profile"]
+                        self.result = stored
+                        if stored.get("profile"):
+                            self.profile = stored["profile"]
+                        self._touch()
                     elif event in {"cancelled", "error"} and (gen is None or gen == self.latest):
                         self.busy = False
+                        self._touch()
                     elif event == "unloaded":
                         self.loaded = False
                         self.busy = False
@@ -884,23 +1039,40 @@ class EngineHost:
         self.args = dict(args or {})
         self.restarted = False
         self.busy = False
+        self._note_gen(reply.get("gen"))
+        self._touch()
         return reply
 
+    def _note_gen(self, gen) -> None:
+        if gen is None:
+            return
+        try:
+            number = int(gen)
+        except (TypeError, ValueError):
+            return
+        if number > self.latest:
+            self.latest = number
+
     def render(self, params: dict, gen: int | None = None) -> int:
+        """The host assigns the gen. A client counter is ignored."""
+        del gen
         self._touch()
-        if gen is None or int(gen) > self.latest:
-            gen = int(gen or 0) or self.latest + 1
-            if gen <= self.latest:
-                gen = self.latest + 1
-            self.latest = int(gen)
+        with self._state:
+            gen = self.latest + 1
+            self.latest = gen
             self.busy = True
-        else:
-            gen = int(gen)
-        reply = self.request({"op": "render", "gen": gen, "params": params}, timeout=30)
-        if not reply.get("ok"):
-            if gen == self.latest:
-                self.busy = False
-            raise EngineError(str(reply.get("error") or "render failed"))
+        try:
+            reply = self.request({"op": "render", "gen": gen, "params": params}, timeout=30)
+        except Exception:
+            with self._state:
+                if self.latest == gen:
+                    self.busy = False
+            raise
+        if not reply.get("ok") or reply.get("stale"):
+            with self._state:
+                if self.latest == gen:
+                    self.busy = False
+            raise EngineError(str(reply.get("error") or "That render is out of date."))
         return int(gen)
 
     def cancel(self, gen: int = 0) -> dict:
@@ -920,6 +1092,7 @@ class EngineHost:
         self.loaded = False
         self.busy = False
         self.engine_name = ""
+        self._note_gen(reply.get("gen"))
         return reply
 
     def status(self) -> dict:
@@ -940,10 +1113,49 @@ class EngineHost:
             reply["device"] = self.device
         return reply
 
+    def publish(self, event: dict) -> int:
+        """Store one event under the next seq. Keys that start with ``_`` are not readable."""
+        with self._state:
+            self._seq += 1
+            shown = {
+                key: value for key, value in dict(event).items()
+                if not (isinstance(key, str) and (key.startswith("_") or key == "private"))
+            }
+            shown["seq"] = self._seq
+            now = time.monotonic()
+            self.events.append(shown)
+            self._times.append(now)
+            self._prune(now)
+            return self._seq
+
+    def _prune(self, now: float) -> None:
+        keep = 0
+        for index, stamp in enumerate(self._times):
+            if now - stamp <= 120:
+                keep = index
+                break
+        else:
+            keep = len(self._times)
+        if len(self.events) - keep > 200:
+            keep = len(self.events) - 200
+        if keep > 0:
+            del self.events[:keep]
+            del self._times[:keep]
+
+    def events_since(self, after: int = 0) -> tuple[list[dict], int]:
+        """Events with seq greater than ``after``, and the newest of those seqs.
+
+        Does not remove events. The cursor stays ``after`` when nothing is newer.
+        """
+        with self._state:
+            after = int(after)
+            found = [item for item in self.events if int(item.get("seq") or 0) > after]
+            cursor = int(found[-1]["seq"]) if found else after
+            return found, cursor
+
     def drain(self) -> list[dict]:
         with self._state:
-            found = list(self.events)
-            self.events.clear()
+            found, self._drain_at = self.events_since(self._drain_at)
             return found
 
     def close(self) -> None:
@@ -998,6 +1210,13 @@ def drain() -> list[dict]:
     if _HOST is None:
         return []
     return _HOST.drain()
+
+
+def events_since(after: int = 0) -> tuple[list[dict], int]:
+    """Events newer than ``after`` on the global host. ``([], after)`` when there is no host."""
+    if _HOST is None:
+        return [], int(after)
+    return _HOST.events_since(after)
 
 
 def shutdown() -> None:

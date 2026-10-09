@@ -162,6 +162,17 @@ class WebConvertTests(unittest.TestCase):
             })
             self.assertEqual(denied.status_code, 403, denied.text)
 
+    def test_output_name_cannot_escape(self):
+        for name in ("C:extracted", "a<b", "quote\"x", "star*"):
+            denied = self.client.post("/api/convert/jobs", json={
+                "base": str(self.base),
+                "tuned": str(self.tuned),
+                "ranks": [32],
+                "name": name,
+            })
+            self.assertEqual(denied.status_code, 422, denied.text)
+        self.assertEqual(list(self.output.iterdir()), [])
+
 
 if __name__ == "__main__":
     unittest.main()

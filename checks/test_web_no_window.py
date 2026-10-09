@@ -69,6 +69,7 @@ _ENV_KEYS = (
     "FIZGIG_CONSOLE_RESULT",
     "FIZGIG_NO_PERSIST",
     "FIZGIG_PREFS_FILE",
+    "FIZGIG_WEB_ROOTS",
 )
 
 
@@ -180,6 +181,7 @@ class NoWindowTests(unittest.TestCase):
             os.environ["FIZGIG_WEB_JOBS"] = str(root / "jobs")
             os.environ["FIZGIG_NO_PERSIST"] = "1"
             os.environ["FIZGIG_PREFS_FILE"] = str(root / "prefs.json")
+            os.environ["FIZGIG_WEB_ROOTS"] = str(root)
             os.environ["FIZGIG_WEB_FAKE_TRAINER"] = str(stage)
             os.environ["FIZGIG_CONSOLE_CHILD"] = str(child)
             os.environ["FIZGIG_WEB_FAKE_ENGINE"] = "1"

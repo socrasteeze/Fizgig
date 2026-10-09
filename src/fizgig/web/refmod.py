@@ -195,7 +195,6 @@ class RefmodEngine:
             if _early:
                 on_frame(int(step), int(total), _png_bytes(image), "early")
 
-        self.clear_cancel()
         self._sync_lora(lora)
         if self._cancel.is_set():
             raise Cancelled()
@@ -524,11 +523,12 @@ def _preset_name(name: str) -> str:
 
 def _gpu_free() -> None:
     from fizgig.gpu_lock import held
-    from fizgig.web.engine_host import engine_loaded
+    from fizgig.web.engine_host import engine_device, engine_loaded
     from fizgig.web.jobs import _busy
     if engine_loaded():
         return
-    if _busy() or held():
+    device = engine_device()
+    if _busy(device) or held(device):
         raise JobError(409, {"detail": _GPU_BUSY})
 
 
@@ -667,7 +667,7 @@ def render(body: dict) -> dict:
     state["early_step"] = early_step
     params = {"steps": steps, "early_step": early_step, "setup": state, "video": True}
     try:
-        gen = host.render(params, None if body.get("gen") is None else int(body.get("gen")))
+        gen = host.render(params)
     except (EngineError, TypeError, ValueError) as exc:
         message = exc.message if isinstance(exc, EngineError) else str(exc)
         raise JobError(422, {"problems": [message]}) from exc

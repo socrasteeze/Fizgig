@@ -242,6 +242,7 @@ export interface paths {
          * @description Server-sent events: job, progress, sample, system, notice, engine.
          *
          *     ``once=1`` sends a single round and closes. The page leaves it off and keeps the stream open.
+         *     The round reads logs and job files, so it runs off the event loop.
          */
         get: operations["events_api_events_get"];
         put?: never;

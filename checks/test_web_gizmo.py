@@ -6,6 +6,7 @@ import starts Tk). ffmpeg is not started except one skipped-if-missing export.
     python -m unittest checks.test_web_gizmo -v
 """
 import ast
+import io
 import json
 import os
 import re
@@ -316,6 +317,31 @@ class WebGizmoTests(unittest.TestCase):
                     "-ss", "1.250", "-t", "2.500", "-i", "in.mp4",
                     "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "out.wav"]
         self.assertEqual(got, expected)
+
+    def test_upload_conflicts_unless_overwrite(self):
+        first = self.client.post(
+            "/api/gizmo/upload",
+            data={"dest": str(self.output)},
+            files={"file": ("clip.mp4", b"first-clip", "video/mp4")},
+        )
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual((self.output / "clip.mp4").read_bytes(), b"first-clip")
+        again = self.client.post(
+            "/api/gizmo/upload",
+            data={"dest": str(self.output)},
+            files={"file": ("clip.mp4", b"second-clip", "video/mp4")},
+        )
+        self.assertEqual(again.status_code, 409, again.text)
+        self.assertIn("clip.mp4", again.text)
+        self.assertEqual((self.output / "clip.mp4").read_bytes(), b"first-clip")
+
+        class _Upload:
+            filename = "clip.mp4"
+            file = io.BytesIO(b"replaced-clip")
+
+        written = web_gizmo.upload_source(str(self.output), _Upload(), overwrite=True)
+        self.assertEqual(written["written"], ["clip.mp4"])
+        self.assertEqual((self.output / "clip.mp4").read_bytes(), b"replaced-clip")
 
 
 if __name__ == "__main__":

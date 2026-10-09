@@ -75,6 +75,9 @@ class WebMediaTests(unittest.TestCase):
             denied = self.client.get("/api/gizmo/media", params={"path": str(stray)})
             self.assertEqual(denied.status_code, 403, denied.text)
 
+        unc = self.client.get("/api/gizmo/media", params={"path": "//no-such/share/clip.mp4"})
+        self.assertEqual(unc.status_code, 403, unc.text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -20,12 +20,11 @@ async function readError(response: Response): Promise<string> {
 }
 
 async function poll(id: string): Promise<string> {
-  for (let attempt = 0; attempt < 80; attempt += 1) {
+  for (;;) {
     const body = await fetch(`/api/jobs/${id}`).then((response) => response.json()) as { status?: string };
     if (body.status === "done" || body.status === "failed" || body.status === "stopped") return body.status;
     await new Promise((resolve) => window.setTimeout(resolve, 250));
   }
-  return "timeout";
 }
 
 function join(folder: string, leaf: string): string {

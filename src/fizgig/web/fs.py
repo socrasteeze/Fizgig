@@ -52,6 +52,83 @@ def _dotdot(text: str) -> bool:
     return any(part == ".." for part in text.replace("\\", "/").split("/"))
 
 
+def _unc_or_device(text: str) -> bool:
+    """UNC (``//``, ``\\``) and device paths (``\\\\?\\``, ``\\\\.\\``)."""
+    raw = (text or "").strip()
+    slash = raw.replace("\\", "/")
+    return slash.startswith("//")
+
+
+def _client_text(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw or _dotdot(raw) or _unc_or_device(raw):
+        raise JobError(403, {"detail": "path is outside the configured roots"})
+    return raw
+
+
+def _norm_abs(path) -> str:
+    return os.path.normcase(os.path.abspath(os.fspath(path)))
+
+
+def _prefix(place: str, root_place: str) -> bool:
+    if place == root_place:
+        return True
+    if not root_place.endswith(os.sep):
+        root_place += os.sep
+    return place.startswith(root_place)
+
+
+def _win_aliases(path: Path) -> set[str]:
+    """Short and long names of a trusted root. Does not touch the client path."""
+    if os.name != "nt":
+        return set()
+    found: set[str] = set()
+    try:
+        import ctypes
+        kernel = ctypes.windll.kernel32
+        buf = ctypes.create_unicode_buffer(32768)
+        target = os.fspath(path)
+        for getter in (kernel.GetShortPathNameW, kernel.GetLongPathNameW):
+            length = getter(target, buf, len(buf))
+            if length and length < len(buf):
+                found.add(os.path.normcase(buf.value))
+    except (OSError, AttributeError):
+        return found
+    return found
+
+
+# Lexical spellings of each resolved root: the path as configured, plus its
+# short and long names. A client path is compared to these before any stat.
+_PLACES: dict[str, set[str]] = {}
+
+
+def _places_for(root: Path) -> set[str]:
+    key = _norm_abs(root)
+    places = _PLACES.get(key)
+    if places is None:
+        places = {key}
+        places.update(_win_aliases(root))
+        _PLACES[key] = places
+    return places
+
+
+def _remember(resolved: Path, raw: Path) -> None:
+    key = _norm_abs(resolved)
+    places = _PLACES.setdefault(key, {key})
+    places.add(_norm_abs(raw))
+    places.update(_win_aliases(resolved))
+
+
+def _lexical_inside(path: Path, root: Path) -> bool:
+    """``normcase`` of ``abspath`` under a root spelling. No stat of ``path``."""
+    place = _norm_abs(path)
+    return any(_prefix(place, cand) for cand in _places_for(root))
+
+
+def _lexically_under(path: Path, roots: list[Path]) -> bool:
+    return any(_lexical_inside(path, root) for root in roots)
+
+
 def _inside(path: Path, root: Path) -> bool:
     try:
         path.resolve().relative_to(root.resolve())
@@ -73,6 +150,7 @@ def _add(found: list[Path], raw) -> None:
         resolved = path.resolve()
     except OSError:
         return
+    _remember(resolved, path)
     if resolved not in found:
         found.append(resolved)
 
@@ -132,10 +210,19 @@ def output_roots() -> list[Path]:
     found: list[Path] = []
     _add(found, prefs.get("lora_output_dir"))
     _add(found, prefs.get("profiles_dir"))
+    for part in os.environ.get("FIZGIG_WEB_ROOTS", "").split(";"):
+        _add(found, part.strip())
+    configured = list(found)
     from fizgig.web.jobs import _each
 
     for job in _each():
-        _add(found, job.get("output_dir"))
+        raw = str(job.get("output_dir") or "").strip()
+        if not raw or _dotdot(raw) or _unc_or_device(raw):
+            continue
+        path = Path(raw)
+        if not _lexically_under(path, configured):
+            continue
+        _add(found, path)
     return found
 
 
@@ -202,13 +289,50 @@ def _has_link(path: Path, roots: list[Path]) -> bool:
 def resolve_dir(text: str, roots: list[Path] | None = None) -> Path:
     """An existing directory inside ``roots`` (all roots when omitted)."""
     roots = all_roots() if roots is None else roots
-    raw = (text or "").strip()
-    if not raw or _dotdot(raw):
+    path = Path(_client_text(text))
+    if not _lexically_under(path, roots):
         raise JobError(403, {"detail": "path is outside the configured roots"})
-    path = Path(raw)
     if not path.is_dir() or _has_link(path, roots) or not _under(path, roots):
         raise JobError(403, {"detail": "path is outside the configured roots"})
     return path.resolve()
+
+
+def resolve_new_dir(text: str, roots: list[Path] | None = None) -> Path:
+    """A directory inside ``roots``. The leaf may not exist yet; its parent must."""
+    roots = all_roots() if roots is None else roots
+    path = Path(_client_text(text))
+    if not _lexically_under(path, roots):
+        raise JobError(403, {"detail": "path is outside the configured roots"})
+    if _linked(path):
+        raise JobError(403, {"detail": "path is outside the configured roots"})
+    if path.is_dir():
+        if _has_link(path, roots) or not _under(path, roots):
+            raise JobError(403, {"detail": "path is outside the configured roots"})
+        return path.resolve()
+    if path.exists():
+        raise JobError(403, {"detail": "path is outside the configured roots"})
+    parent = resolve_dir(str(path.parent), roots)
+    return parent / path.name
+
+
+def resolve_unmade(text: str, roots: list[Path] | None = None) -> Path:
+    """A path whose place is inside ``roots``. The file and its parent may not exist."""
+    roots = all_roots() if roots is None else roots
+    path = Path(_client_text(text))
+    if not _lexically_under(path, roots):
+        raise JobError(403, {"detail": "path is outside the configured roots"})
+    tail: list[str] = []
+    cursor = path
+    while not cursor.exists():
+        parent = cursor.parent
+        if parent == cursor:
+            return Path(os.path.abspath(path))
+        tail.append(cursor.name)
+        cursor = parent
+    base = cursor.resolve()
+    for name in reversed(tail):
+        base = base / name
+    return base
 
 
 def listing(text: str) -> dict:
@@ -241,6 +365,11 @@ def listing(text: str) -> dict:
     return {"path": str(path), "parent": parent, "entries": entries}
 
 
+_DEVICE_NAMES = {"CON", "PRN", "AUX", "NUL"}
+_DEVICE_NAMES.update(f"COM{i}" for i in range(1, 10))
+_DEVICE_NAMES.update(f"LPT{i}" for i in range(1, 10))
+
+
 def _safe_leaf(name: str) -> str:
     text = (name or "").replace("\\", "/")
     leaf = text.split("/")[-1]
@@ -248,7 +377,22 @@ def _safe_leaf(name: str) -> str:
         raise JobError(422, {"problems": [f"unsafe name: {name}"]})
     if any(ord(char) < 32 or char in '<>:"|?*' for char in leaf):
         raise JobError(422, {"problems": [f"unsafe name: {name}"]})
+    stem = leaf.split(".", 1)[0].rstrip(" ")
+    if stem.upper() in _DEVICE_NAMES:
+        raise JobError(422, {"problems": [f"unsafe name: {name}"]})
     return leaf
+
+
+def _zip_junk(raw_name: str) -> bool:
+    parts = [part for part in raw_name.split("/") if part not in {"", "."}]
+    if any(part == "__MACOSX" for part in parts):
+        return True
+    leaf = parts[-1] if parts else ""
+    return leaf == ".DS_Store" or leaf.startswith("._")
+
+
+def _leaf_key(name: str) -> str:
+    return os.path.normcase(name) if os.name == "nt" else name
 
 
 def _read_limited(upload, limit: int, used: int) -> bytes:
@@ -282,6 +426,8 @@ def upload(dest: str, files, archive, overwrite: bool) -> dict:
                 if info.is_dir():
                     continue
                 raw_name = info.filename.replace("\\", "/")
+                if _zip_junk(raw_name):
+                    continue
                 if raw_name.startswith("/") or _dotdot(raw_name) or ":" in raw_name.split("/")[0]:
                     raise JobError(422, {"problems": [f"unsafe zip entry: {info.filename}"]})
                 leaf = _safe_leaf(Path(raw_name).name)
@@ -302,11 +448,12 @@ def upload(dest: str, files, archive, overwrite: bool) -> dict:
     seen: set[str] = set()
     duplicates: list[str] = []
     for name, _data in planned:
-        if name in seen:
+        key = _leaf_key(name)
+        if key in seen:
             if name not in duplicates:
                 duplicates.append(name)
         else:
-            seen.add(name)
+            seen.add(key)
     if duplicates:
         raise JobError(422, {"problems": [f"duplicate name: {name}" for name in duplicates]})
     conflicts = [name for name, _data in planned if (folder / name).exists()]
@@ -327,13 +474,12 @@ def resolve_file(text: str, suffix: str, roots: list[Path] | None = None) -> Pat
 
     ``suffix`` is required when it is not empty (``.safetensors``, ``.html``).
     """
-    raw = (text or "").strip()
-    if not raw or _dotdot(raw):
-        raise JobError(403, {"detail": "path is outside the configured roots"})
-    path = Path(raw)
+    path = Path(_client_text(text))
     if suffix and path.suffix.lower() != suffix.lower():
         raise JobError(422, {"problems": [f"not a {suffix} file"]})
     roots = all_roots() if roots is None else roots
+    if not _lexically_under(path, roots):
+        raise JobError(403, {"detail": "path is outside the configured roots"})
     if not path.is_file() or _has_link(path, roots) or not _under(path, roots):
         raise JobError(403, {"detail": "path is outside the configured roots"})
     return path.resolve()
@@ -347,26 +493,24 @@ def engine_file(text: str) -> Path:
     from fizgig.web.jobs import jobs_root
 
     root = jobs_root() / "engine"
-    raw = (text or "").strip()
-    if not raw or _dotdot(raw):
-        raise JobError(403, {"detail": "path is outside the configured roots"})
-    path = Path(raw)
+    path = Path(_client_text(text))
     if path.suffix.lower() not in _ENGINE_SUFFIXES:
         raise JobError(404, {"detail": "no such file"})
     roots = [root]
+    if not _lexically_under(path, roots):
+        raise JobError(403, {"detail": "path is outside the configured roots"})
     if not root.is_dir() or not path.is_file() or _has_link(path, roots) or not _under(path, roots):
         raise JobError(403, {"detail": "path is outside the configured roots"})
     return path.resolve()
 
 
 def lora_file(text: str) -> Path:
-    raw = (text or "").strip()
-    if not raw or _dotdot(raw):
-        raise JobError(403, {"detail": "path is outside the configured roots"})
-    path = Path(raw)
+    path = Path(_client_text(text))
     if path.suffix.lower() != ".safetensors":
         raise JobError(404, {"detail": "no such file"})
     roots = output_roots()
+    if not _lexically_under(path, roots):
+        raise JobError(403, {"detail": "path is outside the configured roots"})
     if not path.is_file() or _has_link(path, roots) or not _under(path, roots):
         raise JobError(403, {"detail": "path is outside the configured roots"})
     return path.resolve()

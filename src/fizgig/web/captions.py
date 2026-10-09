@@ -6,6 +6,7 @@ FAIL, STOPPED, DONE, QUIT). Settings follow the Captions tab. Static captions fo
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import sys
@@ -34,9 +35,60 @@ _VIDEO = {".mp4"}
 
 
 def _qwen_path() -> str:
+    """The Krea 2 text-encoder file when it is set and on disk, else ``""``."""
     from fizgig.web.prefs import roots_from_prefs
 
-    return str(roots_from_prefs().get("krea2_text_encoder") or "").strip()
+    path = str(roots_from_prefs().get("krea2_text_encoder") or "").strip()
+    if path and os.path.isfile(path):
+        return path
+    return ""
+
+
+def _eval_strings(node, names: dict) -> str:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name):
+        return names[node.id]
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _eval_strings(node.left, names) + _eval_strings(node.right, names)
+    raise ValueError("not a string expression")
+
+
+_BUILTIN_INSTRUCTION: str | None = None
+
+
+def _builtin_training_instruction() -> str:
+    """The desktop training-caption instruction. ``embedder`` imports torch, so parse it."""
+    global _BUILTIN_INSTRUCTION
+    if _BUILTIN_INSTRUCTION is not None:
+        return _BUILTIN_INSTRUCTION
+    path = Path(__file__).resolve().parents[1] / "krea2" / "embedder.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    names: dict[str, str] = {}
+    wanted = {"SUBJECT_RULE", "NO_PREAMBLE_RULE", "CAPTION_INSTRUCTION"}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if isinstance(target, ast.Name) and target.id in wanted:
+            names[target.id] = _eval_strings(node.value, names)
+    _BUILTIN_INSTRUCTION = names["CAPTION_INSTRUCTION"]
+    return _BUILTIN_INSTRUCTION
+
+
+def _default_instruction() -> str:
+    from fizgig.web.prefs import roots_from_prefs
+
+    raw = roots_from_prefs().get("caption_qwen_instructions")
+    if isinstance(raw, dict):
+        saved = str(raw.get("training") or "").strip()
+        if saved:
+            return saved
+    return _builtin_training_instruction()
+
+
+def _default_model() -> str:
+    return _QWEN if _qwen_path() else _FLORENCE[0]
 
 
 def form() -> dict:
@@ -47,15 +99,15 @@ def form() -> dict:
         "fields": [
             {"key": "trigger", "label": "Trigger Word", "kind": "text", "default": "",
              "help": "Prepended to every caption."},
-            {"key": "model", "label": "Model", "kind": "choice", "default": _FLORENCE[0],
+            {"key": "model", "label": "Model", "kind": "choice", "default": _default_model(),
              "choices": choices, "help": "Florence downloads itself. Qwen uses the Krea 2 text encoder."},
             {"key": "task", "label": "Task", "kind": "choice", "default": "<DETAILED_CAPTION>",
              "choices": list(_TASKS), "help": "Florence task. Qwen uses the instruction instead."},
-            {"key": "max_tokens", "label": "Max Tokens", "kind": "int", "default": 256, "help": ""},
+            {"key": "max_tokens", "label": "Max Tokens", "kind": "int", "default": 120, "help": ""},
             {"key": "overwrite", "label": "Overwrite existing caption files", "kind": "bool",
              "default": False, "help": "Off keeps an image that already has a .txt."},
             {"key": "instruction", "label": "Instruction", "kind": "text",
-             "default": "Describe this image in one detailed training caption.",
+             "default": _default_instruction(),
              "help": "Sent to Qwen. Florence ignores it."},
             {"key": "include_video", "label": "Include video clips", "kind": "bool",
              "default": False, "help": "Caption .mp4 files as well as stills."},
@@ -77,16 +129,16 @@ def _images(folder: str, include_video: bool) -> list[str]:
 
 
 def _settings(body: dict, folder: str) -> dict:
-    model = str(body.get("model") or _FLORENCE[0])
+    model = str(body.get("model") or _default_model())
     if model not in _FLORENCE and model != _QWEN:
         raise JobError(422, {"problems": ["unknown caption model"]})
     task = str(body.get("task") or "<DETAILED_CAPTION>")
     if task not in _TASKS:
         raise JobError(422, {"problems": ["unknown caption task"]})
     try:
-        tokens = int(body.get("max_tokens") if body.get("max_tokens") is not None else 256)
+        tokens = int(body.get("max_tokens") if body.get("max_tokens") not in (None, "") else 120)
     except (TypeError, ValueError):
-        tokens = 256
+        tokens = 120
     return {
         "folder": folder,
         "trigger": str(body.get("trigger") or "").strip(),
@@ -94,7 +146,7 @@ def _settings(body: dict, folder: str) -> dict:
         "task": task,
         "max_tokens": max(1, tokens),
         "overwrite": bool(body.get("overwrite")),
-        "instruction": str(body.get("instruction") or "").strip(),
+        "instruction": str(body.get("instruction") or "").strip() or _default_instruction(),
         "include_video": bool(body.get("include_video")),
     }
 

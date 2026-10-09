@@ -53,6 +53,8 @@ def _name(raw) -> str:
         return "extracted"
     if "/" in text or "\\" in text or ".." in text:
         raise JobError(422, {"problems": ["Enter a name without a path."]})
+    if any(ord(char) < 32 or char in '<>:"|?*' for char in text):
+        raise JobError(422, {"problems": ["Enter a name without a path."]})
     return text
 
 
@@ -96,6 +98,11 @@ def _settings(body: dict) -> dict:
     ranks = _ranks(body.get("ranks"))
     name = _name(body.get("name"))
     folder = _output_dir()
+    target = (folder / name).resolve()
+    try:
+        target.relative_to(folder.resolve())
+    except ValueError as exc:
+        raise JobError(422, {"problems": ["Enter a name without a path."]}) from exc
     return {
         "base": str(base),
         "tuned": str(tuned),

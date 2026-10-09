@@ -4,6 +4,7 @@ Nothing here loads a model, calls nvidia-smi, or touches CUDA.
 
     python -m unittest checks.test_web_devices -v
 """
+import ast
 import json
 import os
 import subprocess
@@ -43,6 +44,7 @@ index = (os.environ.get("CUDA_VISIBLE_DEVICES") or "0").split(",")[0].strip()
 if not index.isdigit():
     index = "0"
 (output / "cuda_device.txt").write_text(index, encoding="utf-8")
+(output / "cuda_order.txt").write_text(os.environ.get("CUDA_DEVICE_ORDER") or "", encoding="utf-8")
 time.sleep(8.0 if index == "1" else 4.0)
 print("steps: 1/1 [00:01<00:00, 1.00it/s, avr_loss=0.10]", flush=True)
 """
@@ -55,6 +57,7 @@ _ENV_KEYS = (
     "FIZGIG_WEB_FAKE_ENGINE",
     "FIZGIG_WEB_ENGINE_IDLE",
     "CUDA_VISIBLE_DEVICES",
+    "FIZGIG_WEB_ROOTS",
 )
 
 
@@ -84,6 +87,7 @@ class WebDeviceTests(unittest.TestCase):
         script.write_text(_FAKE, encoding="utf-8")
         self._env = {key: os.environ.get(key) for key in _ENV_KEYS}
         os.environ["FIZGIG_WEB_JOBS"] = str(self.root / "jobs")
+        os.environ["FIZGIG_WEB_ROOTS"] = str(self.root)
         os.environ["FIZGIG_WEB_FAKE_TRAINER"] = str(script)
         os.environ["FIZGIG_NO_PERSIST"] = "1"
         os.environ["FIZGIG_PREFS_FILE"] = str(self.root / "prefs.json")
@@ -162,6 +166,7 @@ class WebDeviceTests(unittest.TestCase):
         return (output / "cuda_device.txt").read_text(encoding="utf-8")
 
     def test_two_devices_run_together(self):
+        os.environ.pop("CUDA_DEVICE_ORDER", None)
         out0 = self.root / "out0"
         out1 = self.root / "out1"
         out_again = self.root / "out-again"
@@ -192,6 +197,8 @@ class WebDeviceTests(unittest.TestCase):
         self.assertTrue(held(1))
         self.assertEqual(self._cuda(out0), "0")
         self.assertEqual(self._cuda(out1), "1")
+        self.assertEqual((out0 / "cuda_order.txt").read_text(encoding="utf-8"), "PCI_BUS_ID")
+        self.assertEqual((out1 / "cuda_order.txt").read_text(encoding="utf-8"), "PCI_BUS_ID")
         denied = self.client.post("/api/jobs", json=self._body(out_again, "Again", 0))
         self.assertEqual(denied.status_code, 409, denied.text)
         self.assertEqual(denied.json()["detail"], "a run is already active")
@@ -300,6 +307,26 @@ class WebDeviceTests(unittest.TestCase):
         self.assertFalse(held(1))
         self.assertFalse(held(0))
         shutdown()
+
+    def test_desktop_lock_uses_the_chosen_card(self):
+        tree = ast.parse((_REPO / "lora_trainer_gui.py").read_text(encoding="utf-8"))
+        held_calls = []
+        lock_calls = []
+        uses_env = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if node.func.attr == "_cuda_env_for_subprocess":
+                    uses_env.append(node)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                if node.func.id == "_gpu_held":
+                    held_calls.append(node)
+                elif node.func.id == "GpuLock":
+                    lock_calls.append(node)
+        self.assertGreaterEqual(len(uses_env), 2)
+        self.assertEqual(len(held_calls), 1)
+        self.assertEqual(len(held_calls[0].args), 1)
+        self.assertEqual(len(lock_calls), 1)
+        self.assertEqual(len(lock_calls[0].args), 1)
 
 
 if __name__ == "__main__":

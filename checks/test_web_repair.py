@@ -26,7 +26,7 @@ class WebRepairTests(unittest.TestCase):
     def setUp(self):
         shutdown()
         self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name)
+        self.root = Path(self._tmp.name).resolve()
         self.output = self.root / "output"
         self.output.mkdir()
         self.profiles = self.root / "profiles"
@@ -187,6 +187,129 @@ class WebRepairTests(unittest.TestCase):
         })
         self.assertEqual(metrics.status_code, 200, metrics.text)
         self.assertIn("grid_delta", metrics.json())
+
+    def test_bake_uses_loaded_engine(self):
+        import fizgig.repair_studio.bake as bake_mod
+        loaded = self.client.post("/api/repair/load", json={
+            "family": "klein", "primary": str(self.lora), "donor": str(self.donor),
+        })
+        self.assertEqual(loaded.status_code, 200, loaded.text)
+
+        def fake_bake(*_args, **_kwargs):
+            raise AssertionError("file baker ran")
+
+        original = bake_mod.save_repaired_lora
+        bake_mod.save_repaired_lora = fake_bake
+        try:
+            saved = self.client.post("/api/repair/bake", json={
+                "family": "klein",
+                "primary": str(self.lora),
+                "donor": str(self.donor),
+                "state": {"blocks": {"double_0": {
+                    "primary_enabled": True, "primary_strength": 0.5,
+                    "donor_enabled": True, "donor_strength": 0.4,
+                }}, "prompt": "a cat"},
+            })
+        finally:
+            bake_mod.save_repaired_lora = original
+        self.assertEqual(saved.status_code, 200, saved.text)
+        body = saved.json()
+        payload = json.loads(Path(body["path"]).read_text(encoding="utf-8"))
+        self.assertTrue(payload["engine"])
+        self.assertEqual(payload["prompt"], "a cat")
+        self.assertTrue(payload["include_donor"])
+        self.assertTrue(body["summary"].get("engine"))
+
+    def test_bake_refuses_unmapped_family(self):
+        for family in ("zimage", "qwen_image21", "sdxl"):
+            reply = self.client.post("/api/repair/bake", json={
+                "family": family,
+                "primary": str(self.lora),
+                "state": {"blocks": {}},
+            })
+            self.assertEqual(reply.status_code, 422, reply.text)
+            self.assertIn("cannot be baked", reply.text)
+        self.assertEqual(list(self.output.glob("*repaired*")), [])
+
+    def test_bake_rejects_bad_output_name(self):
+        reply = self.client.post("/api/repair/bake", json={
+            "family": "klein", "primary": str(self.lora),
+            "output_name": "bad:name.safetensors", "state": {"blocks": {}},
+        })
+        self.assertEqual(reply.status_code, 422, reply.text)
+        reply = self.client.post("/api/repair/bake", json={
+            "family": "klein", "primary": str(self.lora),
+            "output_name": "../outside.safetensors", "state": {"blocks": {}},
+        })
+        self.assertEqual(reply.status_code, 422, reply.text)
+
+    def test_read_preset_stays_in_the_preset_dir(self):
+        outside = self.root / "secret.json"
+        outside.write_text(json.dumps({
+            "blocks": {"double_0": {
+                "primary_enabled": True, "primary_strength": 0.13,
+                "donor_enabled": False, "donor_strength": 1,
+            }},
+        }), encoding="utf-8")
+        reply = self.client.get("/api/repair/presets/file", params={
+            "family": "klein", "name": str(outside.with_suffix("")),
+        })
+        self.assertNotEqual(reply.status_code, 200, reply.text)
+        self.assertNotIn("0.13", reply.text)
+        reserved = self.client.put("/api/repair/presets", json={
+            "family": "klein", "name": "CON", "state": {"blocks": {}},
+        })
+        self.assertEqual(reserved.status_code, 422, reserved.text)
+        dotted = self.client.put("/api/repair/presets", json={
+            "family": "klein", "name": "CON.txt", "state": {"blocks": {}},
+        })
+        self.assertEqual(dotted.status_code, 422, dotted.text)
+
+    def test_render_checks_reference_root(self):
+        from fizgig.web.engine_host import get_host
+        loaded = self.client.post("/api/repair/load", json={"family": "klein", "primary": str(self.lora)})
+        self.assertEqual(loaded.status_code, 200, loaded.text)
+        outside = self.root / "secret.png"
+        outside.write_bytes(b"x")
+        host = get_host()
+        before = host.latest
+        denied = self.client.post("/api/repair/render", json={
+            "family": "klein",
+            "state": {"prompt": "a cat", "ref_image_path": str(outside)},
+        })
+        self.assertEqual(denied.status_code, 403, denied.text)
+        self.assertEqual(host.latest, before)
+        empty = self.client.post("/api/repair/render", json={
+            "family": "klein", "steps": 1,
+            "state": {"prompt": "a cat", "ref_image_path": ""},
+        })
+        self.assertEqual(empty.status_code, 200, empty.text)
+
+    def test_gpu_free_uses_engine_device(self):
+        from fizgig.gpu_lock import GpuLock
+        from fizgig.web.engine_host import get_host
+        from fizgig.web.refmod import _gpu_free as refmod_free
+        from fizgig.web.repair import gpu_free
+        from fizgig.web.royale import _gpu_free as royale_free
+        host = get_host()
+        host.set_device(1)
+        folder = Path(os.environ["FIZGIG_WEB_JOBS"]) / "busy0"
+        folder.mkdir(parents=True)
+        (folder / "job.json").write_text(json.dumps({
+            "id": "busy0", "status": "running", "device": 0, "created": "2020-01-01T00:00:00Z",
+        }), encoding="utf-8")
+        gpu_free()
+        royale_free()
+        refmod_free()
+        lock = GpuLock(1)
+        self.assertTrue(lock.acquire())
+        try:
+            from fizgig.web.jobs import JobError
+            with self.assertRaises(JobError) as caught:
+                gpu_free()
+            self.assertEqual(caught.exception.status, 409)
+        finally:
+            lock.release()
 
 
 if __name__ == "__main__":

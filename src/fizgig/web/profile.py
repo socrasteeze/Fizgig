@@ -264,12 +264,20 @@ def engine_view() -> dict:
         captured = _capture(host)
         if captured:
             return captured
-    if host.busy or (gen and result.get("gen") != gen):
-        return {"status": "running", "gen": gen, "family": host.family}
     stored = _ENGINE.get("result")
     if stored and stored.get("gen") == gen:
         return stored
-    return {"status": "idle", "restarted": bool(host.restarted)}
+    if host.restarted:
+        return {
+            "status": "failed",
+            "gen": gen,
+            "message": "The engine worker stopped. It will start again on the next request.",
+        }
+    if host.busy:
+        return {"status": "running", "gen": gen}
+    if gen:
+        return {"status": "failed", "gen": gen, "message": "The profile did not finish."}
+    return {"status": "idle"}
 
 
 def open_repair() -> dict:

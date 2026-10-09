@@ -2,21 +2,37 @@
 
 The page talks to a server on this machine. The server listens on `127.0.0.1:8081` only. Other devices reach it through Tailscale Serve.
 
-Nothing starts Fizgig on its own. There is no scheduled task, no startup shortcut, no service, and no systemd unit. The server runs only while `run_webui.bat`, `run_webui.sh`, or the Docker container is running. A training job that has already started keeps running if you close the browser. The queue can start the next training job it already holds.
+Nothing starts Fizgig on its own. There is no scheduled task, no startup shortcut, no service, and no systemd unit. The server runs only while `run_webui.bat`, `run_webui.sh`, or the Docker container is running. The queue starts the next job it already holds from a thread inside the running server, including while the browser is closed. Opening the page does not start a job. A failed run does not start the next one. A training job that has already started keeps running if you close the browser.
+
+Blank model paths, the cache folder, and the captioner are filled from Preferences when a run starts. The Training page shows the saved model paths for the family. The Captions trigger word is remembered for a later training launch. Advanced flags are shown for reference and are not sent.
 
 ## First run
 
 You need the Fizgig folder, its Python environment, and Node.js (the launcher builds the page).
 
-On Windows, from the Fizgig folder:
+Install the web packages from the Fizgig folder, then start the page.
+
+Command Prompt:
 
 ```
+pip install -r requirements-web.txt
+npm --prefix webui ci
 run_webui.bat
 ```
 
-On Linux, from the Fizgig folder:
+PowerShell:
 
 ```
+pip install -r requirements-web.txt
+npm --prefix webui ci
+.\run_webui.bat
+```
+
+sh:
+
+```
+pip install -r requirements-web.txt
+npm --prefix webui ci
 sh run_webui.sh
 ```
 
@@ -34,13 +50,27 @@ tailscale serve --bg 8081
 
 That publishes `127.0.0.1:8081` to your tailnet over HTTPS. The address looks like `https://<machine>.<tailnet>.ts.net`. Use that command only. Do not use Tailscale Funnel, and do not publish port 8081 any other way.
 
-The server checks the `Host` header. Set this before you start the launcher, using the machine's tailnet name (no `https://`):
+The server checks the `Host` header. Set this before you start the launcher, using the machine's tailnet name (no `https://`).
+
+Command Prompt:
 
 ```
-FIZGIG_WEB_TAILNET_HOST=<machine>.<tailnet>.ts.net
+set FIZGIG_WEB_TAILNET_HOST=<machine>.<tailnet>.ts.net
 ```
 
-`localhost` and `127.0.0.1` are always allowed. A browser on another device is allowed when that name matches.
+PowerShell:
+
+```
+$env:FIZGIG_WEB_TAILNET_HOST='<machine>.<tailnet>.ts.net'
+```
+
+sh:
+
+```
+export FIZGIG_WEB_TAILNET_HOST=<machine>.<tailnet>.ts.net
+```
+
+`localhost` and `127.0.0.1` are always allowed. A browser on another device is allowed when that name matches. The server strips a trailing dot on the Host header.
 
 ## Docker
 
@@ -59,6 +89,10 @@ BASE_IMAGE=<name> sh docker/webui/build.sh
 Run the container with a Tailscale auth key and a volume for Tailscale state. Give it the same GPU access you give the desktop image. Do not publish port 8081. On a pod, leave the template's public 8081 mapping unused. The container refuses to start when `TS_AUTHKEY` is unset and `/var/lib/tailscale/tailscaled.state` is missing.
 
 Inside the container, `tailscaled` runs in userspace-networking mode, logs in with `TS_AUTHKEY`, runs `tailscale serve --bg 8081`, then starts the web server on `127.0.0.1:8081`. A later start can omit the key when the state volume still holds a login.
+
+The entrypoint sets `FIZGIG_PREFS_FILE` to `/workspace/prefs.json` and `FIZGIG_WEB_ROOTS` to `/workspace` when you did not set them, so a first start has a preferences file and a folder root. Mount `/workspace` for datasets and preferences.
+
+The entrypoint sets `FIZGIG_WEB_TAILNET_HOST` from `tailscale status --json` (`Self.DNSName`, trailing dot removed) when you did not set it. To set the name yourself, use the same assignments as in the Tailscale section above.
 
 ## Where files go
 
@@ -87,7 +121,7 @@ The training form has a GPU picker. Each GPU has its own queue. A run on one GPU
 - Metadata has no custom-field editor and no Save As.
 - Likeness and bleed scores. Quick and Thorough measure how much the picture changes.
 - The H3 ref2va checkpoint picker, the render library, and clips with no LoRA.
-- A repaired LoRA is baked with `save_repaired_lora`.
+- A repaired LoRA is baked by the loaded engine's save_repaired. save_repaired_lora is only the fallback when that engine has no save_repaired, and a family that fallback cannot map is refused.
 - Without ffmpeg, a video render keeps the middle frame.
 - The RefMod sweep, the render-history strip, and curve presets. The page shows the middle frame.
 - Explorer does not send its baseline to Repair Studio.

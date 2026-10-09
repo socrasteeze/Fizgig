@@ -11,7 +11,9 @@ declares. Visibility follows ``_apply_training_arch_visibility``,
 """
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass
+from pathlib import Path
 
 from fizgig.families.launch import FT_WINDOW_SIZES, PRECISION_LABELS
 
@@ -70,9 +72,10 @@ class Field:
     covers: tuple = ()
     source: str = "spec"
     preset_key: str = ""
+    windows: dict | None = None
 
     def to_json(self):
-        return {
+        body = {
             "key": self.key,
             "label": self.label,
             "help": self.help,
@@ -86,6 +89,9 @@ class Field:
             "toml": self.toml or None,
             "source": self.source,
         }
+        if self.windows is not None:
+            body["windows"] = self.windows
+        return body
 
 
 def _f(key, label, help, kind, default, section, order, **kw):
@@ -447,6 +453,47 @@ def _option_default(opt):
     return opt.default
 
 
+_OPTIMIZER_NAMES: tuple[str, ...] | None = None
+
+
+def optimizer_names() -> tuple[str, ...]:
+    """``_CATALOG`` keys from ``fizgig.training.optimizers``, without importing that module."""
+    global _OPTIMIZER_NAMES
+    if _OPTIMIZER_NAMES is not None:
+        return _OPTIMIZER_NAMES
+    path = Path(__file__).resolve().parents[1] / "training" / "optimizers.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found: list[str] = []
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if not isinstance(target, ast.Name) or target.id != "_CATALOG":
+                continue
+            if not isinstance(node.value, ast.Dict):
+                continue
+            for key in node.value.keys:
+                if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    found.append(key.value)
+    if not found:
+        found = ["adamw8bit"]
+    _OPTIMIZER_NAMES = tuple(found)
+    return _OPTIMIZER_NAMES
+
+
+def _area_windows(desc) -> dict:
+    """Model Area name -> timestep box text. The window is the area's third member times 1000."""
+    windows = {}
+    for area in desc.train_areas:
+        name = area[0]
+        span = area[2] if len(area) > 2 else None
+        if span:
+            windows[name] = [str(round(span[0] * 1000)), str(round(span[1] * 1000))]
+        else:
+            windows[name] = ["", ""]
+    return windows
+
+
 def _option_flags(opt):
     found = []
     tokens = [tok for _label, text in opt.choices for tok in text.split()] + opt.tokens.split()
@@ -506,7 +553,7 @@ def _description_fields(desc):
             "Chooses which blocks train. Custom uses the block list.",
             "choice", names[0], "Training Parameters", 110, choices=names,
             plan="FAMILY_TRAIN_AREA", covers=("--train_blocks",), source="description",
-            preset_key="TARGET_LAYERS"))
+            preset_key="TARGET_LAYERS", windows=_area_windows(desc)))
         out.append(Field(
             "FAMILY_TRAIN_BLOCKS", "Custom blocks",
             "The block ids ticked while Model Area to Train is Custom.",
@@ -522,9 +569,11 @@ def _description_fields(desc):
             "Memory & Precision", 307 if late else 302, choices=choices,
             plan="FAMILY_PRECISION", flag="--precision", source="description"))
     if desc.optimizers:
+        names = optimizer_names()
+        default = "adamw8bit" if "adamw8bit" in names else names[0]
         out.append(Field(
-            "OPTIMIZER_TYPE", "Optimizer Type", "", "choice", desc.optimizers[0], "Optimizer", 500,
-            choices=tuple(desc.optimizers), plan="OPTIMIZER_TYPE", flag="--optimizer_type",
+            "OPTIMIZER_TYPE", "Optimizer Type", "", "choice", default, "Optimizer", 500,
+            choices=names, plan="OPTIMIZER_TYPE", flag="--optimizer_type",
             source="description"))
     counts = {"": 0, "after": 0, "other": 0, "ft": 0, "model": 0}
     base = {"": 130, "after": 140, "other": 540, "ft": 195, "model": 10}
@@ -601,12 +650,16 @@ def _kind_label(desc, key):
 
 
 def web_values(desc, preset):
-    """Form values for one built-in preset: each field's default, then the preset's keys."""
+    """The preset's own keys, plus kind. A chip merges this onto the current form.
+
+    Keys the preset does not carry (output folder, LoRA name, metadata, context LoRA,
+    resume) stay as the page left them. The first visit still merges this onto defaults.
+    """
     fields = {field.key: field for field in fields_for(desc)}
-    values = {key: field.default for key, field in fields.items()}
+    values = {}
     for key, value in preset.items():
         canon = _PRESET_ALIAS.get(key, key)
-        if canon in fields or canon in values:
+        if canon in fields:
             values[canon] = value
         else:
             values[key] = value

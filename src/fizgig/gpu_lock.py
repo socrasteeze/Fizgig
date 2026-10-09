@@ -15,9 +15,9 @@ _DIR = _REPO / "cache" / "gpu"
 def device_index() -> int:
     """The card a run uses.
 
-    Mirrors the numeric branch of ``LoRATrainerGUI._visible_gpu_index``: the first
-    ``CUDA_VISIBLE_DEVICES`` entry when it is a number, otherwise 0. A UUID is not
-    mapped here (the desktop maps those through its own GPU list).
+    The first ``CUDA_VISIBLE_DEVICES`` entry when it is a number, otherwise 0.
+    Callers that already know the card pass that index to ``held`` and ``GpuLock``.
+    The desktop resolves a UUID through its own GPU list and passes the index.
     """
     raw = (os.environ.get("CUDA_VISIBLE_DEVICES") or "").split(",")[0].strip()
     return int(raw) if raw.isdigit() else 0

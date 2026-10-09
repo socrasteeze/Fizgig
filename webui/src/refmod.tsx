@@ -91,6 +91,9 @@ interface PresetFile {
 
 const BLANK: ModRow = { on: true, mod: "", value: "1", copies: "1" };
 
+let refmodGen: number | null = null;
+let refmodWait = false;
+
 function readError(response: Response): Promise<string> {
   return response.json().then(
     (body) => body.detail || (body.problems || []).join(" ") || `request failed (${response.status})`,
@@ -135,7 +138,6 @@ export function RefmodPanel() {
   const [baselineUrl, setBaselineUrl] = useState("");
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
-  const gen = useRef(0);
   const timer = useRef<number | null>(null);
   const pending = useRef<{ gen: number; image?: string; baseline?: string } | null>(null);
   const delay = useRef(60);
@@ -227,7 +229,7 @@ export function RefmodPanel() {
   }, [folder]);
 
   function queueImage(eventGen: number, patch: { image?: string; baseline?: string }) {
-    if (eventGen !== gen.current) {
+    if (eventGen !== refmodGen) {
       return;
     }
     const previous = pending.current && pending.current.gen === eventGen ? pending.current : { gen: eventGen };
@@ -239,7 +241,7 @@ export function RefmodPanel() {
       const next = pending.current;
       pending.current = null;
       timer.current = null;
-      if (!next || next.gen !== gen.current) {
+      if (!next || next.gen !== refmodGen) {
         return;
       }
       if (next.image) {
@@ -252,11 +254,22 @@ export function RefmodPanel() {
   }
 
   useEffect(() => {
-    const source = new EventSource("/api/events");
-    source.addEventListener("engine", (event) => {
+    let source: EventSource | null = null;
+    let retry: number | null = null;
+    let stopped = false;
+
+    function open() {
+      source = new EventSource("/api/events");
+      source.addEventListener("engine", (event) => {
       const body = JSON.parse((event as MessageEvent).data) as EngineEvent;
-      if (body.gen != null && body.gen !== gen.current && (body.event === "frame" || body.event === "done")) {
-        return;
+      if (body.gen != null && (body.event === "frame" || body.event === "done" || body.event === "cancelled")) {
+        if (refmodWait && (body.event === "frame" || body.event === "done")) {
+          refmodGen = body.gen;
+          refmodWait = false;
+        }
+        if (body.gen !== refmodGen) {
+          return;
+        }
       }
       if (body.event === "loading") {
         setStatus("Loading…");
@@ -278,9 +291,29 @@ export function RefmodPanel() {
       } else if (body.event === "unloaded") {
         setStatus("Unloaded.");
       }
-    });
+      });
+      source.onerror = () => {
+        if (stopped || source == null || source.readyState !== EventSource.CLOSED) {
+          return;
+        }
+        source.close();
+        source = null;
+        retry = window.setTimeout(() => {
+          retry = null;
+          if (!stopped) {
+            open();
+          }
+        }, 2000);
+      };
+    }
+
+    open();
     return () => {
-      source.close();
+      stopped = true;
+      if (retry != null) {
+        window.clearTimeout(retry);
+      }
+      source?.close();
       if (timer.current != null) {
         window.clearTimeout(timer.current);
       }
@@ -342,16 +375,23 @@ export function RefmodPanel() {
   }
 
   async function render() {
-    gen.current += 1;
     setError("");
     setStatus("Rendering…");
+    refmodWait = true;
     const response = await fetch("/api/refmod/render", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ...setupBody(), gen: gen.current }),
+      body: JSON.stringify(setupBody()),
     });
     if (!response.ok) {
+      refmodWait = false;
       setError(await readError(response));
+      return;
+    }
+    const body = await response.json() as { gen?: number };
+    refmodWait = false;
+    if (typeof body.gen === "number") {
+      refmodGen = body.gen;
     }
   }
 

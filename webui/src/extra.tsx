@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 interface Notice {
   kind: string;
@@ -15,10 +15,19 @@ export function browserNotify(notice: Notice) {
   if (notice.kind !== "finished" && notice.kind !== "failed" && notice.kind !== "paused") {
     return;
   }
-  if (typeof Notification === "undefined" || Notification.permission !== "granted") {
-    return;
+  const body = notice.message;
+  try {
+    if (typeof Notification === "undefined" || Notification.permission !== "granted") {
+      return;
+    }
+    new Notification("Fizgig", { body });
+  } catch {
+    const ready = navigator.serviceWorker?.ready;
+    if (!ready) {
+      return;
+    }
+    void ready.then((registration) => registration.showNotification("Fizgig", { body })).catch(() => undefined);
   }
-  new Notification("Fizgig", { body: notice.message });
 }
 
 export function NotifyButton() {
@@ -410,7 +419,20 @@ function CaptionsPanel({ folder }: { folder: string }) {
                       {field.choices.map((choice) => <option key={String(choice)} value={String(choice)}>{String(choice)}</option>)}
                     </select>
                   ) : (
-                    <input value={values[key] == null ? "" : String(values[key])} onChange={(event) => setValues((current) => ({ ...current, [key]: event.target.value }))} />
+                    <input
+                      value={values[key] == null ? "" : String(values[key])}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setValues((current) => ({ ...current, [key]: value }));
+                        if (key === "trigger") {
+                          void fetch("/api/prefs", {
+                            method: "PUT",
+                            headers: { "content-type": "application/json" },
+                            body: JSON.stringify({ values: { web_caption_trigger: value } }),
+                          }).catch(() => undefined);
+                        }
+                      }}
+                    />
                   )}
                 </label>
               )}
@@ -654,8 +676,8 @@ function HistoryPanel() {
     if (!open) {
       return;
     }
-    fetch(`/api/jobs/${open}/log?offset=0`).then((response) => response.json()).then((body) => setLog(body.text || "")).catch(() => undefined);
-    fetch(`/api/jobs/${open}/samples`).then((response) => response.json()).then((body) => setSamples(body.samples || [])).catch(() => setSamples([]));
+    fetch(`/api/jobs/${open}/log?offset=-1`).then((response) => response.json()).then((body) => setLog(body.text || "")).catch(() => undefined);
+    fetch(`/api/jobs/${open}/samples`).then((response) => response.json()).then((body) => setSamples((body.samples || []).slice(-48))).catch(() => setSamples([]));
   }, [open]);
 
   return (
@@ -685,7 +707,7 @@ function HistoryPanel() {
           <>
             <pre className="log">{log || "No log."}</pre>
             <div className="gallery">
-              {samples.map((sample) => <img key={sample.name} src={sample.url} alt={sample.name} />)}
+              {samples.slice(-48).map((sample) => <img key={sample.name} src={sample.url} alt={sample.name} loading="lazy" />)}
             </div>
           </>
         ) : null}
@@ -852,14 +874,10 @@ function ProfilerPanel({ onRepair }: { onRepair: () => void }) {
   const [size, setSize] = useState("768");
   const [reports, setReports] = useState<Array<{ name: string; path: string; url: string }>>([]);
   const [ready, setReady] = useState(false);
+  const [engineStatus, setEngineStatus] = useState("");
+  const [engineMessage, setEngineMessage] = useState("");
+  const [engineWatch, setEngineWatch] = useState(0);
   const [error, setError] = useState("");
-  const poll = useRef<number | null>(null);
-
-  useEffect(() => () => {
-    if (poll.current != null) {
-      window.clearInterval(poll.current);
-    }
-  }, []);
 
   function load(next: string) {
     fetch(`/api/profile/form?family=${encodeURIComponent(next)}`)
@@ -877,19 +895,70 @@ function ProfilerPanel({ onRepair }: { onRepair: () => void }) {
 
   useEffect(() => {
     let stop = false;
+    let timer = 0;
     async function tick() {
-      const response = await fetch("/api/profiles");
-      if (response.ok && !stop) {
-        const body = await response.json();
-        setReports(body.reports || []);
+      try {
+        const response = await fetch("/api/profiles");
+        if (response.ok && !stop) {
+          const body = await response.json();
+          setReports(body.reports || []);
+        }
+      } catch {
+        // keep polling after one failed fetch
       }
       if (!stop) {
-        window.setTimeout(tick, 2000);
+        timer = window.setTimeout(tick, 2000);
       }
     }
     tick();
-    return () => { stop = true; };
+    return () => {
+      stop = true;
+      window.clearTimeout(timer);
+    };
   }, []);
+
+  useEffect(() => {
+    let stop = false;
+    let timer = 0;
+    async function tick() {
+      let again = false;
+      try {
+        const response = await fetch("/api/profile/engine");
+        if (!stop && response.ok) {
+          const body = await response.json();
+          const status = String(body.status || "");
+          const message = String(body.message || "");
+          setEngineStatus(status);
+          setEngineMessage(message);
+          if (status === "done") {
+            setReady(true);
+            setError("");
+          } else if (status === "failed") {
+            setReady(false);
+            setError(message || "The profiler failed.");
+          } else if (status === "running") {
+            setReady(false);
+            again = true;
+          } else {
+            setReady(false);
+          }
+        } else if (!stop) {
+          again = true;
+        }
+      } catch {
+        // keep polling after one failed fetch
+        again = true;
+      }
+      if (!stop && again) {
+        timer = window.setTimeout(tick, 500);
+      }
+    }
+    tick();
+    return () => {
+      stop = true;
+      window.clearTimeout(timer);
+    };
+  }, [engineWatch]);
 
   async function run() {
     setError("");
@@ -914,26 +983,9 @@ function ProfilerPanel({ onRepair }: { onRepair: () => void }) {
       setError(await readError(response));
       return;
     }
-    const started = await response.json();
-    if (poll.current != null) {
-      window.clearInterval(poll.current);
-    }
-    poll.current = window.setInterval(async () => {
-      const status = await fetch("/api/profile/engine");
-      if (!status.ok) {
-        return;
-      }
-      const body = await status.json();
-      if (body.gen !== started.gen) {
-        return;
-      }
-      if (body.status === "done") {
-        if (poll.current != null) {
-          window.clearInterval(poll.current);
-        }
-        setReady(true);
-      }
-    }, 500);
+    setEngineStatus("running");
+    setEngineMessage("");
+    setEngineWatch((current) => current + 1);
   }
 
   async function openRepair() {
@@ -999,6 +1051,9 @@ function ProfilerPanel({ onRepair }: { onRepair: () => void }) {
         </div>
         <button type="button" className="start" onClick={() => void run()}>Profile LoRA</button>
         <button type="button" disabled={!ready} onClick={() => void openRepair()}>Open in Repair Studio</button>
+        {engineStatus === "running" ? <p className="status">Running.</p> : null}
+        {engineStatus === "failed" ? <p className="error">{engineMessage || "The profiler failed."}</p> : null}
+        {engineStatus === "done" ? <p className="status">Profile ready.</p> : null}
         {error ? <p className="error">{error}</p> : null}
       </section>
       <section>
@@ -1132,11 +1187,13 @@ function MetadataPanel() {
     title: "", author: "", license: "", tags: "", trigger: "", usage_hint: "", description: "", thumbnail: "",
   });
   const [extra, setExtra] = useState<Record<string, string>>({});
+  const [extraFor, setExtraFor] = useState("");
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
 
   function take(body: Record<string, unknown>) {
-    setPath(String(body.path || path));
+    const nextPath = String(body.path || path);
+    setPath(nextPath);
     setFields({
       title: String(body.title || ""),
       author: String(body.author || ""),
@@ -1148,6 +1205,7 @@ function MetadataPanel() {
       thumbnail: String(body.thumbnail || ""),
     });
     setExtra((body.extra as Record<string, string>) || {});
+    setExtraFor(nextPath);
   }
 
   async function load(next = path) {
@@ -1163,10 +1221,14 @@ function MetadataPanel() {
 
   async function save() {
     setError("");
+    const payload: Record<string, unknown> = { path, ...fields };
+    if (extraFor && extraFor === path) {
+      payload.extra = extra;
+    }
     const response = await fetch("/api/metadata", {
       method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ path, ...fields, extra }),
+      body: JSON.stringify(payload),
     });
     if (!response.ok) {
       setError(await readError(response));

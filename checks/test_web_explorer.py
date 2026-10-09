@@ -101,7 +101,7 @@ class ExplorerHostTests(unittest.TestCase):
         shutdown()
         explorer.clear_session()
         self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name)
+        self.root = Path(self._tmp.name).resolve()
         self.output = self.root / "output"
         self.output.mkdir()
         self.lora = self.output / "Demo.safetensors"
@@ -155,35 +155,33 @@ class ExplorerHostTests(unittest.TestCase):
         expected = [item.to_json() for item in roll_variants(state, active, 8, 0.964, 1.0, anchor, set())]
         random.seed(1234)
         first = explorer.roll({"steps": 6, "gen": 1})
-        self.assertEqual((first["gen"], first["status"]), (1, "running"))
+        self.assertEqual(first["status"], "running")
+        self.assertNotEqual(first["gen"], 1)
         self.assertEqual(first["variants"], expected)
-        second = explorer.roll({"steps": 2, "gen": 2})
-        self.assertEqual(second["gen"], 2)
+        second = explorer.roll({"steps": 2, "gen": 1})
+        self.assertEqual(second["gen"], first["gen"] + 1)
+        self.assertEqual(second["status"], "running")
         host = get_host()
         seen = []
+        want = second["gen"]
         self._wait(lambda: seen.extend(host.drain()) or any(
-            item.get("event") == "done" and item.get("gen") == 2 for item in seen))
+            item.get("event") == "done" and item.get("gen") == want for item in seen))
         dones = [item for item in seen if item.get("event") == "done"]
         frames = [item for item in seen if item.get("event") == "frame"]
-        self.assertEqual([item["gen"] for item in dones], [2])
+        self.assertEqual([item["gen"] for item in dones], [want])
         self.assertEqual(
             [item["side"] for item in frames],
             ["baseline", "variant", "variant", "variant", "variant"],
         )
-        self.assertTrue(all(item["gen"] == 2 for item in frames))
+        self.assertTrue(all(item["gen"] == want for item in frames))
         self.assertEqual(dones[0]["records"]["count"], 5)
 
-    def test_save_calls_bake_with_baseline(self):
+    def test_save_uses_loaded_engine(self):
         import fizgig.repair_studio.bake as bake_mod
         explorer.load({"family": "klein", "lora": str(self.lora), "prompt": "a cat"})
-        seen = {}
 
-        def fake_bake(primary_path, state, out_path, donor_path=None):
-            seen["primary"] = primary_path
-            seen["state"] = state
-            seen["out"] = out_path
-            seen["donor"] = donor_path
-            return {"keys_in": 1, "keys_out": 1, "dropped_blocks": [], "rescaled_blocks": [], "blended_blocks": []}
+        def fake_bake(*_args, **_kwargs):
+            raise AssertionError("file baker ran")
 
         original = bake_mod.save_repaired_lora
         bake_mod.save_repaired_lora = fake_bake
@@ -192,11 +190,12 @@ class ExplorerHostTests(unittest.TestCase):
         finally:
             bake_mod.save_repaired_lora = original
         self.assertTrue(str(saved["path"]).endswith("_explored.safetensors"))
-        self.assertTrue(str(seen["out"]).endswith("_explored.safetensors"))
-        self.assertIs(seen["state"], explorer.baseline())
-        self.assertEqual(seen["state"].prompt, "a cat")
-        self.assertIsNone(seen["donor"])
-        self.assertEqual(seen["primary"], str(self.lora.resolve()))
+        payload = json.loads(Path(saved["path"]).read_text(encoding="utf-8"))
+        self.assertTrue(payload["engine"])
+        self.assertEqual(payload["prompt"], "a cat")
+        self.assertEqual(payload["primary"], str(self.lora.resolve()))
+        self.assertFalse(payload["include_donor"])
+        self.assertTrue(saved["summary"].get("engine"))
 
     def test_load_rejects_reference_outside_roots(self):
         from fizgig.web.engine_host import get_host
@@ -235,6 +234,50 @@ class ExplorerHostTests(unittest.TestCase):
         started = explorer.roll({"reference": str(image), "steps": 1, "gen": 1})
         self.assertEqual(started["status"], "running")
         self.assertEqual(Path(explorer.baseline().ref_image_path), image.resolve())
+
+    def test_save_falls_back_when_engine_is_unloaded(self):
+        import fizgig.repair_studio.bake as bake_mod
+        from fizgig.web.engine_host import get_host
+        explorer.load({"family": "klein", "lora": str(self.lora), "prompt": "a cat"})
+        get_host().unload()
+        seen = {}
+
+        def fake_bake(primary_path, state, out_path, donor_path=None):
+            seen["prompt"] = state.prompt
+            seen["primary"] = primary_path
+            Path(out_path).write_bytes(b"file-baker")
+            return {"keys_in": 1, "keys_out": 1, "dropped_blocks": [], "rescaled_blocks": [], "blended_blocks": []}
+
+        original = bake_mod.save_repaired_lora
+        bake_mod.save_repaired_lora = fake_bake
+        try:
+            saved = explorer.save({})
+        finally:
+            bake_mod.save_repaired_lora = original
+        self.assertEqual(seen["prompt"], "a cat")
+        self.assertEqual(Path(saved["path"]).read_bytes(), b"file-baker")
+
+    def test_cancelled_preview_is_not_an_engine_failure(self):
+        from fizgig.web.engine_host import Cancelled
+        preview = type("PreviewAborted", (Exception,), {})
+        sample = type("SampleAborted", (Exception,), {})
+        render_cancel = type("RenderCancelled", (Exception,), {})
+
+        class Eng:
+            def __init__(self, exc):
+                self.exc = exc
+
+            def _invalidate_activation_cache(self):
+                return None
+
+            def generate_preview(self, state):
+                raise self.exc
+
+        for exc in (preview("stop"), sample("stop"), render_cancel("stop")):
+            adapter = explorer.ExplorerAdapter()
+            adapter.engine = Eng(exc)
+            with self.assertRaises(Cancelled):
+                adapter.render(1, {"states": [{"blocks": {}}]}, lambda *_args: None)
 
 
 if __name__ == "__main__":

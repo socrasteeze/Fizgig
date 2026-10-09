@@ -26,7 +26,7 @@ from fizgig.web.app import app
 class WebProfileTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name)
+        self.root = Path(self._tmp.name).resolve()
         self.output = self.root / "output"
         self.profiles = self.root / "profiles"
         self.outside = self.root / "outside"
@@ -135,10 +135,12 @@ class WebProfileEngineTests(unittest.TestCase):
     """Quick and Thorough on the fake engine, and the Repair Studio handoff."""
 
     def setUp(self):
+        from fizgig.web import profile
         from fizgig.web.engine_host import shutdown
+        profile._ENGINE.clear()
         shutdown()
         self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name)
+        self.root = Path(self._tmp.name).resolve()
         self.output = self.root / "output"
         self.profiles = self.root / "profiles"
         self.output.mkdir()
@@ -210,6 +212,31 @@ class WebProfileEngineTests(unittest.TestCase):
         thorough = self._run("thorough")
         self.assertEqual(thorough["seeds"], [1234, 5678])
         self.assertTrue(thorough["per_block"])
+
+    def test_engine_view_stored_before_running_and_failed_when_idle(self):
+        from fizgig.web import profile
+        from fizgig.web.engine_host import get_host
+        done = self._run("quick")
+        host = get_host()
+        host.busy = True
+        host.result = None
+        view = profile.engine_view()
+        self.assertEqual(view["status"], "done")
+        self.assertEqual(view["gen"], done["gen"])
+        profile._ENGINE["result"] = None
+        host.busy = False
+        host.restarted = False
+        host.profile = None
+        host.result = None
+        failed = profile.engine_view()
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["gen"], done["gen"])
+        self.assertTrue(failed.get("message"))
+        host.restarted = True
+        host.busy = True
+        stopped = profile.engine_view()
+        self.assertEqual(stopped["status"], "failed")
+        self.assertIn("stopped", stopped["message"])
 
 
 if __name__ == "__main__":

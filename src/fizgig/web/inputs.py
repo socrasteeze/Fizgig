@@ -3,8 +3,10 @@
 Mirrors ``LoRATrainerGUI._family_launch_inputs``. Number fields are coerced the way
 ``_start_training_launch`` copies widgets into ``self.settings`` before that call:
 learning rate and network alpha become floats, rank, epochs and seed become ints.
-Switches are real booleans. Samples, model paths and the captioner are not Training-tab
-fields; the caller passes them in ``context``.
+Text that is not a number is left as text so the launch checks can refuse it.
+Switches are real booleans. Samples are not Training-tab fields; the caller passes
+them in ``context``. A blank model path, cache folder, captioner, caption override
+map, or caption trigger is filled from Preferences. An explicit context value wins.
 """
 from __future__ import annotations
 
@@ -36,17 +38,27 @@ def _text(value):
 
 
 def _float(value, default):
-    try:
-        return float(str(value).strip())
-    except (TypeError, ValueError):
+    if value is None:
         return float(default)
+    text = str(value).strip()
+    if not text:
+        return float(default)
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return text
 
 
 def _int(value, default):
-    try:
-        return int(float(str(value).strip()))
-    except (TypeError, ValueError):
+    if value is None:
         return int(default)
+    text = str(value).strip()
+    if not text:
+        return int(default)
+    try:
+        return int(float(text))
+    except (TypeError, ValueError):
+        return text
 
 
 def _kind(desc, values):
@@ -121,6 +133,68 @@ def _extra_folders(desc, values):
     return [text] if text else []
 
 
+def _prefs() -> dict:
+    from fizgig.web.prefs import roots_from_prefs
+
+    return roots_from_prefs()
+
+
+def _filled_models(desc, context, prefs):
+    """Model paths the launch reads. A blank context path uses Preferences."""
+    models = _models(desc, context.get("models") or {})
+    for key, value in models.items():
+        if value:
+            continue
+        models[key] = _text(prefs.get(key, ""))
+    return models
+
+
+def _cache_root(context, prefs) -> str:
+    text = _text(context.get("cache_root", ""))
+    if text:
+        return text
+    return _text(prefs.get("cache_dir", ""))
+
+
+def _captioner(context, prefs) -> str:
+    """The Qwen captioner file, when Preferences points at a file. Mirrors ``_qwen_captioner_path``."""
+    text = _text(context.get("captioner", ""))
+    if text:
+        return text
+    path = _text(prefs.get("krea2_text_encoder", ""))
+    if path and os.path.isfile(path):
+        return path
+    return ""
+
+
+def _caption_trigger(context, prefs) -> str:
+    """A blank trigger uses Preferences. The placeholder ``trigger_word`` is not a trigger."""
+    text = _text(context.get("caption_trigger", ""))
+    if text.lower() == "trigger_word":
+        text = ""
+    if text:
+        return text
+    saved = _text(prefs.get("web_caption_trigger", ""))
+    if saved.lower() == "trigger_word":
+        return ""
+    return saved
+
+
+def _caption_overrides(context, prefs):
+    """Edited Qwen instructions. Mirrors ``_caption_overrides``, including the legacy string."""
+    raw = context.get("caption_overrides")
+    if isinstance(raw, dict) and raw:
+        return raw
+    if raw not in (None, "", {}) and not isinstance(raw, dict):
+        return raw
+    stored = prefs.get("caption_qwen_instructions")
+    out = dict(stored) if isinstance(stored, dict) else {}
+    legacy = _text(prefs.get("caption_qwen_instruction", ""))
+    if legacy and "custom" not in out:
+        out["custom"] = legacy
+    return out
+
+
 def _samples(context):
     samples = dict(context.get("samples") or {})
     samples.setdefault("enabled", True)
@@ -136,6 +210,7 @@ def build(desc, values, context=None):
     """The inputs dict for ``launch.plan(desc, inputs)``."""
     context = context or {}
     values = dict(values)
+    prefs = _prefs()
     edit, slider, finetune = _kind(desc, values)
     samples = _samples(context)
     if desc.train_preview_checkpoint and samples.get("checkpoint") and "int8" not in samples:
@@ -156,14 +231,14 @@ def build(desc, values, context=None):
     inputs = {
         "python": _python(),
         "repo_dir": str(_REPO),
-        "models": _models(desc, context.get("models") or {}),
+        "models": _filled_models(desc, context, prefs),
         "image_folder": _text(values.get("image_folder", context.get("image_folder", ""))),
         "caption_ext": _text(values.get("caption_ext", ".txt")) or ".txt",
         "batch_size": values.get("batch_size", "1"),
         "megapixels": values.get("megapixels", "0.25"),
         "enable_bucket": _bool(values.get("enable_bucket", True)),
         "no_upscale": _bool(values.get("no_upscale", True)),
-        "cache_root": _text(context.get("cache_root", "")),
+        "cache_root": _cache_root(context, prefs),
         "blocks_swap": _text(values.get("blocks_swap", "Auto (detect from GPU)")),
         "enable_cache": _bool(values.get("enable_cache", True)),
         "resuming": bool(_text(values.get("RESUME_TRAINING")) or context.get("ft_resume")),
@@ -173,9 +248,9 @@ def build(desc, values, context=None):
             "warmup": _bool(values.get("KREA2_WARMUP_LOOK")),
             "recaption": _bool(values.get("KREA2_AUTO_RECAPTION")),
         },
-        "captioner": _text(context.get("captioner", "")),
-        "caption_trigger": _text(context.get("caption_trigger", "")),
-        "caption_overrides": context.get("caption_overrides") or {},
+        "captioner": _captioner(context, prefs),
+        "caption_trigger": _caption_trigger(context, prefs),
+        "caption_overrides": _caption_overrides(context, prefs),
         "samples": samples,
         "samples_dir": samples_dir,
         "edit_caption": _text(values.get("FAMILY_EDIT_CAPTION", "")),

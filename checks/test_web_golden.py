@@ -242,9 +242,9 @@ class WebGoldenTests(unittest.TestCase):
         if getattr(gui, "sample_negative_var", None) is not None:
             gui.sample_negative_var.set("blurry, watermark")
 
-    def _compare(self, desc, name, preset, override_samples=False):
+    def _compare(self, desc, name, preset, override_samples=False, blank_prefs=False):
         from fizgig.families import launch
-        from fizgig.web.form_spec import gui_preset, web_values
+        from fizgig.web.form_spec import fields_for, gui_preset, web_values
         from fizgig.web.inputs import build
 
         gui = self.gui
@@ -278,10 +278,15 @@ class WebGoldenTests(unittest.TestCase):
         if "FAMILY_TURBO_STRENGTH" in gui.entries:
             gui.settings["FAMILY_TURBO_STRENGTH"] = gui.entries["FAMILY_TURBO_STRENGTH"].get()
 
-        values = web_values(desc, dict(preset))
+        values = {field.key: field.default for field in fields_for(desc)}
+        values.update(web_values(desc, dict(preset)))
         values["image_folder"] = str(self._images)
         values["LORA_OUTPUT_DIR"] = str(output)
         context = self._context(desc, dataset_config)
+        if blank_prefs:
+            context["models"] = {}
+            context["cache_root"] = ""
+            context["captioner"] = ""
         parts = []
         slot = self._pair_slot(desc, preset)
         if slot:
@@ -369,6 +374,19 @@ class WebGoldenTests(unittest.TestCase):
                 continue
             name, preset = desc.presets[0]
             diff = self._compare(desc, name + " samples", preset, override_samples=True)
+            if diff:
+                mismatches.append(diff)
+        self.assertFalse(mismatches, "\n\n".join(mismatches))
+
+    def test_prefs_fill_empty_context_matches_desktop(self):
+        from fizgig.families.registry import FAMILIES
+
+        mismatches = []
+        for desc in FAMILIES.values():
+            if not desc.presets:
+                continue
+            name, preset = desc.presets[0]
+            diff = self._compare(desc, name + " prefs", preset, blank_prefs=True)
             if diff:
                 mismatches.append(diff)
         self.assertFalse(mismatches, "\n\n".join(mismatches))

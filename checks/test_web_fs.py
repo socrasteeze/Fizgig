@@ -3,10 +3,12 @@
     python -m unittest checks.test_web_fs -v
 """
 import io
+import json
 import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import zipfile
 from pathlib import Path
@@ -188,6 +190,73 @@ class WebFsTests(unittest.TestCase):
         self.assertEqual(downloaded.content, b"lora")
         leaked = self.client.get("/api/download", params={"path": str(self.outside / "secret.png")})
         self.assertIn(leaked.status_code, {403, 404})
+
+    def test_unc_device_names_case_and_zip_junk(self):
+        from fizgig.web import fs
+        from fizgig.web.jobs import JobError
+
+        for raw in ("//server/share/pics", r"\\server\share\pics", r"\\?\C:\Windows", r"\\.\PhysicalDrive0"):
+            with self.assertRaises(JobError) as caught:
+                fs.resolve_dir(raw)
+            self.assertEqual(caught.exception.status, 403)
+            with self.assertRaises(JobError) as caught:
+                fs.resolve_file(raw + "/a.safetensors" if not raw.endswith("0") else raw, "")
+            self.assertEqual(caught.exception.status, 403)
+
+        device = self.client.post(
+            "/api/upload",
+            data={"dest": str(self.dataset)},
+            files=[("files", ("CON.png", _PNG, "image/png"))],
+        )
+        self.assertEqual(device.status_code, 422, device.text)
+        self.assertIn("unsafe", device.text.lower())
+        self.assertNotIn("CON.png", [item.name for item in self.dataset.iterdir()])
+
+        response = self.client.post(
+            "/api/upload",
+            data={"dest": str(self.dataset)},
+            files=[
+                ("files", ("IMG.JPG", _PNG, "image/jpeg")),
+                ("files", ("img.jpg", _PNG, "image/jpeg")),
+            ],
+        )
+        if os.name == "nt":
+            self.assertEqual(response.status_code, 422, response.text)
+            self.assertIn("duplicate", response.text.lower())
+            self.assertFalse((self.dataset / "IMG.JPG").exists())
+        else:
+            self.assertIn(response.status_code, {200, 422})
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as archive:
+            archive.writestr("__MACOSX/._kept.png", _PNG)
+            archive.writestr(".DS_Store", b"store")
+            archive.writestr("nested/._thumb.png", _PNG)
+            archive.writestr("kept.png", _PNG)
+        written = self.client.post(
+            "/api/upload",
+            data={"dest": str(self.dataset)},
+            files=[("archive", ("pics.zip", buf.getvalue(), "application/zip"))],
+        )
+        self.assertEqual(written.status_code, 200, written.text)
+        self.assertEqual(written.json()["written"], ["kept.png"])
+        self.assertTrue((self.dataset / "kept.png").is_file())
+        self.assertFalse((self.dataset / ".DS_Store").exists())
+        self.assertFalse((self.dataset / "._kept.png").exists())
+
+        folder = self.root / "jobs" / "evil-out"
+        folder.mkdir(parents=True)
+        (folder / "job.json").write_text(json.dumps({
+            "id": "evil-out",
+            "status": "done",
+            "output_dir": "\\\\no-such-host\\share\\out",
+            "created": "2020-01-01T00:00:00Z",
+        }), encoding="utf-8")
+        started = time.time()
+        roots = fs.output_roots()
+        self.assertLess(time.time() - started, 2)
+        self.assertTrue(any(path == self.dataset.resolve() or path == self.output.resolve() for path in roots))
+        self.assertFalse(any("no-such-host" in str(path) for path in roots))
 
     def test_root_reached_through_a_link_is_allowed(self):
         real = self.root / "storage"

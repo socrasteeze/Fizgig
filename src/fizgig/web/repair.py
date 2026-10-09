@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 from fizgig.web.fs import resolve_dir, resolve_file
@@ -224,17 +225,29 @@ def _fake() -> bool:
 
 def gpu_free() -> None:
     from fizgig.gpu_lock import held
-    from fizgig.web.engine_host import engine_loaded
+    from fizgig.web.engine_host import engine_device, engine_loaded
     from fizgig.web.jobs import _busy
     if engine_loaded():
         return
-    if _busy() or held():
+    device = engine_device()
+    if _busy(device) or held(device):
         raise JobError(409, {"detail": _GPU_BUSY})
 
 
+_RESERVED = re.compile(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])$", re.IGNORECASE)
+
+
+def _reserved_leaf(name: str) -> bool:
+    leaf = str(name or "").strip().replace("\\", "/").split("/")[-1]
+    stem = leaf.split(".", 1)[0].rstrip(" ")
+    return bool(stem and _RESERVED.match(stem))
+
+
 def _sanitize(name: str) -> str:
+    if _reserved_leaf(name):
+        raise JobError(422, {"problems": ["Invalid preset name."]})
     name = "".join(char for char in name if char.isalnum() or char in (" ", "_", "-")).strip()
-    if not name or name.startswith("✨"):
+    if not name or name.startswith("✨") or _reserved_leaf(name):
         raise JobError(422, {"problems": ["Invalid preset name."]})
     return name
 
@@ -330,14 +343,28 @@ def load(body: dict) -> dict:
     return host.status()
 
 
+def _checked_state(raw) -> dict:
+    """``ref_image_path`` must sit inside the same roots Explorer opens, or be empty."""
+    state = dict(raw) if isinstance(raw, dict) else {}
+    if "ref_image_path" not in state:
+        return state
+    text = str(state.get("ref_image_path") or "").strip()
+    if not text:
+        state["ref_image_path"] = ""
+        return state
+    from fizgig.web.explorer import _client_image
+    state["ref_image_path"] = _client_image(text)
+    return state
+
+
 def render(body: dict) -> dict:
-    """Accept a render. A higher ``gen`` cancels the one in flight (``_run_preview_async``)."""
+    """Accept a render. The host assigns the gen; a client counter is not authoritative."""
     from fizgig.web.engine_host import EngineError, get_host
     desc = _desc(str(body.get("family") or ""))
     host = get_host()
     if not host.loaded or host.engine_name not in {"repair", "profiler"}:
         raise JobError(422, {"problems": ["Load a LoRA before rendering."]})
-    state = body.get("state") if isinstance(body.get("state"), dict) else {}
+    state = _checked_state(body.get("state") if isinstance(body.get("state"), dict) else {})
     params = {
         "state": state,
         "steps": int(body.get("steps") or 3),
@@ -348,7 +375,7 @@ def render(body: dict) -> dict:
         "preview_settings": body.get("preview_settings") if isinstance(body.get("preview_settings"), dict) else None,
     }
     try:
-        gen = host.render(params, None if body.get("gen") is None else int(body.get("gen")))
+        gen = host.render(params)
     except EngineError as exc:
         raise JobError(422, {"problems": [exc.message]}) from exc
     return {"gen": gen, "status": "running"}
@@ -400,7 +427,15 @@ def read_preset(family: str, name: str) -> dict:
     builtins = _builtin_map(desc)
     if name in builtins:
         return {"name": name, "builtin": True, "blocks": builtin_blocks(desc, builtins[name])}
-    path = preset_dir(desc) / f"{name}.json"
+    name = _sanitize(name)
+    folder = preset_dir(desc).resolve()
+    path = (folder / f"{name}.json").resolve()
+    try:
+        path.relative_to(folder)
+    except ValueError:
+        raise JobError(422, {"problems": ["Invalid preset name."]}) from None
+    if path.parent != folder:
+        raise JobError(422, {"problems": ["Invalid preset name."]})
     if not path.is_file():
         raise JobError(404, {"detail": "no such preset"})
     try:
@@ -438,27 +473,79 @@ def _free(path: Path) -> Path:
         number += 1
 
 
-def _leaf(name: str) -> str:
-    text = (name or "").strip().replace("\\", "/")
-    leaf = text.split("/")[-1]
-    if text != leaf or leaf in {"", ".", ".."}:
-        raise JobError(422, {"problems": ["Enter an output name."]})
-    if not leaf.lower().endswith(".safetensors"):
-        leaf += ".safetensors"
-    return leaf
+_BAKER_BLOCK = re.compile(r"(?:lora_unet_)?(double_blocks|single_blocks)_(\d+)_")
+_BAKER_TXT = re.compile(r"txtfusion_(layerwise|refiner)_blocks_(\d+)_")
+_BAKER_REFINER = re.compile(r"token_refiner_blocks_(\d+)_")
+_BAKER_MAIN = re.compile(r"lora_unet_blocks_(\d+)_")
+
+
+def _baker_maps_key(key: str) -> bool:
+    return bool(
+        _BAKER_BLOCK.search(key) or _BAKER_TXT.search(key)
+        or _BAKER_REFINER.search(key) or _BAKER_MAIN.search(key)
+    )
+
+
+def _refuse_unmapped(family: str) -> None:
+    """The file baker only understands double/single, txtfusion, token_refiner, and lora_unet_blocks_N."""
+    from fizgig.families.registry import get as get_family
+    desc = get_family(family) if family else None
+    lora = getattr(desc, "lora", None) if desc is not None else None
+    sample = ""
+    if lora is not None:
+        module = lora.block_modules[0] if lora.block_modules else "block"
+        try:
+            sample = lora.key_template.format(block=0, module=module, ab=lora.down)
+        except Exception:
+            sample = ""
+    if sample and _baker_maps_key(sample):
+        return
+    raise JobError(422, {"problems": [
+        "This family's LoRA keys cannot be baked from the file. Load the engine and save from there.",
+    ]})
+
+
+def _inside_dir(dest: Path, folder: Path) -> None:
+    try:
+        dest.resolve().relative_to(folder.resolve())
+    except (OSError, ValueError):
+        raise JobError(422, {"problems": ["Enter an output name."]}) from None
+
+
+def engine_bake(engine_name: str, state, dest: str, include_donor: bool):
+    """``save_repaired`` on the loaded engine. None means the file baker should run."""
+    from fizgig.web.engine_host import EngineError, get_host
+    host = get_host()
+    if host.proc is None or not host.loaded or host.engine_name != engine_name:
+        return None
+    payload = state.to_json() if hasattr(state, "to_json") else state
+    try:
+        reply = host.request({
+            "op": "bake",
+            "state": payload,
+            "dest": str(dest),
+            "include_donor": bool(include_donor),
+        }, timeout=3600)
+    except EngineError as exc:
+        raise JobError(422, {"problems": [exc.message]}) from exc
+    if reply.get("ok"):
+        return reply.get("summary") or {}
+    if reply.get("fallback"):
+        return None
+    raise JobError(422, {"problems": [str(reply.get("error") or "bake failed")]})
 
 
 def bake(body: dict) -> dict:
-    """``LoRATrainerGUI._save_repaired_lora_action`` calls ``save_repaired_lora`` with these arguments.
+    """``LoRATrainerGUI._save_repaired_lora_action``.
 
-    A described family's live engine uses ``save_repaired`` instead. This path is the
-    file bake in ``repair_studio/bake.py``: primary, state, output, and the donor path
-    only when a donor block is enabled.
+    A loaded engine with ``save_repaired`` bakes through that method. The file
+    baker runs only when the loaded engine has no such method. Families whose
+    keys it cannot map are refused instead of written through unchanged.
     """
-    from fizgig.repair_studio.bake import save_repaired_lora
     from fizgig.repair_studio.state import SliderState
+    from fizgig.web.extract import _leaf as _output_leaf
     primary = _primary(body)
-    raw = body.get("state") if isinstance(body.get("state"), dict) else {}
+    raw = _checked_state(body.get("state") if isinstance(body.get("state"), dict) else {})
     state = SliderState.from_json(raw)
     donor_on = [bid for bid, row in state.blocks.items() if row.donor_enabled]
     donor_path = _donor(body) if donor_on else ""
@@ -467,9 +554,18 @@ def bake(body: dict) -> dict:
         default = f"{stem}_with_{Path(donor_path).stem}.safetensors"
     else:
         default = f"{stem}_repaired.safetensors"
-    leaf = _leaf(str(body.get("output_name") or default))
-    dest = _free(_output_dir() / leaf)
-    summary = save_repaired_lora(str(primary), state, str(dest), donor_path=donor_path or None)
+    leaf = _output_leaf(str(body.get("output_name") or default))
+    folder = _output_dir()
+    dest = _free(folder / leaf)
+    _inside_dir(dest, folder)
+    from fizgig.web.engine_host import get_host
+    host = get_host()
+    baked_by = host.engine_name if host.loaded and host.engine_name in {"repair", "profiler"} else ""
+    summary = engine_bake(baked_by, state, str(dest), bool(donor_on)) if baked_by else None
+    if summary is None:
+        _refuse_unmapped(str(body.get("family") or ""))
+        from fizgig.repair_studio.bake import save_repaired_lora
+        summary = save_repaired_lora(str(primary), state, str(dest), donor_path=donor_path or None)
     return {"path": str(dest), "summary": summary}
 
 

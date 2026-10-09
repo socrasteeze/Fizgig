@@ -75,6 +75,11 @@ class WebCaptionTests(unittest.TestCase):
         form = self.client.get("/api/captions/form")
         self.assertEqual(form.status_code, 200, form.text)
         self.assertIn("Whisper", form.json()["gaps"])
+        fields = {item["key"]: item for item in form.json()["fields"]}
+        self.assertEqual(fields["max_tokens"]["default"], 120)
+        self.assertIn("training caption", fields["instruction"]["default"].lower())
+        self.assertEqual(fields["model"]["default"], "MiaoshouAI/Florence-2-base-PromptGen")
+        self.assertNotIn("Qwen3-VL", fields["model"]["choices"])
         saved = self.client.put("/api/start", json={"folder": str(self.dataset)})
         self.assertEqual(saved.status_code, 200, saved.text)
         started = self.client.post("/api/captions/jobs", json={"trigger": "ohwx", "overwrite": True})
@@ -111,6 +116,40 @@ class WebCaptionTests(unittest.TestCase):
         removed = self.client.delete(f"/api/jobs/{job_id}")
         self.assertEqual(removed.status_code, 204, removed.text)
         self.assertTrue((self.dataset / "a.txt").is_file())
+
+    def test_defaults_follow_prefs_and_a_fail_line_ends_the_job(self):
+        import json
+        encoder = self.root / "encoder.safetensors"
+        encoder.write_bytes(b"not a model")
+        (self.root / "prefs.json").write_text(json.dumps({
+            "krea2_text_encoder": str(encoder),
+            "caption_qwen_instructions": {"training": "use this exact training caption"},
+        }), encoding="utf-8")
+        form = self.client.get("/api/captions/form").json()
+        fields = {item["key"]: item for item in form["fields"]}
+        self.assertEqual(fields["model"]["default"], "Qwen3-VL 4B (Krea 2 text encoder)")
+        self.assertIn("Qwen3-VL 4B (Krea 2 text encoder)", fields["model"]["choices"])
+        self.assertEqual(fields["instruction"]["default"], "use this exact training caption")
+        self.assertEqual(fields["max_tokens"]["default"], 120)
+
+        script = self.root / "hang_fail.py"
+        script.write_text(
+            "import sys\n"
+            "print('READY', flush=True)\n"
+            "for line in sys.stdin:\n"
+            "    if line.strip().startswith('RUN'):\n"
+            "        print('FAIL: boom', flush=True)\n"
+            "    if line.strip() == 'QUIT':\n"
+            "        break\n",
+            encoding="utf-8",
+        )
+        os.environ["FIZGIG_WEB_FAKE_CAPTION"] = str(script)
+        self.client.put("/api/start", json={"folder": str(self.dataset)})
+        started = self.client.post("/api/captions/jobs", json={"trigger": "ohwx", "model": "MiaoshouAI/Florence-2-base-PromptGen"})
+        self.assertEqual(started.status_code, 200, started.text)
+        job_id = started.json()["id"]
+        body = self._wait(lambda: (item := self.client.get(f"/api/jobs/{job_id}").json())["status"] in {"done", "failed", "stopped"} and item)
+        self.assertEqual(body["status"], "failed")
 
 
 if __name__ == "__main__":

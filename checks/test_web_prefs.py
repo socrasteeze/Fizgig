@@ -78,6 +78,26 @@ class WebPrefsTests(unittest.TestCase):
         self.assertEqual(on_disk["base_dit"], "D:/models/b.safetensors")
         self.assertEqual(on_disk["cache_dir"], "cache/phase2-pref")
 
+    def test_corrupt_prefs_are_not_replaced(self):
+        self.prefs.write_bytes(b"\xff\xfe not json {")
+        viewed = self.client.get("/api/prefs")
+        self.assertEqual(viewed.status_code, 200, viewed.text)
+        listed = self.client.get("/api/fs")
+        self.assertEqual(listed.status_code, 200, listed.text)
+        saved = self.client.put("/api/prefs", json={"values": {"web_caption_trigger": "ohwx", "cache_dir": "cache"}})
+        self.assertEqual(saved.status_code, 409, saved.text)
+        self.assertEqual(self.prefs.read_bytes(), b"\xff\xfe not json {")
+
+    def test_caption_trigger_is_saved_and_other_keys_stay(self):
+        saved = self.client.put("/api/prefs", json={"values": {"web_caption_trigger": "ohwx"}})
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertNotIn(_SECRET, saved.text)
+        on_disk = json.loads(self.prefs.read_text(encoding="utf-8"))
+        self.assertEqual(on_disk["web_caption_trigger"], "ohwx")
+        self.assertEqual(on_disk["runpod_api_key"], _SECRET)
+        self.assertEqual(on_disk["custom_token"], _TOKEN)
+        self.assertEqual(on_disk["base_dit"], "D:/models/a.safetensors")
+
 
 if __name__ == "__main__":
     unittest.main()

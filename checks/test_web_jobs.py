@@ -13,6 +13,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
@@ -20,7 +21,7 @@ sys.path.insert(0, str(_REPO / "src"))
 from fastapi.testclient import TestClient
 
 from fizgig.gpu_lock import GpuLock, held
-from fizgig.web import jobs
+from fizgig.web import jobs, queue
 from fizgig.web.app import app
 from fizgig.web.procs import creationflags
 
@@ -31,6 +32,14 @@ _PNG = (
     b"\x00\x00\x00\x00IEND\xaeB`\x82"
 )
 _EDIT = "Edit LoRA is on: set the Originals folder (Training tab, Training Parameters)"
+
+
+def _reset_queue() -> None:
+    queue._SEEN.clear()
+    queue._ACTIVE_SEEN.clear()
+    queue._READY.clear()
+    queue._HOLD.clear()
+    queue._DEVICE.clear()
 
 
 class WebJobTests(unittest.TestCase):
@@ -50,8 +59,13 @@ class WebJobTests(unittest.TestCase):
             "FIZGIG_WEB_FAKE_TRAINER": os.environ.get("FIZGIG_WEB_FAKE_TRAINER"),
             "FIZGIG_FAKE_STEPS": os.environ.get("FIZGIG_FAKE_STEPS"),
             "FIZGIG_FAKE_SLEEP": os.environ.get("FIZGIG_FAKE_SLEEP"),
+            "FIZGIG_WEB_ROOTS": os.environ.get("FIZGIG_WEB_ROOTS"),
+            "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES"),
+            "CUDA_DEVICE_ORDER": os.environ.get("CUDA_DEVICE_ORDER"),
         }
+        _reset_queue()
         os.environ["FIZGIG_WEB_JOBS"] = str(self.root / "jobs")
+        os.environ["FIZGIG_WEB_ROOTS"] = str(self.root)
         os.environ["FIZGIG_WEB_FAKE_TRAINER"] = str(_REPO / "checks" / "fake_trainer.py")
         os.environ["FIZGIG_FAKE_STEPS"] = "3"
         os.environ["FIZGIG_FAKE_SLEEP"] = "0.02"
@@ -83,6 +97,7 @@ class WebJobTests(unittest.TestCase):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+        _reset_queue()
         self._tmp.cleanup()
 
     def _job_runner_alive(self, job):
@@ -171,8 +186,12 @@ class WebJobTests(unittest.TestCase):
         if done["status"] != "done":
             log = (self.root / "jobs" / job_id / "log.txt").read_text(encoding="utf-8", errors="replace")
             self.fail(f"{done}\n{log}")
+        sample = self.output / "sample"
+        sample.mkdir(exist_ok=True)
+        (sample / "WebRun_e000001.png").write_bytes(_PNG)
+        (sample / "other_e000001.png").write_bytes(_PNG)
         listed = self.client.get(f"/api/jobs/{job_id}/samples").json()
-        self.assertEqual(listed["samples"][0]["name"], "sample_0001.png")
+        self.assertEqual([item["name"] for item in listed["samples"]], ["WebRun_e000001.png"])
         image = self.client.get(listed["samples"][0]["url"])
         self.assertEqual(image.status_code, 200)
         self.assertTrue(image.content.startswith(b"\x89PNG"))
@@ -198,7 +217,7 @@ class WebJobTests(unittest.TestCase):
             "mode", "state_path", "output_name", "dataset_config",
             "network_dim", "network_alpha", "max_train_epochs",
         })
-        self.assertFalse(jobs.pid_alive(running["pid"]))
+        self.wait_for(lambda: not jobs.pid_alive(running["pid"]))
         previous_child = int((self.output / "child.pid").read_text(encoding="utf-8"))
 
         os.environ["FIZGIG_FAKE_STEPS"] = "30"
@@ -377,6 +396,275 @@ class WebJobTests(unittest.TestCase):
         self.assertIn("event: progress", events.text)
         self.assertIn("event: system", events.text)
         self.assertNotIn("runpod_api_key", events.text)
+
+    def test_finished_job_does_not_reread_its_log(self):
+        folder = self.root / "jobs" / "logged"
+        folder.mkdir(parents=True)
+        job = {
+            "id": "logged",
+            "kind": "train",
+            "family": "sdxl",
+            "status": "done",
+            "step": 3,
+            "total": 4,
+            "loss": 0.1,
+            "created": "2020-01-01T00:00:00Z",
+            "output_dir": str(self.output),
+            "values": {"LORA_NAME": "Logged", "MAX_TRAIN_EPOCHS": 1},
+        }
+        (folder / "job.json").write_text(json.dumps(job), encoding="utf-8")
+        line = "steps: 9/10 [00:01<00:01, 1.00it/s, avr_loss=0.99]\n"
+        (folder / "log.txt").write_text(line * 20000, encoding="utf-8")
+        shown = self.client.get("/api/jobs/logged").json()
+        self.assertEqual(shown["step"], 3)
+        self.assertEqual(shown["loss"], 0.1)
+        past = self.client.get("/api/history").json()["jobs"]
+        row = next(item for item in past if item["id"] == "logged")
+        self.assertEqual(row["step"], 3)
+
+    def test_active_log_parses_only_new_bytes(self):
+        folder = self.root / "jobs" / "live-log"
+        folder.mkdir(parents=True)
+        job = {
+            "id": "live-log",
+            "kind": "train",
+            "family": "sdxl",
+            "status": "running",
+            "pid": os.getpid(),
+            "step": 0,
+            "total": 0,
+            "loss": None,
+            "created": "2020-01-01T00:00:00Z",
+            "output_dir": str(self.output),
+            "values": {"MAX_TRAIN_EPOCHS": 1},
+        }
+        (folder / "job.json").write_text(json.dumps(job), encoding="utf-8")
+        log = folder / "log.txt"
+        log.write_text("steps: 1/4 [00:01<00:03, 1.00it/s, avr_loss=0.20]\n", encoding="utf-8")
+        self.assertEqual(self.client.get("/api/jobs/live-log").json()["step"], 1)
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write("steps: 2/4 [00:02<00:02, 1.00it/s, avr_loss=0.30]\n")
+        body = self.client.get("/api/jobs/live-log").json()
+        self.assertEqual(body["step"], 2)
+        self.assertEqual(body["loss"], 0.3)
+
+    def test_launch_paths_stay_inside_roots(self):
+        denied = self.client.post("/api/jobs", json=self._payload(LORA_OUTPUT_DIR=r"Z:\fizgig-outside-root\nope"))
+        self.assertEqual(denied.status_code, 403, denied.text)
+        body = self._payload()
+        body["values"]["image_folder"] = r"Z:\fizgig-outside-root\images"
+        body["context"]["image_folder"] = body["values"]["image_folder"]
+        denied_images = self.client.post("/api/jobs", json=body)
+        self.assertEqual(denied_images.status_code, 403, denied_images.text)
+        created = self.root / "brand-new-lora"
+        body = self._payload(LORA_OUTPUT_DIR=str(created))
+        body["context"]["DATASET_CONFIG"] = str(created / "dataset.toml")
+        ok = self.client.post("/api/jobs", json=body)
+        self.assertEqual(ok.status_code, 200, ok.text)
+        self.assertTrue(created.is_dir())
+
+        folder = self.root / "jobs" / "evil-out"
+        folder.mkdir(parents=True)
+        (folder / "job.json").write_text(json.dumps({
+            "id": "evil-out",
+            "status": "done",
+            "output_dir": "\\\\no-such-host\\share\\out",
+            "created": "2020-01-01T00:00:00Z",
+        }), encoding="utf-8")
+        from fizgig.web import fs
+        started = time.time()
+        roots = fs.output_roots()
+        self.assertLess(time.time() - started, 2)
+        self.assertFalse(any("no-such-host" in str(path) for path in roots))
+
+    def test_pause_records_tidied_name_or_failure(self):
+        output = self.root / "tidy-out"
+        output.mkdir()
+        state = output / "WebRun-000001-state"
+        state.mkdir()
+        (state / "training_state.json").write_text("{}", encoding="utf-8")
+        folder = self.root / "jobs" / "tidy-pause"
+        folder.mkdir(parents=True)
+        job = {
+            "id": "tidy-pause",
+            "status": "running",
+            "output_dir": str(output),
+            "values": {"LORA_NAME": "WebRun."},
+            "dataset_config": str(output / "dataset.toml"),
+        }
+        (folder / "job.json").write_text(json.dumps(job), encoding="utf-8")
+        jobs.mark_paused(folder, job)
+        saved = json.loads((folder / "job.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["status"], "paused")
+        self.assertTrue(str(saved["state_path"]).endswith("WebRun-000001-state"))
+
+        missing = self.root / "jobs" / "no-state"
+        missing.mkdir(parents=True)
+        (missing / "job.json").write_text(json.dumps({
+            "id": "no-state", "status": "running", "output_dir": str(self.output),
+            "values": {"LORA_NAME": "Missing"},
+        }), encoding="utf-8")
+        jobs.mark_paused(missing, {
+            "id": "no-state", "status": "running", "output_dir": str(self.output),
+            "values": {"LORA_NAME": "Missing"},
+        })
+        saved = json.loads((missing / "job.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["status"], "failed")
+        self.assertEqual(saved["exit_code"], 0)
+        self.assertTrue(saved["ended"])
+
+    def test_pause_flag_survives_a_cache_stage(self):
+        from fizgig.web.runner import run_folder
+
+        output = self.root / "cache-pause"
+        output.mkdir()
+        (output / ".pause_requested").write_text("", encoding="utf-8")
+        script = self.root / "see_flag.py"
+        script.write_text(
+            "import os\nfrom pathlib import Path\n"
+            "out = Path(os.environ['FIZGIG_FAKE_OUTPUT'])\n"
+            "flag = out / '.pause_requested'\n"
+            "(out / 'cache_saw_flag').write_text('1' if flag.is_file() else '0', encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+        folder = self.root / "jobs" / "cache-pause"
+        folder.mkdir(parents=True)
+        job = {
+            "id": "cache-pause",
+            "kind": "train",
+            "family": "sdxl",
+            "device": 0,
+            "status": "queued",
+            "pid": 0,
+            "values": {"LORA_NAME": "WebRun", "MAX_TRAIN_EPOCHS": 1, "RESUME_TRAINING": ""},
+            "plan": {"stages": [
+                {"name": "Cache Preparation", "cmd": [sys.executable, str(script)]},
+                {"name": "Training", "cmd": [sys.executable, str(_REPO / "checks" / "fake_trainer.py")]},
+            ]},
+            "output_dir": str(output),
+            "created": "2020-01-01T00:00:00Z",
+        }
+        (folder / "job.json").write_text(json.dumps(job), encoding="utf-8")
+        os.environ["FIZGIG_FAKE_STEPS"] = "4"
+        os.environ["FIZGIG_FAKE_SLEEP"] = "0.01"
+        run_folder(folder)
+        saved = json.loads((folder / "job.json").read_text(encoding="utf-8"))
+        self.assertEqual((output / "cache_saw_flag").read_text(encoding="utf-8"), "1")
+        self.assertEqual(saved["status"], "paused", (folder / "log.txt").read_text(encoding="utf-8", errors="replace") if (folder / "log.txt").is_file() else saved)
+        self.assertTrue((output / "WebRun-000001-state").is_dir())
+
+    def test_status_write_does_not_kill_the_trainer(self):
+        from fizgig.web import runner
+
+        output = self.root / "write-skip"
+        output.mkdir()
+        folder = self.root / "jobs" / "write-skip"
+        folder.mkdir(parents=True)
+        job = {
+            "id": "write-skip",
+            "kind": "train",
+            "family": "sdxl",
+            "device": 0,
+            "status": "queued",
+            "pid": 0,
+            "values": {"LORA_NAME": "WebRun", "MAX_TRAIN_EPOCHS": 1},
+            "plan": {"stages": [
+                {"name": "Training", "cmd": [sys.executable, str(_REPO / "checks" / "fake_trainer.py")]},
+            ]},
+            "output_dir": str(output),
+            "created": "2020-01-01T00:00:00Z",
+        }
+        (folder / "job.json").write_text(json.dumps(job), encoding="utf-8")
+        os.environ["FIZGIG_FAKE_STEPS"] = "2"
+        os.environ["FIZGIG_FAKE_SLEEP"] = "0.01"
+        real = runner.save
+        calls = {"n": 0}
+
+        def flaky(target, record):
+            if record.get("step") and calls["n"] < 2:
+                calls["n"] += 1
+                raise PermissionError("busy")
+            return real(target, record)
+
+        with patch("fizgig.web.runner.save", side_effect=flaky):
+            runner.run_folder(folder)
+        saved = json.loads((folder / "job.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["status"], "done")
+        self.assertGreaterEqual(calls["n"], 1)
+
+    def test_spawn_failure_and_stale_queue_are_failed(self):
+        with patch("fizgig.web.jobs.subprocess.Popen", side_effect=OSError("nope")):
+            created = self._create()
+        job_id = created["id"]
+        self.assertEqual(self.client.get(f"/api/jobs/{job_id}").json()["status"], "failed")
+
+        folder = self.root / "jobs" / "stuck"
+        folder.mkdir(parents=True)
+        (folder / "job.json").write_text(json.dumps({
+            "id": "stuck", "status": "queued", "pid": 0, "kind": "train",
+            "created": "2020-01-01T00:00:00Z", "output_dir": str(self.output),
+        }), encoding="utf-8")
+        jobs.reconcile()
+        self.assertEqual(json.loads((folder / "job.json").read_text(encoding="utf-8"))["status"], "queued")
+        old = time.time() - 60
+        os.utime(folder / "job.json", (old, old))
+        jobs.reconcile()
+        self.assertEqual(json.loads((folder / "job.json").read_text(encoding="utf-8"))["status"], "failed")
+
+    def test_log_is_capped_and_tail_is_marked(self):
+        created = self._create()
+        job_id = created["id"]
+        self.wait_for(lambda: self.client.get(f"/api/jobs/{job_id}").json()["status"] == "done")
+        path = self.root / "jobs" / job_id / "log.txt"
+        blob = b"A" * (300 * 1024)
+        path.write_bytes(blob)
+        part = self.client.get(f"/api/jobs/{job_id}/log", params={"offset": 0}).json()
+        self.assertEqual(set(part), {"offset", "next", "text"})
+        self.assertEqual(part["offset"], 0)
+        self.assertLessEqual(len(part["text"].encode("utf-8")), 256 * 1024)
+        self.assertEqual(part["next"], len(part["text"].encode("utf-8")))
+        tail = self.client.get(f"/api/jobs/{job_id}/log", params={"offset": -1}).json()
+        self.assertEqual(tail["offset"], len(blob) - 256 * 1024)
+        self.assertEqual(tail["next"], len(blob))
+        self.assertEqual(len(tail["text"].encode("utf-8")), 256 * 1024)
+
+    def test_samples_keep_this_lora_and_the_latest(self):
+        folder = self.root / "jobs" / "gallery"
+        folder.mkdir(parents=True)
+        output = self.root / "gallery-out"
+        sample = output / "sample"
+        sample.mkdir(parents=True)
+        (folder / "job.json").write_text(json.dumps({
+            "id": "gallery", "status": "done", "output_dir": str(output),
+            "values": {"LORA_NAME": "Web Run"}, "created": "2020-01-01T00:00:00Z",
+        }), encoding="utf-8")
+        now = time.time()
+        for index in range(50):
+            path = sample / f"Web Run_e{index:06d}.png"
+            path.write_bytes(_PNG)
+            stamp = now + index
+            os.utime(path, (stamp, stamp))
+        (sample / "Other_e000001.png").write_bytes(_PNG)
+        (sample / "sample_0001.png").write_bytes(_PNG)
+        listed = self.client.get("/api/jobs/gallery/samples").json()["samples"]
+        self.assertEqual(len(listed), 48)
+        self.assertTrue(all(item["name"].startswith("Web Run_") for item in listed))
+        self.assertEqual(listed[0]["name"], "Web Run_e000049.png")
+        self.assertIn("%20", listed[0]["url"])
+        image = self.client.get(listed[0]["url"])
+        self.assertEqual(image.status_code, 200)
+        self.assertTrue(image.content.startswith(b"\x89PNG"))
+
+    def test_corrupt_record_can_be_deleted(self):
+        folder = self.root / "jobs" / "broken"
+        folder.mkdir(parents=True)
+        (folder / "job.json").write_bytes(b"\xff\xfe not json")
+        (folder / "log.txt").write_text("keep", encoding="utf-8")
+        listed = self.client.get("/api/jobs").json()["jobs"]
+        self.assertTrue(any(item["id"] == "broken" and item["status"] == "corrupt" for item in listed))
+        removed = self.client.delete("/api/jobs/broken")
+        self.assertEqual(removed.status_code, 204, removed.text)
+        self.assertFalse(folder.exists())
 
 
 if __name__ == "__main__":

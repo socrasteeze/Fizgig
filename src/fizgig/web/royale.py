@@ -106,11 +106,12 @@ def _desc(family: str):
 
 def _gpu_free() -> None:
     from fizgig.gpu_lock import held
-    from fizgig.web.engine_host import engine_loaded
+    from fizgig.web.engine_host import engine_device, engine_loaded
     from fizgig.web.jobs import _busy
     if engine_loaded():
         return
-    if _busy() or held():
+    device = engine_device()
+    if _busy(device) or held(device):
         raise JobError(409, {"detail": _GPU_BUSY})
 
 
@@ -211,13 +212,15 @@ def load(body: dict) -> dict:
     return host.status()
 
 
-def _host_render(params: dict, gen):
+def _host_render(params: dict, gen=None):
+    """The host assigns the gen. ``gen`` from the client is ignored."""
+    del gen
     from fizgig.web.engine_host import EngineError, get_host
     host = get_host()
     if not host.loaded or host.engine_name != "royale":
         raise JobError(422, {"problems": ["Load a LoRA before rendering."]})
     try:
-        return host.render(params, None if gen is None else int(gen))
+        return host.render(params)
     except EngineError as exc:
         raise JobError(422, {"problems": [exc.message]}) from exc
 
@@ -361,7 +364,10 @@ def export(body: dict) -> dict:
     folder_text = str(body.get("folder") or "").strip()
     run = run_name_for_folder(str(resolve_dir(folder_text))) if folder_text else ""
     run = run or "lora"
-    dest = str(Path(_output_dir()) / f"{run}-royale{'.mp4' if fmt == 'MP4' else '.gif'}")
+    from fizgig.web.repair import _free
+    ext = ".mp4" if fmt == "MP4" else ".gif"
+    base = Path(_output_dir()) / f"{run}-royale{ext}"
+    dest = str(base if body.get("overwrite") else _free(base))
     width, height = _image_size(images[0], body)
     values = {
         "images": images,

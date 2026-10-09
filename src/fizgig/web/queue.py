@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -71,7 +72,16 @@ def _write(items: list[dict]) -> None:
     path = _path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(items, indent=2), encoding="utf-8")
+    payload = json.dumps(items, indent=2)
+    # Windows denies the replace while a reader still has queue.json open.
+    for _ in range(25):
+        try:
+            tmp.write_text(payload, encoding="utf-8")
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            time.sleep(0.02)
+    tmp.write_text(payload, encoding="utf-8")
     os.replace(tmp, path)
 
 
@@ -259,36 +269,77 @@ def arm(job_id: str) -> None:
         _ACTIVE_SEEN.add(job_id)
 
 
+def _drop_ready(ids: list[str]) -> None:
+    for job_id in ids:
+        _READY.discard(job_id)
+
+
 def observe(rows: list[dict]) -> None:
-    """Start the next queued run on each device whose training job this process watched finishes cleanly."""
-    launches = []
+    """Start the next queued run when a training job in this call's rows finishes cleanly.
+
+    The first time this process sees a job (no previous status) does not arm, so a
+    run that is already done does not start the queue. A transition to failed does
+    not arm. The ready mark is dropped once this call launches, finds nothing, or
+    the device is held. It stays only when the launch was skipped because the
+    device is busy. A job id that is not in ``rows`` cannot launch anything.
+    """
+    launches: list[tuple[dict, list[str]]] = []
     with _LOCK:
         busy: set[int] = set()
+        failed: set[int] = set()
+        present: set[str] = set()
         for job in rows:
             if (job.get("kind") or "train") != "train":
                 continue
+            job_id = str(job.get("id") or "")
+            if not job_id:
+                continue
+            present.add(job_id)
             status = job.get("status") or ""
-            job_id = job.get("id") or ""
             device = _device_index(job.get("device"))
-            _DEVICE[job_id] = device
+            prev = _SEEN.get(job_id)
             _SEEN[job_id] = status
+            _DEVICE[job_id] = device
             if status in {"queued", "running"}:
                 busy.add(device)
                 _ACTIVE_SEEN.add(job_id)
-            elif status == "done" and job_id in _ACTIVE_SEEN:
+            elif status == "done" and prev in {"queued", "running"}:
                 _READY.add(job_id)
-        armed = {_DEVICE[job_id] for job_id in _READY if job_id in _DEVICE}
-        if not armed:
+            elif status == "failed" and prev in {"queued", "running"}:
+                failed.add(device)
+        for job_id in list(_READY):
+            if job_id not in present:
+                _READY.discard(job_id)
+        by_device: dict[int, list[str]] = {}
+        for job_id in list(_READY):
+            device = _DEVICE.get(job_id)
+            if device is None:
+                _READY.discard(job_id)
+                continue
+            by_device.setdefault(device, []).append(job_id)
+        for device in failed:
+            _drop_ready(by_device.pop(device, []))
+        if not by_device:
             return
         picked: set[int] = set()
         for item in _read():
             device = _device_index(item.get("device"))
-            if device in picked or device in busy or device in _HOLD or device not in armed:
+            if device not in by_device or device in picked or device in busy or device in _HOLD:
                 continue
             picked.add(device)
-            launches.append(item)
-    for head in launches:
-        _launch(head)
+            ids = list(by_device[device])
+            _drop_ready(ids)
+            launches.append((item, ids))
+        for device, ids in by_device.items():
+            if device in picked:
+                continue
+            if device in busy and device not in _HOLD:
+                continue
+            _drop_ready(ids)
+    for head, ids in launches:
+        if _launch(head) is None:
+            with _LOCK:
+                _READY.update(ids)
 
 
 def advance(confirm: list[str] | None = None, device: int | None = None) -> dict:
@@ -322,7 +373,7 @@ def _launch(head: dict, confirm: list[str] | None = None, manual: bool = False) 
         detail = (exc.body or {}).get("detail")
         retry = exc.status == 409 and detail in {"a run is already active", "the GPU is in use"}
         if retry and not manual:
-            return {}
+            return None
         if not retry:
             with _LOCK:
                 _HOLD.add(device)

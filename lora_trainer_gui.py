@@ -29627,7 +29627,17 @@ class LoRATrainerGUI:
             pass
 
         from fizgig.gpu_lock import held as _gpu_held
-        if _gpu_held():
+        _cuda_env = self._cuda_env_for_subprocess(os.environ.copy())
+        _visible = str(_cuda_env.get("CUDA_VISIBLE_DEVICES") or "").split(",")[0].strip()
+        if _visible.isdigit():
+            _gpu_index = int(_visible)
+        else:
+            _gpu_index = 0
+            for _info in getattr(self, "_gpu_info", {}).values():
+                if _info[3] == _visible:
+                    _gpu_index = _info[0]
+                    break
+        if _gpu_held(_gpu_index):
             messagebox.showerror(
                 "GPU in use",
                 "Another Fizgig run already has this GPU. Wait for it to finish, then start again.")
@@ -29941,7 +29951,17 @@ class LoRATrainerGUI:
             The exit handler releases it once a subprocess has started.
             """
             from fizgig.gpu_lock import GpuLock
-            lock = GpuLock()
+            _cuda_env = self._cuda_env_for_subprocess(os.environ.copy())
+            _visible = str(_cuda_env.get("CUDA_VISIBLE_DEVICES") or "").split(",")[0].strip()
+            if _visible.isdigit():
+                _gpu_index = int(_visible)
+            else:
+                _gpu_index = 0
+                for _info in getattr(self, "_gpu_info", {}).values():
+                    if _info[3] == _visible:
+                        _gpu_index = _info[0]
+                        break
+            lock = GpuLock(_gpu_index)
             if not lock.acquire():
                 messagebox.showerror(
                     "GPU in use",

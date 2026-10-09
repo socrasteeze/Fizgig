@@ -44,6 +44,7 @@ def run_folder(folder: Path) -> None:
     except (TypeError, ValueError):
         device = 0
     os.environ["CUDA_VISIBLE_DEVICES"] = str(device)
+    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     lock = GpuLock(device)
     if not lock.acquire():
         output = Path(job.get("output_dir") or "")
@@ -142,35 +143,54 @@ def _run(folder: Path, job: dict) -> None:
                 **popen,
             )
             assert proc.stdout is not None
-            for line in proc.stdout:
-                log.write(line)
-                log.flush()
-                update = tracker.consume(line)
-                if update and update.get("kind") == "training":
-                    job["step"] = int(update["step"])
-                    job["total"] = int(update["total_steps"])
-                    parsed = _loss(update.get("average_loss_text"))
-                    if parsed is not None:
-                        job["loss"] = parsed
-                    if not save(folder, job):
-                        proc.kill()
-                        return
-            code = proc.wait()
+            code = 1
+            try:
+                for line in proc.stdout:
+                    try:
+                        log.write(line)
+                        log.flush()
+                    except OSError:
+                        pass
+                    update = tracker.consume(line)
+                    if update and update.get("kind") == "training":
+                        job["step"] = int(update["step"])
+                        job["total"] = int(update["total_steps"])
+                        parsed = _loss(update.get("average_loss_text"))
+                        if parsed is not None:
+                            job["loss"] = parsed
+                        try:
+                            if not save(folder, job):
+                                proc.kill()
+                                break
+                        except OSError:
+                            pass
+                if proc.poll() is None and (folder / "STOP").is_file():
+                    proc.kill()
+                code = proc.wait()
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    try:
+                        proc.wait()
+                    except OSError:
+                        pass
+                if proc.stdout is not None:
+                    proc.stdout.close()
             if (folder / "STOP").is_file():
                 job["status"] = "stopped"
                 job["ended"] = _now()
                 save(folder, job)
                 return
-            pause = output / ".pause_requested"
-            paused = pause.is_file()
-            if paused:
-                try:
-                    pause.unlink()
-                except OSError:
-                    pass
-            if code == 0 and paused:
-                mark_paused(folder, job)
-                return
+            # A cache stage must keep going. The trainer is what reads the flag.
+            if (stage.get("name") or "") == "Training":
+                pause = output / ".pause_requested"
+                if code == 0 and pause.is_file():
+                    try:
+                        pause.unlink()
+                    except OSError:
+                        pass
+                    mark_paused(folder, job)
+                    return
             if code != 0:
                 job["status"] = "failed"
                 job["exit_code"] = code
@@ -230,14 +250,26 @@ def _run_caption(folder: Path, job: dict) -> None:
     proc = _popen(command(folder), env, subprocess.PIPE)
     assert proc.stdin is not None and proc.stdout is not None
     saw_done = False
+    sent_run = False
     with log_path.open("a", encoding="utf-8", errors="replace") as log:
         for line in proc.stdout:
-            log.write(line)
-            log.flush()
+            try:
+                log.write(line)
+                log.flush()
+            except OSError:
+                pass
             text = line.strip()
             if text == "READY":
                 proc.stdin.write(f"RUN {folder / 'caption_job.json'}\n")
                 proc.stdin.flush()
+                sent_run = True
+            elif text.startswith("FAIL:") and sent_run:
+                try:
+                    proc.stdin.write("QUIT\n")
+                    proc.stdin.flush()
+                except OSError:
+                    pass
+                break
             elif text.startswith("PROGRESS:"):
                 parts = text.split()
                 if len(parts) >= 3:
@@ -263,8 +295,8 @@ def _run_caption(folder: Path, job: dict) -> None:
                 except OSError:
                     pass
                 break
-            elif text.startswith("FAIL:") and not saw_done and job.get("step", 0) == 0 and "job" not in text:
-                # A failure before READY (model load). Keep reading until the process exits.
+            elif text.startswith("FAIL:"):
+                # A failure before RUN (model load). Keep reading until the process exits.
                 pass
     code = proc.wait()
     if (folder / "STOP").is_file() or (folder / "caption_stop").is_file():

@@ -28,7 +28,7 @@ class WebRoyaleTests(unittest.TestCase):
     def setUp(self):
         shutdown()
         self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name)
+        self.root = Path(self._tmp.name).resolve()
         self.output = self.root / "output"
         self.output.mkdir()
         self.lora = self.output / "Demo.safetensors"
@@ -141,18 +141,21 @@ class WebRoyaleTests(unittest.TestCase):
             "epochs": epochs, "max_renders": "All",
         })
         second = royale.render({
-            "family": "klein", "steps": 2, "gen": 2, "prompt": "a cat",
+            "family": "klein", "steps": 2, "gen": 1, "prompt": "a cat",
             "epochs": epochs, "max_renders": "All",
         })
-        self.assertEqual((first["gen"], second["gen"]), (1, 2))
+        self.assertEqual(second["gen"], first["gen"] + 1)
+        self.assertNotEqual(first["gen"], 1)
+        self.assertEqual(second["status"], "running")
         seen = []
+        want = second["gen"]
         self._wait(lambda: seen.extend(host.drain()) or any(
-            item.get("event") == "done" and item.get("gen") == 2 for item in seen))
+            item.get("event") == "done" and item.get("gen") == want for item in seen))
         dones = [item for item in seen if item.get("event") == "done"]
         frames = [item for item in seen if item.get("event") == "frame"]
-        self.assertEqual([item["gen"] for item in dones], [2])
+        self.assertEqual([item["gen"] for item in dones], [want])
         self.assertTrue(frames)
-        self.assertTrue(all(item["gen"] == 2 and item.get("side") == "epoch" for item in frames))
+        self.assertTrue(all(item["gen"] == want and item.get("side") == "epoch" for item in frames))
 
     def test_export_command_and_file(self):
         get_host().unload()
@@ -199,6 +202,29 @@ class WebRoyaleTests(unittest.TestCase):
         self.assertEqual(body["status"], "done", detail)
         self.assertTrue(Path(dest).is_file())
         self.assertEqual(Path(dest).read_bytes(), b"fake-mp4")
+        again = royale.export({
+            "images": [str(image)],
+            "format": "MP4",
+            "speed": "Normal",
+            "folder": str(self.output),
+        })
+        second = json.loads((Path(os.environ["FIZGIG_WEB_JOBS"]) / again["id"] / "job.json").read_text(encoding="utf-8"))
+        self.assertTrue(str(second["values"]["dest"]).endswith("lora-royale_2.mp4"))
+
+        def second_done():
+            body = self.client.get(f"/api/jobs/{again['id']}").json()
+            return body if body.get("status") in {"done", "failed", "stopped"} else None
+
+        self._wait(second_done)
+        replaced = royale.export({
+            "images": [str(image)],
+            "format": "MP4",
+            "speed": "Normal",
+            "folder": str(self.output),
+            "overwrite": True,
+        })
+        third = json.loads((Path(os.environ["FIZGIG_WEB_JOBS"]) / replaced["id"] / "job.json").read_text(encoding="utf-8"))
+        self.assertTrue(str(third["values"]["dest"]).endswith("lora-royale.mp4"))
 
     def test_export_rejects_image_outside_roots(self):
         good = self.output / "frame.png"

@@ -19,9 +19,10 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# status without --json exits 1 until up. --json exits 0 in any backend state.
 i=0
 while [ "$i" -lt 50 ]; do
-  if tailscale status >/dev/null 2>&1; then
+  if tailscale status --json >/dev/null 2>&1; then
     i=0
     break
   fi
@@ -39,9 +40,25 @@ else
   tailscale up
 fi
 
+if [ -z "${FIZGIG_WEB_TAILNET_HOST:-}" ]; then
+  json=$(tailscale status --json 2>/dev/null || true)
+  flat=$(printf '%s' "$json" | tr -d ' \t\r\n')
+  dns=${flat#*\"DNSName\":\"}
+  case "$dns" in
+    "$flat") dns="" ;;
+    *) dns=${dns%%\"*} ;;
+  esac
+  dns=${dns%.}
+  if [ -n "$dns" ]; then
+    export FIZGIG_WEB_TAILNET_HOST="$dns"
+  fi
+fi
+
 tailscale serve --bg 8081
 
 echo "web server is listening on 127.0.0.1:8081"
+export FIZGIG_PREFS_FILE="${FIZGIG_PREFS_FILE:-/workspace/prefs.json}"
+export FIZGIG_WEB_ROOTS="${FIZGIG_WEB_ROOTS:-/workspace}"
 if [ -d /opt/fizgig ]; then
   cd /opt/fizgig
 fi

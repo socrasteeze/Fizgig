@@ -59,6 +59,34 @@ function readError(response: Response): Promise<string> {
   );
 }
 
+function finiteNumber(value: string, fallback: number): number {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return fallback;
+  }
+  const number = Number(text);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+let repairGen: number | null = null;
+let repairWait = false;
+
+interface Draft {
+  blocks: Record<string, BlockRow>;
+  prompt: string;
+  seed: string;
+  resolution: string;
+  reference: string;
+  refMp: string;
+  refStrength: string;
+  primaryScale: string;
+  donorScale: string;
+  negative: string;
+  family: string;
+  early: boolean;
+  video: boolean;
+}
+
 export function RepairPanel() {
   const [form, setForm] = useState<RepairForm | null>(null);
   const [family, setFamily] = useState("");
@@ -85,8 +113,37 @@ export function RepairPanel() {
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [armed, setArmed] = useState(false);
-  const gen = useRef(0);
   const timer = useRef<number | null>(null);
+  const draft = useRef<Draft>({
+    blocks: {},
+    prompt: "",
+    seed: "42",
+    resolution: "768",
+    reference: "",
+    refMp: "1",
+    refStrength: "1",
+    primaryScale: "1",
+    donorScale: "1",
+    negative: "",
+    family: "",
+    early: false,
+    video: false,
+  });
+  draft.current = {
+    blocks,
+    prompt,
+    seed,
+    resolution,
+    reference,
+    refMp,
+    refStrength,
+    primaryScale,
+    donorScale,
+    negative,
+    family,
+    early,
+    video: Boolean(form?.video),
+  };
   const paths = useRef({ baseline: "", image: "" });
   const pending = useRef<{
     family?: string;
@@ -160,75 +217,117 @@ export function RepairPanel() {
   }, []);
 
   useEffect(() => {
-    const source = new EventSource("/api/events");
-    source.addEventListener("engine", (event) => {
-      const body = JSON.parse((event as MessageEvent).data) as EngineEvent;
-      if (body.event === "loading") {
-        setStatus("Loading…");
-      } else if (body.event === "frame" && body.file_url && body.side !== "baseline") {
-        setImageUrl(body.file_url);
-        setStatus(`Rendering, pass ${body.step} of ${body.total}`);
-      } else if (body.event === "done") {
-        if (body.baseline_url) {
-          setBaselineUrl(body.baseline_url);
-          paths.current.baseline = "";
+    let source: EventSource | null = null;
+    let retry: number | null = null;
+    let stopped = false;
+
+    function open() {
+      source = new EventSource("/api/events");
+      source.addEventListener("engine", (event) => {
+        const body = JSON.parse((event as MessageEvent).data) as EngineEvent;
+        if (body.gen != null && (body.event === "frame" || body.event === "done" || body.event === "cancelled")) {
+          if (repairWait && (body.event === "frame" || body.event === "done")) {
+            repairGen = body.gen;
+            repairWait = false;
+          }
+          if (body.gen !== repairGen) {
+            return;
+          }
         }
-        if (body.image_url) {
-          setImageUrl(body.image_url);
+        if (body.event === "loading") {
+          setStatus("Loading…");
+        } else if (body.event === "frame" && body.file_url && body.side !== "baseline") {
+          setImageUrl(body.file_url);
+          setStatus(`Rendering, pass ${body.step} of ${body.total}`);
+        } else if (body.event === "done") {
+          if (body.baseline_url) {
+            setBaselineUrl(body.baseline_url);
+            paths.current.baseline = "";
+          }
+          if (body.image_url) {
+            setImageUrl(body.image_url);
+          }
+          setClipUrl(body.clip_url || "");
+          setStatus("Ready.");
+        } else if (body.event === "cancelled") {
+          setStatus("Restarting with your latest change…");
+        } else if (body.event === "error") {
+          setError(body.message || "The engine failed.");
+          if (body.restarted) {
+            setStatus("The engine worker stopped. It will start again on the next request.");
+          }
+        } else if (body.event === "unloaded") {
+          setStatus("Unloaded.");
         }
-        setClipUrl(body.clip_url || "");
-        setStatus("Ready.");
-      } else if (body.event === "cancelled") {
-        setStatus("Restarting with your latest change…");
-      } else if (body.event === "error") {
-        setError(body.message || "The engine failed.");
-        if (body.restarted) {
-          setStatus("The engine worker stopped. It will start again on the next request.");
+      });
+      source.onerror = () => {
+        if (stopped || source == null || source.readyState !== EventSource.CLOSED) {
+          return;
         }
-      } else if (body.event === "unloaded") {
-        setStatus("Unloaded.");
+        source.close();
+        source = null;
+        retry = window.setTimeout(() => {
+          retry = null;
+          if (!stopped) {
+            open();
+          }
+        }, 2000);
+      };
+    }
+
+    open();
+    return () => {
+      stopped = true;
+      if (retry != null) {
+        window.clearTimeout(retry);
       }
-    });
-    return () => source.close();
+      source?.close();
+    };
   }, []);
 
   function stateBody() {
-    const size = Number(resolution) || 768;
+    const current = draft.current;
+    const size = finiteNumber(current.resolution, 768);
     return {
-      blocks,
-      prompt,
-      seed: Number(seed) || 42,
+      blocks: current.blocks,
+      prompt: current.prompt,
+      seed: finiteNumber(current.seed, 42),
       preview_width: size,
       preview_height: size,
-      ref_image_path: reference,
-      ref_megapixels: Number(refMp) || 1,
-      ref_strength: Number(refStrength) || 1,
-      primary_scale: Number(primaryScale) || 1,
-      donor_scale: Number(donorScale) || 1,
+      ref_image_path: current.reference,
+      ref_megapixels: finiteNumber(current.refMp, 1),
+      ref_strength: finiteNumber(current.refStrength, 1),
+      primary_scale: finiteNumber(current.primaryScale, 1),
+      donor_scale: finiteNumber(current.donorScale, 1),
     };
   }
 
   async function render() {
-    gen.current += 1;
     setError("");
+    repairWait = true;
+    const current = draft.current;
     const response = await fetch("/api/repair/render", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        family,
-        gen: gen.current,
+        family: current.family,
         steps: 3,
-        video: Boolean(form?.video),
-        early_step: early ? 1 : 0,
+        video: current.video,
+        early_step: current.early ? 1 : 0,
         state: stateBody(),
-        preview_settings: { negative, steps: "", cfg: "", turbo: "0" },
+        preview_settings: { negative: current.negative, steps: "", cfg: "", turbo: "0" },
       }),
     });
     if (!response.ok) {
+      repairWait = false;
       setError(await readError(response));
       return;
     }
     const body = await response.json();
+    repairWait = false;
+    if (typeof body.gen === "number") {
+      repairGen = body.gen;
+    }
     const done = await fetch("/api/repair/status").then((item) => item.json());
     const result = done.result;
     if (result && result.gen === body.gen) {
@@ -274,6 +373,7 @@ export function RepairPanel() {
     if (!form) {
       return;
     }
+    draft.current = { ...draft.current, blocks: form.defaults.blocks };
     applyBlocks(form.defaults.blocks);
     schedule(true);
   }
@@ -289,7 +389,13 @@ export function RepairPanel() {
       setError(await readError(response));
       return;
     }
-    load(family);
+    const listed = await fetch(`/api/repair/presets?family=${encodeURIComponent(family)}`);
+    if (listed.ok) {
+      const body = await listed.json() as { builtins?: string[]; presets?: string[] };
+      const builtins = body.builtins || [];
+      const names = builtins.concat((body.presets || []).filter((name) => !builtins.includes(name)));
+      setForm((current) => (current ? { ...current, presets: names } : current));
+    }
     setPreset(presetName);
   }
 
@@ -301,15 +407,14 @@ export function RepairPanel() {
       return;
     }
     const body = await response.json();
-    setBlocks((current) => {
-      const next = { ...current };
-      for (const [id, row] of Object.entries(body.blocks || {}) as Array<[string, BlockRow]>) {
-        if (next[id]) {
-          next[id] = { ...next[id], ...row };
-        }
+    const next = { ...draft.current.blocks };
+    for (const [id, row] of Object.entries(body.blocks || {}) as Array<[string, BlockRow]>) {
+      if (next[id]) {
+        next[id] = { ...next[id], ...row };
       }
-      return next;
-    });
+    }
+    draft.current = { ...draft.current, blocks: next };
+    setBlocks(next);
     schedule(true);
   }
 
@@ -346,7 +451,9 @@ export function RepairPanel() {
   }
 
   function setRow(id: string, patch: Partial<BlockRow>) {
-    setBlocks((current) => ({ ...current, [id]: { ...current[id], ...patch } }));
+    const next = { ...draft.current.blocks, [id]: { ...draft.current.blocks[id], ...patch } };
+    draft.current = { ...draft.current, blocks: next };
+    setBlocks(next);
     schedule(false);
   }
 
@@ -358,7 +465,17 @@ export function RepairPanel() {
         <div className="field">
           <label>
             Family
-            <select value={family} onChange={(event) => { setFamily(event.target.value); load(event.target.value); }}>
+            <select value={family} onChange={(event) => {
+              const next = event.target.value;
+              setFamily(next);
+              setArmed(false);
+              setBaselineUrl("");
+              setImageUrl("");
+              setClipUrl("");
+              setMetrics("");
+              setStatus("");
+              load(next);
+            }}>
               {families.map((item) => <option key={item.key} value={item.key}>{item.name}</option>)}
             </select>
           </label>
@@ -402,25 +519,41 @@ export function RepairPanel() {
         <div className="field">
           <label>
             Prompt
-            <textarea value={prompt} onChange={(event) => { setPrompt(event.target.value); schedule(false); }} />
+            <textarea value={prompt} onChange={(event) => {
+              draft.current = { ...draft.current, prompt: event.target.value };
+              setPrompt(event.target.value);
+              schedule(false);
+            }} />
           </label>
         </div>
         <div className="field">
           <label>
             Negative
-            <input value={negative} onChange={(event) => { setNegative(event.target.value); schedule(false); }} />
+            <input value={negative} onChange={(event) => {
+              draft.current = { ...draft.current, negative: event.target.value };
+              setNegative(event.target.value);
+              schedule(false);
+            }} />
           </label>
         </div>
         <div className="field">
           <label>
             Seed
-            <input value={seed} onChange={(event) => { setSeed(event.target.value); schedule(false); }} />
+            <input value={seed} onChange={(event) => {
+              draft.current = { ...draft.current, seed: event.target.value };
+              setSeed(event.target.value);
+              schedule(false);
+            }} />
           </label>
         </div>
         <div className="field">
           <label>
             Resolution
-            <select value={resolution} onChange={(event) => { setResolution(event.target.value); schedule(false); }}>
+            <select value={resolution} onChange={(event) => {
+              draft.current = { ...draft.current, resolution: event.target.value };
+              setResolution(event.target.value);
+              schedule(false);
+            }}>
               {(form?.resolutions || []).map((item) => <option key={item} value={item}>{item}</option>)}
             </select>
           </label>
@@ -428,9 +561,17 @@ export function RepairPanel() {
         <div className="field">
           <label>
             Reference
-            <input value={reference} onChange={(event) => { setReference(event.target.value); schedule(false); }} />
+            <input value={reference} onChange={(event) => {
+              draft.current = { ...draft.current, reference: event.target.value };
+              setReference(event.target.value);
+              schedule(false);
+            }} />
           </label>
-          <BrowseButton select="file" onPick={(path) => { setReference(path); schedule(false); }} />
+          <BrowseButton select="file" onPick={(path) => {
+            draft.current = { ...draft.current, reference: path };
+            setReference(path);
+            schedule(false);
+          }} />
         </div>
         <div className="field">
           <label>

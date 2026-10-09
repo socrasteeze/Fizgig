@@ -24,7 +24,7 @@ class WebRefmodTests(unittest.TestCase):
     def setUp(self):
         shutdown()
         self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name)
+        self.root = Path(self._tmp.name).resolve()
         self.output = self.root / "output"
         self.output.mkdir()
         self.images = self.root / "images"
@@ -140,16 +140,19 @@ class WebRefmodTests(unittest.TestCase):
     def test_newest_gen_wins(self):
         load({})
         first = render({"steps": 6, "gen": 1, "early": False})
-        second = render({"steps": 2, "gen": 2, "early": False})
-        self.assertEqual((first["gen"], second["gen"]), (1, 2))
+        second = render({"steps": 2, "gen": 1, "early": False})
+        self.assertEqual(second["gen"], first["gen"] + 1)
+        self.assertNotEqual(first["gen"], 1)
+        self.assertEqual(second["status"], "running")
         host = get_host()
         seen = []
+        want = second["gen"]
         self._wait(lambda: seen.extend(host.drain()) or any(
-            item.get("event") == "done" and item.get("gen") == 2 for item in seen))
+            item.get("event") == "done" and item.get("gen") == want for item in seen))
         dones = [item for item in seen if item.get("event") == "done"]
         frames = [item for item in seen if item.get("event") == "frame"]
-        self.assertEqual([item["gen"] for item in dones], [2])
-        self.assertTrue(all(item["gen"] == 2 for item in frames))
+        self.assertEqual([item["gen"] for item in dones], [want])
+        self.assertTrue(all(item["gen"] == want for item in frames))
 
     def test_scan_empty_folder(self):
         name = "fizgig.minimax.refmod_apply"

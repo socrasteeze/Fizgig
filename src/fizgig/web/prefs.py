@@ -99,9 +99,23 @@ def _raw() -> dict:
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _stored() -> dict:
+    """On-disk prefs. A file that cannot be parsed is refused, not replaced."""
+    path = prefs_path()
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise JobError(409, {"detail": "prefs.json could not be read"}) from exc
+    if not isinstance(data, dict):
+        raise JobError(409, {"detail": "prefs.json could not be read"})
+    return data
 
 
 def _merged() -> dict:
@@ -176,9 +190,10 @@ def roots_from_prefs() -> dict:
 def save(values: dict) -> dict:
     if _persist_blocked():
         return view()
+    raw = _stored()
     defaults = _defaults()
     allowed = {key for key in defaults if key.endswith("_dir")} | _model_keys(_merged())
-    raw = _raw()
+    allowed.add("web_caption_trigger")
     for key, value in (values or {}).items():
         if secret_key(key) or key not in allowed:
             continue

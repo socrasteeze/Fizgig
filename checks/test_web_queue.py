@@ -11,6 +11,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
@@ -18,7 +19,8 @@ sys.path.insert(0, str(_REPO / "src"))
 from fastapi.testclient import TestClient
 
 from fizgig.families.registry import get as get_family
-from fizgig.web import jobs
+from fizgig.gpu_lock import GpuLock
+from fizgig.web import jobs, queue
 from fizgig.web.app import app
 
 _PNG = (
@@ -29,8 +31,17 @@ _PNG = (
 )
 
 
+def _reset_queue() -> None:
+    queue._SEEN.clear()
+    queue._ACTIVE_SEEN.clear()
+    queue._READY.clear()
+    queue._HOLD.clear()
+    queue._DEVICE.clear()
+
+
 class WebQueueTests(unittest.TestCase):
     def setUp(self):
+        _reset_queue()
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
         self.output = self.root / "output"
@@ -49,8 +60,10 @@ class WebQueueTests(unittest.TestCase):
             "FIZGIG_FAKE_STEPS": os.environ.get("FIZGIG_FAKE_STEPS"),
             "FIZGIG_FAKE_SLEEP": os.environ.get("FIZGIG_FAKE_SLEEP"),
             "FIZGIG_WEB_DESKTOP_QUEUE": os.environ.get("FIZGIG_WEB_DESKTOP_QUEUE"),
+            "FIZGIG_WEB_ROOTS": os.environ.get("FIZGIG_WEB_ROOTS"),
         }
         os.environ["FIZGIG_WEB_JOBS"] = str(self.root / "jobs")
+        os.environ["FIZGIG_WEB_ROOTS"] = str(self.root)
         os.environ["FIZGIG_WEB_FAKE_TRAINER"] = str(_REPO / "checks" / "fake_trainer.py")
         os.environ["FIZGIG_FAKE_STEPS"] = "2"
         os.environ["FIZGIG_FAKE_SLEEP"] = "0.01"
@@ -70,6 +83,7 @@ class WebQueueTests(unittest.TestCase):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+        _reset_queue()
         self._tmp.cleanup()
 
     def _body(self, output, name):
@@ -187,7 +201,7 @@ class WebQueueTests(unittest.TestCase):
         self._wait(finished)
         past = self.client.get("/api/history").json()["jobs"]
         row = next(item for item in past if item["id"] == job_id)
-        self.assertEqual(row["output_dir"], str(self.output))
+        self.assertEqual(Path(row["output_dir"]).resolve(), self.output.resolve())
         self.assertIn(row["status"], {"done", "failed", "stopped"})
         self.assertIsInstance(row["duration"], int)
         marker = self.output / "keep-me.txt"
@@ -203,6 +217,115 @@ class WebQueueTests(unittest.TestCase):
         self.assertTrue((sample / "preview.png").is_file())
         history = self.client.get("/api/history").json()["jobs"]
         self.assertFalse(any(item["id"] == job_id for item in history))
+
+    def _record(self, job_id, status):
+        folder = self.root / "jobs" / job_id
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "job.json").write_text(json.dumps({
+            "id": job_id,
+            "kind": "train",
+            "family": "sdxl",
+            "status": status,
+            "device": 0,
+            "pid": 0,
+            "values": {"LORA_NAME": "Old"},
+            "created": "2020-01-01T00:00:00Z",
+            "output_dir": str(self.output),
+        }), encoding="utf-8")
+
+    def _stays(self, label, timeout=6):
+        end = time.time() + timeout
+        while time.time() < end:
+            items = self.client.get("/api/queue").json()["items"]
+            self.assertEqual([item["label"] for item in items], [label])
+            names = [
+                (job.get("values") or {}).get("LORA_NAME")
+                for job in jobs._each()
+            ]
+            self.assertNotIn(label, names)
+            time.sleep(0.2)
+
+    def test_one_shot_ready_does_not_start_a_later_add(self):
+        self._record("finished-once", "running")
+        queue.observe(jobs.list_jobs())
+        self._record("finished-once", "done")
+        queue.observe(jobs.list_jobs())
+        added = self.client.post("/api/queue", json=self._body(self.output2, "Later"))
+        self.assertEqual(added.status_code, 200, added.text)
+        self._stays("Later")
+
+    def test_already_done_job_does_not_start_the_queue(self):
+        _reset_queue()
+        self._record("already-done", "done")
+        added = self.client.post("/api/queue", json=self._body(self.output2, "Held"))
+        self.assertEqual(added.status_code, 200, added.text)
+        queue.observe(jobs.list_jobs())
+        self._stays("Held")
+
+    def test_failure_does_not_keep_the_queue_armed(self):
+        self._record("then-failed", "running")
+        queue.observe(jobs.list_jobs())
+        bad = self._body(self.output2, "Bad")
+        bad["values"]["image_folder"] = r"Z:\fizgig-outside-root\images"
+        bad["context"]["image_folder"] = bad["values"]["image_folder"]
+        queued = self.client.post("/api/queue", json=bad)
+        self.assertEqual(queued.status_code, 200, queued.text)
+        self._record("then-failed", "done")
+        queue.observe(jobs.list_jobs())
+        self.assertEqual(
+            [item["label"] for item in self.client.get("/api/queue").json()["items"]],
+            ["Bad"],
+        )
+        removed = self.client.delete(f"/api/queue/{queued.json()['id']}")
+        self.assertEqual(removed.status_code, 200, removed.text)
+        added = self.client.post("/api/queue", json=self._body(self.output2, "After"))
+        self.assertEqual(added.status_code, 200, added.text)
+        self._stays("After")
+
+    def test_stale_ready_mark_cannot_launch(self):
+        added = self.client.post("/api/queue", json=self._body(self.output2, "Stay"))
+        self.assertEqual(added.status_code, 200, added.text)
+        queue._READY.add("not-in-this-root")
+        queue._DEVICE["not-in-this-root"] = 0
+        queue._SEEN["not-in-this-root"] = "done"
+        queue.observe(jobs.list_jobs())
+        self.assertEqual(
+            [item["label"] for item in self.client.get("/api/queue").json()["items"]],
+            ["Stay"],
+        )
+
+    def test_busy_gpu_keeps_the_ready_mark(self):
+        holder = GpuLock(0)
+        self.assertTrue(holder.acquire())
+        try:
+            added = self.client.post("/api/queue", json=self._body(self.output2, "Retry"))
+            self.assertEqual(added.status_code, 200, added.text)
+            self._record("gpu-busy", "running")
+            queue.observe(jobs.list_jobs())
+            self._record("gpu-busy", "done")
+            queue.observe(jobs.list_jobs())
+            self.assertEqual(
+                [item["label"] for item in self.client.get("/api/queue").json()["items"]],
+                ["Retry"],
+            )
+        finally:
+            holder.release()
+        self._wait(lambda: self.client.get("/api/queue").json()["items"] == [], timeout=15)
+
+    def test_queue_write_retries_permission_error(self):
+        real = os.replace
+        calls = {"n": 0}
+
+        def flaky(src, dst):
+            calls["n"] += 1
+            if calls["n"] == 1 and str(dst).endswith("queue.json"):
+                raise PermissionError("busy")
+            return real(src, dst)
+
+        with patch("fizgig.web.queue.os.replace", side_effect=flaky):
+            added = self.client.post("/api/queue", json=self._body(self.output, "Retried"))
+        self.assertEqual(added.status_code, 200, added.text)
+        self.assertGreaterEqual(calls["n"], 2)
 
 
 if __name__ == "__main__":

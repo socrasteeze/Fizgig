@@ -52,6 +52,9 @@ function num(value: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+let explorerGen: number | null = null;
+let explorerWait = false;
+
 export function ExplorerPanel() {
   const [form, setForm] = useState<ExplorerForm | null>(null);
   const [family, setFamily] = useState("");
@@ -67,7 +70,6 @@ export function ExplorerPanel() {
   const [variantUrls, setVariantUrls] = useState<string[]>(["", "", "", ""]);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
-  const gen = useRef(0);
   const timer = useRef<number | null>(null);
   const armed = useRef(false);
   const delay = useRef(750);
@@ -103,11 +105,38 @@ export function ExplorerPanel() {
 
   useEffect(() => {
     loadForm("");
-    const source = new EventSource("/api/events");
-    source.addEventListener("engine", (event) => {
+    let source: EventSource | null = null;
+    let retry: number | null = null;
+    let stopped = false;
+
+    function open() {
+      source = new EventSource("/api/events");
+      source.addEventListener("engine", onEngine);
+      source.onerror = () => {
+        if (stopped || source == null || source.readyState !== EventSource.CLOSED) {
+          return;
+        }
+        source.close();
+        source = null;
+        retry = window.setTimeout(() => {
+          retry = null;
+          if (!stopped) {
+            open();
+          }
+        }, 2000);
+      };
+    }
+
+    function onEngine(event: Event) {
       const body = JSON.parse((event as MessageEvent).data) as EngineEvent;
-      if (body.gen != null && body.gen !== gen.current) {
-        return;
+      if (body.gen != null && (body.event === "frame" || body.event === "done" || body.event === "cancelled")) {
+        if (explorerWait && (body.event === "frame" || body.event === "done")) {
+          explorerGen = body.gen;
+          explorerWait = false;
+        }
+        if (body.gen !== explorerGen) {
+          return;
+        }
       }
       if (body.event === "frame" && body.file_url) {
         if (body.side === "baseline") {
@@ -136,16 +165,22 @@ export function ExplorerPanel() {
       } else if (body.event === "loading") {
         setStatus("Loading…");
       }
-    });
+    }
+
+    open();
     return () => {
-      source.close();
+      stopped = true;
+      if (retry != null) {
+        window.clearTimeout(retry);
+      }
+      source?.close();
       if (timer.current != null) {
         window.clearTimeout(timer.current);
       }
     };
   }, []);
 
-  function payload(nextGen: number) {
+  function payload() {
     const current = fields.current;
     return {
       family: current.family,
@@ -157,14 +192,13 @@ export function ExplorerPanel() {
       intensity: num(current.intensity, 0.964),
       mutations: num(current.mutations, 8),
       structure: num(current.structure, 1),
-      gen: nextGen,
     };
   }
 
-  function bump(): number {
-    gen.current += 1;
-    setVariantUrls(["", "", "", ""]);
-    return gen.current;
+  function remember(body: Record<string, unknown> | null) {
+    if (body && typeof body.gen === "number") {
+      explorerGen = body.gen;
+    }
   }
 
   async function post(path: string, body: object): Promise<Record<string, unknown> | null> {
@@ -182,8 +216,11 @@ export function ExplorerPanel() {
   }
 
   async function roll() {
-    const next = bump();
-    const body = await post("/api/explorer/roll", payload(next));
+    setVariantUrls(["", "", "", ""]);
+    explorerWait = true;
+    const body = await post("/api/explorer/roll", payload());
+    explorerWait = false;
+    remember(body);
     if (body) {
       setStatus("Rolling…");
     }
@@ -220,8 +257,11 @@ export function ExplorerPanel() {
   }
 
   async function pick(index: number) {
-    const next = bump();
-    const body = await post("/api/explorer/pick", { ...payload(next), index });
+    setVariantUrls(["", "", "", ""]);
+    explorerWait = true;
+    const body = await post("/api/explorer/pick", { ...payload(), index });
+    explorerWait = false;
+    remember(body);
     if (body) {
       setStatus(`Variant ${index + 1} picked.`);
     }

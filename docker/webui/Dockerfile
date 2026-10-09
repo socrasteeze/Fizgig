@@ -20,6 +20,7 @@ COPY --from=docker.io/tailscale/tailscale:stable /usr/local/bin/tailscaled /usr/
 
 COPY requirements-web.txt /opt/fizgig/requirements-web.txt
 COPY src/ /opt/fizgig/src/
+COPY lora_trainer_gui.py /opt/fizgig/lora_trainer_gui.py
 COPY --from=webui /src/webui/dist /opt/fizgig/webui/dist
 
 RUN pip install -r /opt/fizgig/requirements-web.txt

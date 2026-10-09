@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { BrowseButton } from "./extra";
 
 interface Family {
@@ -38,6 +38,11 @@ interface EngineEvent {
   file_url?: string;
   side?: string;
 }
+
+let royaleEpochGen: number | null = null;
+let royaleTravelGen: number | null = null;
+let royaleEpochWait = false;
+let royaleTravelWait = false;
 
 function readError(response: Response): Promise<string> {
   return response.json().then(
@@ -90,9 +95,6 @@ export function RoyalePanel() {
   const [shown, setShown] = useState<"epoch" | "travel">("epoch");
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
-  const gen = useRef(0);
-  const epochGen = useRef(0);
-  const travelGen = useRef(0);
 
   function loadForm(next: string) {
     fetch(`/api/royale/form?family=${encodeURIComponent(next)}`)
@@ -120,28 +122,35 @@ export function RoyalePanel() {
   }, []);
 
   useEffect(() => {
-    const sourceEvents = new EventSource("/api/events");
-    sourceEvents.addEventListener("engine", (event) => {
+    let sourceEvents: EventSource | null = null;
+    let retry: number | null = null;
+    let stopped = false;
+
+    function open() {
+      sourceEvents = new EventSource("/api/events");
+      sourceEvents.addEventListener("engine", (event) => {
       const body = JSON.parse((event as MessageEvent).data) as EngineEvent;
       if (body.event === "frame" && body.file_url && body.side === "epoch") {
-        const seen = body.gen || 0;
-        if (seen < epochGen.current) {
+        if (royaleEpochWait && body.gen != null) {
+          royaleEpochGen = body.gen;
+          royaleEpochWait = false;
+        }
+        if (body.gen == null || body.gen !== royaleEpochGen) {
           return;
         }
-        const fresh = seen !== epochGen.current;
-        epochGen.current = seen;
         const frame = { url: body.file_url, path: body.file || "", step: body.step || 0 };
-        setEpochFrames((current) => upsert(fresh ? [] : current, frame));
+        setEpochFrames((current) => upsert(current, frame));
         setStatus(`Epoch ${body.step || ""}`);
       } else if (body.event === "frame" && body.file_url && body.side === "travel") {
-        const seen = body.gen || 0;
-        if (seen < travelGen.current) {
+        if (royaleTravelWait && body.gen != null) {
+          royaleTravelGen = body.gen;
+          royaleTravelWait = false;
+        }
+        if (body.gen == null || body.gen !== royaleTravelGen) {
           return;
         }
-        const fresh = seen !== travelGen.current;
-        travelGen.current = seen;
         const frame = { url: body.file_url, path: body.file || "", step: body.step || 0 };
-        setTravelFrames((current) => upsert(fresh ? [] : current, frame));
+        setTravelFrames((current) => upsert(current, frame));
         setStatus(`Frame ${body.step || ""}`);
       } else if (body.event === "loading") {
         setStatus("Loading…");
@@ -154,8 +163,30 @@ export function RoyalePanel() {
       } else if (body.event === "unloaded") {
         setStatus("Unloaded.");
       }
-    });
-    return () => sourceEvents.close();
+      });
+      sourceEvents.onerror = () => {
+        if (stopped || sourceEvents == null || sourceEvents.readyState !== EventSource.CLOSED) {
+          return;
+        }
+        sourceEvents.close();
+        sourceEvents = null;
+        retry = window.setTimeout(() => {
+          retry = null;
+          if (!stopped) {
+            open();
+          }
+        }, 2000);
+      };
+    }
+
+    open();
+    return () => {
+      stopped = true;
+      if (retry != null) {
+        window.clearTimeout(retry);
+      }
+      sourceEvents?.close();
+    };
   }, []);
 
   async function scan() {
@@ -200,8 +231,7 @@ export function RoyalePanel() {
 
   async function renderEpochs() {
     setError("");
-    gen.current += 1;
-    epochGen.current = gen.current;
+    royaleEpochWait = true;
     setShown("epoch");
     setEpochFrames([]);
     setEpochs([]);
@@ -211,7 +241,6 @@ export function RoyalePanel() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         family,
-        gen: gen.current,
         prompt,
         seed: Number(seed) || 42,
         width: Number(size) || 512,
@@ -222,13 +251,14 @@ export function RoyalePanel() {
       }),
     });
     if (!response.ok) {
+      royaleEpochWait = false;
       setError(await readError(response));
       return;
     }
     const body = await response.json() as { gen?: number; epochs?: Item[] };
-    if (body.gen) {
-      gen.current = body.gen;
-      epochGen.current = body.gen;
+    royaleEpochWait = false;
+    if (typeof body.gen === "number") {
+      royaleEpochGen = body.gen;
     }
     setEpochs(body.epochs || []);
     setStatus("Rendering epochs…");
@@ -236,15 +266,13 @@ export function RoyalePanel() {
 
   async function renderTravel() {
     setError("");
-    gen.current += 1;
-    travelGen.current = gen.current;
+    royaleTravelWait = true;
     setShown("travel");
     setTravelFrames([]);
     setTravelIndex(0);
     const parked = source === "lora" ? lora : (epochs[lo]?.path || items[lo]?.path || items[0]?.path || "");
     const payload: Record<string, unknown> = {
       family,
-      gen: gen.current,
       mode: travelMode,
       path: parked,
       prompt,
@@ -271,13 +299,14 @@ export function RoyalePanel() {
       body: JSON.stringify(payload),
     });
     if (!response.ok) {
+      royaleTravelWait = false;
       setError(await readError(response));
       return;
     }
     const body = await response.json() as { gen?: number };
-    if (body.gen) {
-      gen.current = body.gen;
-      travelGen.current = body.gen;
+    royaleTravelWait = false;
+    if (typeof body.gen === "number") {
+      royaleTravelGen = body.gen;
     }
     setStatus("Rendering travel…");
   }

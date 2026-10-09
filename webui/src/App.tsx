@@ -38,6 +38,7 @@ interface Field {
   choices: string[] | null;
   section: string;
   when: string;
+  windows: Record<string, string[]> | null;
 }
 
 interface ModelRow {
@@ -62,6 +63,7 @@ function asField(raw: { [key: string]: unknown }): Field {
     choices: Array.isArray(raw.choices) ? raw.choices.map((item) => String(item)) : null,
     section: String(raw.section ?? ""),
     when: String(raw.when ?? "always"),
+    windows: raw.windows && typeof raw.windows === "object" ? raw.windows as Record<string, string[]> : null,
   };
 }
 
@@ -84,6 +86,51 @@ function groups(fields: Field[]): { section: string; fields: Field[] }[] {
     }
   }
   return out;
+}
+
+function withCurrentChoice(choices: string[] | null, current: string): string[] {
+  const list = choices ?? [];
+  if (current && !list.includes(current)) {
+    return [current, ...list];
+  }
+  return list;
+}
+
+function areaWindow(fields: Field[], area: string): [string, string] | null {
+  if (!area || area === "Custom") {
+    return null;
+  }
+  const field = fields.find((item) => item.key === "FAMILY_TRAIN_AREA");
+  const windows = field?.windows;
+  if (windows && Object.prototype.hasOwnProperty.call(windows, area)) {
+    const pair = windows[area];
+    return [String(pair?.[0] ?? ""), String(pair?.[1] ?? "")];
+  }
+  if (area === "Style") {
+    return ["0", "400"];
+  }
+  return ["", ""];
+}
+
+function fillTimesteps(next: Record<string, unknown>, fields: Field[], area: string, keep: Record<string, unknown> | null) {
+  const pair = areaWindow(fields, area);
+  if (!pair) {
+    return;
+  }
+  if (!keep || !("MIN_TIMESTEP" in keep)) {
+    next.MIN_TIMESTEP = pair[0];
+  }
+  if (!keep || !("MAX_TIMESTEP" in keep)) {
+    next.MAX_TIMESTEP = pair[1];
+  }
+}
+
+function mergePreset(base: Record<string, unknown>, overlay: Record<string, unknown>, fields: Field[]) {
+  const next = { ...base, ...overlay };
+  if ("FAMILY_TRAIN_AREA" in overlay) {
+    fillTimesteps(next, fields, String(overlay.FAMILY_TRAIN_AREA ?? ""), overlay);
+  }
+  return next;
 }
 
 function gb(bytes: number): string {
@@ -111,6 +158,7 @@ export function App() {
   const [imageFolder, setImageFolder] = useState("");
   const [problems, setProblems] = useState<string[]>([]);
   const [warnings, setWarnings] = useState<Warning[]>([]);
+  const [warnFor, setWarnFor] = useState<"start" | "pause" | "resume" | "stop">("start");
   const [jobs, setJobs] = useState<Job[]>([]);
   const [selected, setSelected] = useState("");
   const [log, setLog] = useState("");
@@ -137,6 +185,7 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
     setError("");
+    setModelPaths({});
     fetch(`/api/form?family=${encodeURIComponent(family)}`)
       .then(async (response) => {
         if (!response.ok) {
@@ -149,14 +198,36 @@ export function App() {
           return;
         }
         setForm(body);
+        const loaded = body.fields.map(asField);
         const next: Record<string, unknown> = {};
-        for (const field of body.fields.map(asField)) {
+        for (const field of loaded) {
           next[field.key] = field.default;
         }
-        setValues(next);
-        setModelPaths({});
+        const first = body.presets[0];
+        const overlay = first && first.values && typeof first.values === "object"
+          ? first.values as Record<string, unknown>
+          : null;
+        setValues(overlay ? mergePreset(next, overlay, loaded) : next);
         setProblems([]);
         setWarnings([]);
+        fetch("/api/prefs")
+          .then((response) => (response.ok ? response.json() : null))
+          .then((prefs: { families?: Array<{ key?: string; files?: Array<{ key?: string; value?: unknown }> }> } | null) => {
+            if (cancelled || !prefs) {
+              return;
+            }
+            const section = (prefs.families || []).find((item) => item.key === family);
+            const paths: Record<string, string> = {};
+            for (const file of section?.files || []) {
+              const key = String(file.key ?? "");
+              const value = String(file.value ?? "").trim();
+              if (key && value) {
+                paths[key] = value;
+              }
+            }
+            setModelPaths(paths);
+          })
+          .catch(() => undefined);
       })
       .catch((reason: unknown) => {
         if (!cancelled) {
@@ -240,23 +311,69 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const source = new EventSource("/api/events");
-    source.addEventListener("job", (event) => {
-      const next = JSON.parse((event as MessageEvent).data) as Job;
-      setJobs((current) => {
-        const rest = current.filter((item) => item.id !== next.id);
-        return [next, ...rest].sort((a, b) => (a.created < b.created ? 1 : -1));
+    let source: EventSource | null = null;
+    let timer = 0;
+    let stop = false;
+
+    function applyJobs(body: { jobs: Job[] }) {
+      setJobs(body.jobs);
+      const live = body.jobs.find((item) => item.status === "running" || item.status === "queued");
+      setSelected((current) => current || (live ?? body.jobs[0])?.id || "");
+    }
+
+    function open() {
+      const next = new EventSource("/api/events");
+      source = next;
+      next.addEventListener("job", (event) => {
+        const job = JSON.parse((event as MessageEvent).data) as Job;
+        setJobs((current) => {
+          const rest = current.filter((item) => item.id !== job.id);
+          return [job, ...rest].sort((a, b) => (a.created < b.created ? 1 : -1));
+        });
       });
-    });
-    source.addEventListener("system", (event) => {
-      setSystem(JSON.parse((event as MessageEvent).data) as System);
-    });
-    source.addEventListener("notice", (event) => {
-      const notice = JSON.parse((event as MessageEvent).data) as Notice;
-      setNotices((current) => [notice, ...current].slice(0, 6));
-      browserNotify(notice);
-    });
-    return () => source.close();
+      next.addEventListener("system", (event) => {
+        setSystem(JSON.parse((event as MessageEvent).data) as System);
+      });
+      next.addEventListener("notice", (event) => {
+        const notice = JSON.parse((event as MessageEvent).data) as Notice;
+        setNotices((current) => [notice, ...current].slice(0, 6));
+        browserNotify(notice);
+      });
+      next.onerror = () => {
+        if (stop || next.readyState !== EventSource.CLOSED) {
+          return;
+        }
+        next.onerror = null;
+        next.close();
+        if (source === next) {
+          source = null;
+        }
+        timer = window.setTimeout(() => {
+          if (stop) {
+            return;
+          }
+          fetch("/api/jobs")
+            .then((response) => response.json())
+            .then((body: { jobs: Job[] }) => {
+              if (!stop) {
+                applyJobs(body);
+              }
+            })
+            .catch(() => undefined);
+          open();
+        }, 2000);
+      };
+    }
+
+    open();
+    return () => {
+      stop = true;
+      window.clearTimeout(timer);
+      if (source) {
+        source.onerror = null;
+        source.close();
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -266,24 +383,32 @@ export function App() {
     let offset = 0;
     let text = "";
     let stop = false;
+    let timer = 0;
     async function tick() {
-      const response = await fetch(`/api/jobs/${selected}/log?offset=${offset}`);
-      if (response.ok) {
-        const body = (await response.json()) as LogChunk;
-        offset = body.next;
-        if (body.text) {
-          text = `${text}${body.text}`.split("\n").slice(-200).join("\n");
-          setLog(text);
+      try {
+        const response = await fetch(`/api/jobs/${selected}/log?offset=${offset}`);
+        if (response.ok) {
+          const body = (await response.json()) as LogChunk;
+          offset = body.next;
+          if (body.text) {
+            text = `${text}${body.text}`.split("\n").slice(-200).join("\n");
+            if (!stop) {
+              setLog(text);
+            }
+          }
         }
+      } catch {
+        // keep polling after one failed fetch
       }
       if (!stop) {
-        window.setTimeout(tick, 1000);
+        timer = window.setTimeout(tick, 1000);
       }
     }
     setLog("");
     tick();
     return () => {
       stop = true;
+      window.clearTimeout(timer);
     };
   }, [selected]);
 
@@ -292,26 +417,38 @@ export function App() {
       return;
     }
     let stop = false;
+    let timer = 0;
     async function tick() {
-      const response = await fetch(`/api/jobs/${selected}/samples`);
-      if (response.ok) {
-        const body = (await response.json()) as { samples: Sample[] };
-        if (!stop) {
-          setSamples(body.samples);
+      try {
+        const response = await fetch(`/api/jobs/${selected}/samples`);
+        if (response.ok) {
+          const body = (await response.json()) as { samples: Sample[] };
+          if (!stop) {
+            setSamples((body.samples || []).slice(-48));
+          }
         }
+      } catch {
+        // keep polling after one failed fetch
       }
       if (!stop) {
-        window.setTimeout(tick, 2000);
+        timer = window.setTimeout(tick, 2000);
       }
     }
     tick();
     return () => {
       stop = true;
+      window.clearTimeout(timer);
     };
   }, [selected]);
 
   function setValue(key: string, value: unknown) {
-    setValues((current) => ({ ...current, [key]: value }));
+    setValues((current) => {
+      const next = { ...current, [key]: value };
+      if (key === "FAMILY_TRAIN_AREA") {
+        fillTimesteps(next, fields, String(value ?? ""), null);
+      }
+      return next;
+    });
     if (key === "image_folder") {
       setImageFolder(String(value ?? ""));
     }
@@ -381,6 +518,7 @@ export function App() {
     if (response.status === 409) {
       const body = (await response.json()) as Conflict;
       if (body.warnings?.length) {
+        setWarnFor("start");
         setWarnings(body.warnings);
         return;
       }
@@ -396,15 +534,59 @@ export function App() {
     setSelected(created.id);
   }
 
-  async function control(action: "pause" | "resume" | "stop") {
+  async function control(action: "pause" | "resume" | "stop", confirm: string[] = []) {
     if (!selected) {
       return;
     }
-    await fetch(`/api/jobs/${selected}/${action}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: "{}",
-    });
+    if (!confirm.length) {
+      setProblems([]);
+      setWarnings([]);
+    }
+    let response: Response;
+    try {
+      response = await fetch(`/api/jobs/${selected}/${action}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(action === "resume" ? { confirm } : {}),
+      });
+    } catch {
+      setProblems([`${action} failed`]);
+      return;
+    }
+    if (response.status === 422) {
+      const body = (await response.json().catch(() => ({}))) as ProblemBody;
+      setWarnings([]);
+      setProblems(body.problems?.length ? body.problems : [`${action} was refused`]);
+      return;
+    }
+    if (response.status === 409) {
+      const body = (await response.json().catch(() => ({}))) as Conflict;
+      if (body.warnings?.length) {
+        setWarnFor(action);
+        setProblems([]);
+        setWarnings(body.warnings);
+        return;
+      }
+      setWarnings([]);
+      setProblems([body.detail || `${action} was refused`]);
+      return;
+    }
+    if (!response.ok) {
+      const body = (await response.json().catch(() => ({}))) as { detail?: string; problems?: string[] };
+      setProblems(body.problems?.length ? body.problems : [body.detail || `${action} failed (${response.status})`]);
+      return;
+    }
+    setProblems([]);
+    setWarnings([]);
+  }
+
+  function confirmWarnings() {
+    const codes = warnings.map((item) => item.code);
+    if (warnFor === "start") {
+      void start(codes);
+      return;
+    }
+    void control(warnFor, codes);
   }
 
   async function sendOverride(active: boolean) {
@@ -504,9 +686,9 @@ export function App() {
                     type="button"
                     className="chip"
                     onClick={() => {
-                      const next = preset.values;
-                      if (next && typeof next === "object") {
-                        setValues(next as Record<string, unknown>);
+                      const overlay = preset.values;
+                      if (overlay && typeof overlay === "object") {
+                        setValues((current) => mergePreset(current, overlay as Record<string, unknown>, fields));
                       }
                     }}
                   >
@@ -534,7 +716,7 @@ export function App() {
                         {field.label}
                         {field.kind === "choice" && field.choices ? (
                           <select value={String(values[field.key] ?? "")} onChange={(event) => setValue(field.key, event.target.value)}>
-                            {field.choices.map((choice) => (
+                            {withCurrentChoice(field.choices, String(values[field.key] ?? "")).map((choice) => (
                               <option key={choice} value={choice}>{choice}</option>
                             ))}
                           </select>
@@ -598,25 +780,24 @@ export function App() {
             ) : null}
             <details className="advanced">
               <summary>Advanced</summary>
+              <p className="help">Reference only. These are not sent.</p>
               {form.advanced.map((item) => {
                 const dest = String(item.dest ?? "");
                 const flags = Array.isArray(item.flags) ? item.flags.map(String).join(" ") : dest;
                 const choices = Array.isArray(item.choices) ? item.choices.map(String) : null;
+                const shown = item.default == null ? "" : String(item.default);
                 return (
                   <div key={dest || flags} className="field">
                     <label>
                       {flags || dest}
                       {choices ? (
-                        <select value={String(values[dest] ?? item.default ?? "")} onChange={(event) => setValue(dest, event.target.value)}>
-                          {choices.map((choice) => (
+                        <select value={shown} disabled>
+                          {withCurrentChoice(choices, shown).map((choice) => (
                             <option key={choice} value={choice}>{choice}</option>
                           ))}
                         </select>
                       ) : (
-                        <input
-                          value={values[dest] == null ? String(item.default ?? "") : String(values[dest])}
-                          onChange={(event) => setValue(dest, event.target.value)}
-                        />
+                        <input value={shown} disabled readOnly />
                       )}
                     </label>
                   </div>
@@ -624,10 +805,10 @@ export function App() {
               })}
             </details>
             {problems.map((line) => <p key={line} className="error">{line}</p>)}
-            {warnings.length > 0 ? (
+            {warnFor === "start" && warnings.length > 0 ? (
               <div className="warn">
                 {warnings.map((item) => <p key={item.code}>{item.message}</p>)}
-                <button type="button" onClick={() => start(warnings.map((item) => item.code))}>Start anyway</button>
+                <button type="button" onClick={confirmWarnings}>Start anyway</button>
               </div>
             ) : null}
             <div className="controls">
@@ -644,14 +825,21 @@ export function App() {
               <p className="status">{job.status}{job.stage ? ` · ${job.stage}` : ""} · {job.step}/{job.total}{job.loss == null ? "" : ` · loss ${job.loss}`}{job.device == null ? "" : ` · GPU ${job.device}`}</p>
               <div className="progress"><div style={{ width: `${fraction * 100}%` }} /></div>
               <div className="controls">
-                <button type="button" onClick={() => control("pause")} disabled={job.status !== "running"}>Pause</button>
-                <button type="button" onClick={() => control("resume")} disabled={job.status !== "paused"}>Resume</button>
-                <button type="button" onClick={() => control("stop")} disabled={job.status !== "running" && job.status !== "queued"}>Stop</button>
+                <button type="button" onClick={() => void control("pause")} disabled={job.status !== "running"}>Pause</button>
+                <button type="button" onClick={() => void control("resume")} disabled={job.status !== "paused"}>Resume</button>
+                <button type="button" onClick={() => void control("stop")} disabled={job.status !== "running" && job.status !== "queued"}>Stop</button>
               </div>
+              {problems.map((line) => <p key={line} className="error">{line}</p>)}
+              {warnFor !== "start" && warnings.length > 0 ? (
+                <div className="warn">
+                  {warnings.map((item) => <p key={item.code}>{item.message}</p>)}
+                  <button type="button" onClick={confirmWarnings}>{warnFor === "resume" ? "Resume anyway" : "Continue anyway"}</button>
+                </div>
+              ) : null}
               <pre className="log">{log || "Waiting for log lines."}</pre>
               <div className="gallery">
-                {samples.map((sample) => (
-                  <img key={sample.name} src={sample.url} alt={sample.name} />
+                {samples.slice(-48).map((sample) => (
+                  <img key={sample.name} src={sample.url} alt={sample.name} loading="lazy" />
                 ))}
               </div>
               <div className="field">

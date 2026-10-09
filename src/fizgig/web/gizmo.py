@@ -342,9 +342,11 @@ def next_name(source: str, dataset: str, muted: bool, kind: str) -> dict:
     return {"name": os.path.basename(path), "path": path}
 
 
-def upload_source(dest, file) -> dict:
+def upload_source(dest, file, overwrite: bool = False) -> dict:
     folder, leaf, data = _upload(dest, file, _MEDIA_EXTS)
     target = folder / leaf
+    if target.exists() and not overwrite:
+        raise JobError(409, {"conflicts": [leaf]})
     tmp = target.with_suffix(target.suffix + ".tmp")
     tmp.write_bytes(data)
     os.replace(tmp, target)
