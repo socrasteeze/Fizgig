@@ -88,3 +88,7 @@ Default suite, three times, each 156 tests and 3 skipped, all OK: 205.785s, 208.
 | 80 | fixed | The pause test waits until the runner pid is dead. A daemon thread reaps the detached runner. | `test_pause_resume_and_stop` |
 | 81 | fixed | The user guide shows `set`, `$env:`, and `export` for the tailnet host. | `test_docs_and_api_scripts` |
 | 82 | fixed | First run includes `requirements-web.txt` and `npm --prefix webui ci`. | `test_docs_and_api_scripts` |
+
+## Rounds 2 and 3
+
+A re-check of the 39 high and medium findings confirmed 37 fixed and found 22 regressions introduced by the fixes. Round 2 (commit 427e604) fixed those plus the two partial fixes, added tests for findings 22, 23, 27 and 28, and isolated job-starting tests (`checks/runner_guard.py`). A second re-check confirmed 22 of 24 and found one medium regression (Training-tab model edits lost on tab switch) and three low ones. Round 3 (commit d299c78) fixed them: caption FAIL lines are classified by the worker's real job-level lines, event streams resume by SSE id, client paths are confined lexically with no filesystem access, and Preferences-filled paths are trusted.

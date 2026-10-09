@@ -1,20 +1,18 @@
 # HANDOFF
 
-**Updated:** 2026-10-09 · **Branch:** master · **HEAD:** 004c2da · **Tree:** dirty
+**Updated:** 2026-10-09 · **Branch:** master · **HEAD:** d299c78 · **Tree:** clean
 
 ## State
-The 82 review findings are fixed and uncommitted on 004c2da. None are disputed or left as won't-fix. Manual GPU and phone checks are still open.
+The web UI build is complete: phases 0-5 plus three review rounds are committed. Remaining work is manual checks on real hardware.
 
 ## Done this session
-- Engine events are a broadcast with a per-stream cursor. The host assigns render gens. Bake uses the loaded engine's `save_repaired`.
-- A server thread advances a queue the user already built. GET does not. Blank model, cache, and caption fields come from Preferences.
-- Client paths reject UNC before any stat. The desktop GPU lock uses the card that run will actually use.
-- Advanced flags are read-only. The Docker entrypoint waits on `tailscale status --json` and sets the tailnet host.
-- One row per finding is in `docs/WEBUI_REVIEW.md`.
-- Suite 156 tests, 3 skipped, three times (205.785s, 208.874s, 206.484s). Golden 3 OK (11.591s). `npm --prefix webui run build` passed. `checks\check_appearance.py` passed.
+- Phases 0-5 built, each verified and committed; 82 review findings fixed (fdcea8b).
+- Round 2 (427e604) and round 3 (d299c78) fixed regressions and partial fixes found by re-checks; test isolation via `checks/runner_guard.py`; the runner waits up to 15 s for the GPU lock and logs startup errors to `runner.err`.
+- Final state: suite 200 tests, 197 passed, 3 skipped, twice; golden OK; `npm --prefix webui run build` and `checks\check_appearance.py` pass.
+- A last read-only sweep of the round-3 diff was stopped early at the user's request; round 3 is covered by its tests only.
 
 ## Open
-1. Commit these fixes only when asked. Do not push.
+1. Push to fork when asked (7 commits ahead of fork/master).
 2. Manual checks in `docs/WEBUI_PHASE5.md`: a real training run, `tailscale serve` from a phone, a phone recording, Whisper, a clip, and a checkpoint diff.
 3. Two real GPUs at once: one job on each, and no overlap on one GPU. Not run.
 4. Review the dialogs (Queue, Gallery, Browse, preset windows) at 100%, 125%, and 150%. None were opened.
