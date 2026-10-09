@@ -97,18 +97,26 @@ def check_resolution() -> None:
     assert gui.resolve_appearance(loaded["appearance"]) == gui.APPEARANCE_COMPACT_CLAM
     assert gui.resolve_appearance(gui.APPEARANCE_DARK_CLAM) == gui.APPEARANCE_DARK_CLAM
     _pass("saved alternate resolves to compact-clam")
-    _pass("save ran without building the main window")
 
     dark = gui.appearance_spacing(None)
     compact = gui.appearance_spacing(gui.APPEARANCE_COMPACT_CLAM)
     assert dark["button"] == (16, 8)
     assert dark["tab"] == (12, 6)
+    assert dark["tab_selected"] == (6, 4, 6, 2)
+    assert dark["check"] == 2
+    assert dark["entry"] == 1
+    assert dark["labelframe"] is None
+    assert dark["tabmargin"] is None
+    assert dark["scrollbar"] == 12
+    assert dark["rowheight"] == 24
     assert dark["check"] != compact["check"]
     assert dark["entry"] != compact["entry"]
     assert dark["button"] != compact["button"]
+    assert dark["tab_selected"] != compact["tab_selected"]
+    assert compact["tab_selected"] == compact["tab"]
     assert set(dark) == set(compact)
-    _pass("dark-clam keeps current button and tab padding")
-    _pass("compact-clam uses a different shared spacing scale")
+    _pass("dark-clam matches the pre-change clam spacing")
+    _pass("compact-clam uses a different shared spacing scale, including the selected tab")
 
     after = _live_digest()
     assert before == after
@@ -157,8 +165,6 @@ def launch_twice(scratch: Path) -> None:
     env["FIZGIG_NO_PERSIST"] = "1"
     env["FIZGIG_STRUCTURAL_DUMP"] = "1"
     env["PYTHONUNBUFFERED"] = "1"
-    # Keep the child off the repo preference files even if it ignores NO_PERSIST.
-    env.pop("FIZGIG_PREFS", None)
     script = REPO / "lora_trainer_gui.py"
     for index in (1, 2):
         proc = subprocess.run(

@@ -1,54 +1,41 @@
 # HANDOFF
 
-**Updated:** 2026-10-08 | **Branch:** master | **Base:** e198fb8 (origin/master and fork/master at assessment) | **Tree:** clean before this handoff
+**Updated:** 2026-10-08 · **Branch:** master · **Base:** e198fb8 (origin/master); fork/master at 549e0f8 · **Tree:** dirty (uncommitted `.gitignore` line)
 
 ## State
-GUI modernization is scoped only. Implementation needs explicit approval; do not modify either running installation.
-Delivery is authorized for this handoff-only commit to fork/master; do not create a branch or push to upstream.
+The appearance fix is local, on top of 883c09c, and not pushed. `dark-clam` again matches the pre-change clam spacing.
 
 ## Done this session
-- Assessed installed commit e198fb897717ce86e08aae1b527029235a5b65a5 with static source inspection and release-history comparison; no GUI or training was launched.
-- Counted direct widget constructor sites: main GUI 788 ttk / 714 tk; Gizmo 15 / 118; converter 7 / 18; splash 1 / 8. Total 811 ttk / 858 tk (48.6% / 51.4%); excludes nine custom-wrapper calls and runtime loop expansion.
-- Confirmed 13 main tabs, including Start, Samples, RefMod Studio and Metadata; lora_trainer_gui.py has 30,766 lines at the assessed commit.
-- Main GUI changed in 18 of the last 20 tag intervals (v6.1.0 through v7.1.0); AST structure of COLORS and setup_styles stayed unchanged in all 20.
-- Verified public fork https://github.com/socrasteeze/Fizgig; origin fetch stays upstream, origin push is disabled://upstream-push-disabled, and fork is the separate delivery remote.
+- Restored `dark-clam` padding and mapped selected-tab padding per appearance — `lora_trainer_gui.py`.
+- Stated the 883c09c correction in the fix commit. Did not amend.
+- Shipped `checks/test_status_bar_layout.py` and `checks/test_appearance_launch.py`. Status bar re-measured at 100/125/150; both appearances fit.
+- Isolated `--launch` twice: `compact-clam`, theme `clam`, 13 tabs. Repo preference files unchanged.
 
 ## Open
-1. Obtain approval for a 3-5 engineering-day theme/spacing pass; another 1-3 days covers auxiliary tools. Implementation must use a separate checkout of the fork with isolated settings and outputs.
-2. Trial sv-ttk against current clam styles before adopting it. Keep current appearance as fallback; prefer a saved, restart-required appearance choice.
-3. Proposed files: lora_trainer_gui.py, new fizgig_theme.py and docs/GUI_THEME.md; requirements.txt and THIRD_PARTY_NOTICES.md only if adding the theme dependency.
-4. Cover all 13 main tabs through shared styles; edit Preferences for the selector and touch individual tabs only for exceptions. Optional follow-on: gizmo.py, diff_to_lora_gui.py and fizgig_splash.py.
-5. Before deployment, check all tabs/dialogs at 100/125/150% scaling, focus/disabled states, scrolling, text selection, slider callbacks, image/video previews and galleries; compare launch settings/commands and run bounded training/workbench smoke checks in isolation.
-6. Before any web work, review the current state of upstream issue #165 and its contributor implementation; do not assume reported progress is shipped functionality.
+1. Confirm this checkout is not a running install, then review all 13 tabs and their dialogs at 100%, 125%, and 150%. The structural launch is done; that dialog walk is not.
+2. Push to fork/master only after that confirmation.
+3. The uncommitted `.gitignore` line for `AGENTS.md` is still unstaged.
 
 ## Decisions
-- Recommend theme/spacing changes with existing widget types and callbacks; central style code has lower upstream overlap than a tab rewrite.
-- Existing dark palette: lora_trainer_gui.py:63; ttk styles: setup_styles at :2533. A ttk theme alone cannot restyle ordinary Tk widgets or custom Canvas drawings.
-- CustomTkinter estimate: 5-8 engineering-weeks for a hybrid main app (6-10 files), 8-12 weeks for auxiliary-tool parity (8-14 files); all 13 tabs and dialogs require review.
-- Web estimate: 5-8 engineering-weeks for a training launcher/monitor; 16-28 weeks for full 13-tab parity, approximately 50-90 new files plus 4-8 existing integration files. One engineer-week means five working days; GPU runtime and upstream review are additional.
-- Conflict planning ranges, not measured merge results: central theme usually none or 1-2 regions; widget rewrite several to dozens per feature release; separate web files reduce textual conflicts but retain behavior drift.
-- Reuse src/fizgig/families/launch.py and family workbench engines. Desktop calls shared command builders, not the complete launch.plan(); queue/process/GPU-session ownership remains GUI-bound.
-- Upstream rejected a duplicated Next.js UI for maintenance drift: https://github.com/shootthesound/Fizgig/pull/164#issuecomment-5892572398 . Preferred schema-driven direction: https://github.com/shootthesound/Fizgig/issues/165 .
-- CONTRIBUTING.md welcomes focused PRs and shared COLORS/helpers; acceptance of a theme dependency is unconfirmed. No upstream issue, comment or PR was posted.
+- Kept `dark-clam` as the pre-change spacing instead of adding a third appearance — the default must not add padding the old styles left unset.
+- Selected-tab padding is now mapped. `dark-clam` keeps clam's `6 4 6 2`; `compact-clam` uses its own tab padding.
+- Did not amend 883c09c. The fix commit corrects the "current spacing" claim. Amend was not requested.
+- Shipped both review checks. `unittest discover -s checks -p test_*.py` is the verify command, and both pass.
+- sv-ttk stays rejected — `docs/GUI_THEME.md`.
+- A saved appearance still applies on the next start. `setup_styles` runs once.
 
 ## Traps
-- Preserve origin fetch and its disabled push URL. Remote settings are local Git configuration and are not carried by this commit. Push only to the user's fork when authorized.
-- The default branch is master, not main. The user explicitly requested this handoff on master without creating a branch.
-- Do not run update_fizgig.bat during this work: it pulls Git changes, restores a launcher and updates dependencies in the running install.
-- A separate checkout must use separate preferences, caches and training outputs; shared model weights alone do not make a test launch isolated.
-- Splash has a copied palette and must remain lightweight; Gizmo and the converter have independent style setup. Preserve semantic workbench colors and custom preview behavior.
-- No tracked automated tests or documented local test/lint command were found; tests/ is ignored. CONTRIBUTING.md refers to an absent CLAUDE.md and has stale model coverage. Runtime checks were not run.
+- Keep origin's fetch URL and its disabled push URL. Push only to fork, and only when asked. The default branch is master.
+- Do not run `update_fizgig.bat`. It pulls, restores a launcher, and updates dependencies in the running install.
+- This checkout holds a venv, preferences, and output LoRAs, so it may be a live install. A launch needs `FIZGIG_NO_PERSIST` and an isolated preference file.
+- `--launch` builds the full GUI and may create a CUDA context. The unit checks do not launch Fizgig.
+- The splash screen, Gizmo, and the converter keep their own style setup.
 
 ## Verify
-No documented local application test/lint command applies to this documentation-only change. Use these Git checks; runtime validation remains an implementation gate.
-
 ```powershell
-git branch --show-current
-git remote -v
+.\venv\Scripts\python.exe -m unittest discover -s checks -p "test_*.py" -v
+.\venv\Scripts\python.exe checks\check_appearance.py
 git status --short
+git log origin/master..HEAD --oneline
 git diff --check
-git diff --cached --check
-git log -1 --oneline
-git rev-list --left-right --count HEAD...fork/master
-git show --stat --oneline HEAD
 ```

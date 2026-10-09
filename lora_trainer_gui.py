@@ -134,23 +134,27 @@ APPEARANCE_CHOICES = (
     (APPEARANCE_DARK_CLAM, "Dark (current)"),
     (APPEARANCE_COMPACT_CLAM, "Compact"),
 )
-# Padding the 13 main tabs inherit through ttk. Button and tab padding on
-# dark-clam are the values setup_styles already used; the other entries are the
-# spacing pass (controls that previously had none).
+# Padding the 13 main tabs inherit through ttk.
+# dark-clam matches the pre-change clam styles: button (16, 8), tab (12, 6),
+# check/radio 2, entry/combobox 1, no labelframe padding, no tab margins.
+# tab_selected is clam's selected-tab map (6 4 6 2), which configure() does not set.
+# None means leave the theme default in place.
 APPEARANCE_SPACING = {
     APPEARANCE_DARK_CLAM: {
         "button": (16, 8),
         "tab": (12, 6),
-        "tabmargin": (2, 4, 2, 0),
-        "check": (8, 4),
-        "entry": (6, 4),
-        "labelframe": (12, 8),
+        "tab_selected": (6, 4, 6, 2),
+        "tabmargin": None,
+        "check": 2,
+        "entry": 1,
+        "labelframe": None,
         "scrollbar": 12,
         "rowheight": 24,
     },
     APPEARANCE_COMPACT_CLAM: {
         "button": (8, 3),
         "tab": (8, 3),
+        "tab_selected": (8, 3),
         "tabmargin": (0, 1, 0, 0),
         "check": (2, 1),
         "entry": (2, 1),
@@ -2750,11 +2754,13 @@ class LoRATrainerGUI:
         )
 
         # Notebook (tabs)
-        style.configure("TNotebook",
-            background=COLORS["bg_deep"],
-            borderwidth=0,
-            tabmargins=space["tabmargin"],
-        )
+        notebook_opts = {
+            "background": COLORS["bg_deep"],
+            "borderwidth": 0,
+        }
+        if space["tabmargin"] is not None:
+            notebook_opts["tabmargins"] = space["tabmargin"]
+        style.configure("TNotebook", **notebook_opts)
         style.configure("TNotebook.Tab",
             background=COLORS["bg_surface"],
             foreground=COLORS["text_primary"],
@@ -2763,7 +2769,8 @@ class LoRATrainerGUI:
         )
         style.map("TNotebook.Tab",
             background=[("selected", COLORS["accent"])],
-            foreground=[("selected", "white")]
+            foreground=[("selected", "white")],
+            padding=[("selected", space["tab_selected"])],
         )
 
         # Entry field — explicit insert cursor settings so the caret is visible on click
@@ -2855,11 +2862,13 @@ class LoRATrainerGUI:
             )
 
         # LabelFrame
-        style.configure("TLabelframe",
-            background=COLORS["bg_deep"],
-            bordercolor=COLORS["border"],
-            padding=space["labelframe"],
-        )
+        labelframe_opts = {
+            "background": COLORS["bg_deep"],
+            "bordercolor": COLORS["border"],
+        }
+        if space["labelframe"] is not None:
+            labelframe_opts["padding"] = space["labelframe"]
+        style.configure("TLabelframe", **labelframe_opts)
         style.configure("TLabelframe.Label",
             background=COLORS["bg_deep"],
             foreground=COLORS["text_primary"],
@@ -16931,8 +16940,6 @@ class LoRATrainerGUI:
         label = self._appearance_choice.get()
         picked = next((appearance_id for appearance_id, text in APPEARANCE_CHOICES if text == label), None)
         if picked is None:
-            return
-        if self.prefs_vars["appearance"].get() == picked:
             return
         self.prefs_vars["appearance"].set(picked)
 

@@ -15,6 +15,8 @@ Measured lookups:
 
 The preference key `appearance` selects `dark-clam` or `compact-clam`. `resolve_appearance` maps an empty or unknown value to `dark-clam`. `setup_styles` applies that id once, after preferences load and before the notebook is built. Choosing the other appearance in Preferences saves it and leaves the open window on the spacing it started with until the next launch.
 
+`dark-clam` is the pre-change clam spacing: button `(16, 8)`, unselected tab `(12, 6)`, check and radio `2`, entry and combobox `1`, no labelframe padding, and no tab margins. The selected tab uses clam's own map, `(6, 4, 6, 2)`. `compact-clam` tightens those controls, and its selected tab uses the same padding as its unselected tab.
+
 The bottom status bar sizes to its contents so the live sample controls fit at either spacing and at larger display scales.
 
 Run `python -m unittest discover -s checks -p "test_*.py" -v` for the focused regression checks. The layout check uses withdrawn Tk windows at 100%, 125%, and 150% scaling without importing the trainer. The launch-check tests mock subprocesses; they do not launch Fizgig. The actual `check_appearance.py --launch <scratch-dir>` check exits nonzero when validation fails, including exit code 2 when the display or Tk runtime is unavailable. Diagnostic logs remain in the scratch directory.
