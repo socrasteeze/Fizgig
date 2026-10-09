@@ -144,6 +144,11 @@ def _tk_failed(text: str) -> bool:
 
 
 def launch_twice(scratch: Path) -> None:
+    src = str(REPO / "src")
+    if src not in sys.path:
+        sys.path.append(src)
+    from fizgig.web.procs import creationflags
+
     before = _live_digest()
     scratch.mkdir(parents=True, exist_ok=True)
     home = scratch / "launch-home"
@@ -176,6 +181,7 @@ def launch_twice(scratch: Path) -> None:
             timeout=300,
             encoding="utf-8",
             errors="replace",
+            creationflags=creationflags(),
         )
         body = (proc.stdout or "").replace("\r\n", "\n").replace("\r", "\n")
         if proc.stderr:

@@ -1,6 +1,8 @@
 """Run one job's stages and exit. The server starts this detached.
 
 A server restart does not kill this process. Stop kills the tree from outside.
+Stages inherit this process's hidden console and pass no window flags, so the
+tools they start stay hidden as well.
 """
 from __future__ import annotations
 
@@ -60,6 +62,9 @@ def run_folder(folder: Path) -> None:
         elif kind == "extract":
             from fizgig.web.extract import command
             _run_tool(folder, job, command(job))
+        elif kind == "royale":
+            from fizgig.web.royale import run_job
+            run_job(folder, job)
         else:
             _run(folder, job)
     finally:
@@ -101,8 +106,6 @@ def _run(folder: Path, job: dict) -> None:
         errors="replace",
         bufsize=1,
     )
-    if os.name == "nt":
-        popen["creationflags"] = subprocess.CREATE_NO_WINDOW
 
     with log_path.open("a", encoding="utf-8", errors="replace") as log:
         if resume:
@@ -117,7 +120,12 @@ def _run(folder: Path, job: dict) -> None:
             job["stage"] = stage.get("name") or ""
             if not save(folder, job):
                 return
-            proc = subprocess.Popen(stage.get("cmd") or [], **popen)
+            # No window flags: inherit the runner's hidden console.
+            proc = subprocess.Popen(
+                stage.get("cmd") or [],
+                creationflags=0,
+                **popen,
+            )
             assert proc.stdout is not None
             for line in proc.stdout:
                 log.write(line)
@@ -187,9 +195,8 @@ def _popen(cmd, env, stdin):
         errors="replace",
         bufsize=1,
     )
-    if os.name == "nt":
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-    return subprocess.Popen(cmd, **kwargs)
+    # No window flags: inherit the runner's hidden console.
+    return subprocess.Popen(cmd, creationflags=0, **kwargs)
 
 
 def _run_caption(folder: Path, job: dict) -> None:

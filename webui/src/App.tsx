@@ -1,7 +1,10 @@
 import { useEffect, useState } from "react";
 import type { components } from "./api";
 import { BrowseButton, browserNotify, NotifyButton, Phase2, sampleContext } from "./extra";
+import { ExplorerPanel } from "./explorer";
+import { RefmodPanel } from "./refmod";
 import { RepairPanel } from "./repair";
+import { RoyalePanel } from "./royale";
 import { fieldVisible } from "./visibility";
 
 const FAMILIES: { id: string; name: string }[] = [
@@ -121,7 +124,7 @@ export function App() {
   const [tab, setTab] = useState("Training");
   const [sampleForm, setSampleForm] = useState<{ fields: Array<Record<string, unknown>>; wording: Record<string, string>; gaps: string[] } | null>(null);
   const [sampleValues, setSampleValues] = useState<Record<string, unknown>>({});
-  const tabs = ["Training", "Start", "Captions", "Image Prep", "Samples", "Queue", "History", "Profiler", "Repair Studio", "Extract", "Metadata", "Preferences"];
+  const tabs = ["Training", "Start", "Captions", "Image Prep", "Samples", "Queue", "History", "Profiler", "Repair Studio", "RefMod Studio", "LoRA the Explorer", "LoRA Royale", "Extract", "Metadata", "Preferences"];
 
   const fields = (form?.fields ?? []).map(asField);
   const models = (form?.models ?? []).map(asModel);
@@ -425,6 +428,12 @@ export function App() {
       ) : null}
       {tab === "Repair Studio" ? (
         <RepairPanel />
+      ) : tab === "RefMod Studio" ? (
+        <RefmodPanel />
+      ) : tab === "LoRA the Explorer" ? (
+        <ExplorerPanel />
+      ) : tab === "LoRA Royale" ? (
+        <RoyalePanel />
       ) : tab !== "Training" ? (
         <Phase2 tab={tab} imageFolder={imageFolder} setImageFolder={rememberFolder} queueCurrent={queueCurrent} sampleForm={sampleForm} sampleValues={sampleValues} setSampleValues={setSampleValues} onTab={setTab} />
       ) : (

@@ -8,6 +8,7 @@ from __future__ import annotations
 import subprocess
 
 from fizgig.gpu_lock import device_index
+from fizgig.web.procs import creationflags
 
 _nvml_ready = False
 _nvml_failed = False
@@ -33,7 +34,7 @@ def read_vram():
              "--query-gpu=memory.used,memory.total",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=4,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            creationflags=creationflags(),
         )
         used, total = out.stdout.strip().splitlines()[0].split(",")
         return int(used) * 1024 * 1024, int(total) * 1024 * 1024

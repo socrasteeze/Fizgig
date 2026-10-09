@@ -167,3 +167,113 @@ The form defaults to Quick, as the desktop does. Weights is still `POST /api/pro
 - Move a slider and confirm the in-flight render restarts.
 - Run Quick on a real LoRA, open Repair Studio, and save a baked file.
 - Play a video family's clip in the page's player.
+
+## 3b-ii
+
+Phase 3b-ii plugs RefMod Studio, LoRA the Explorer, and LoRA Royale into the host from 3b-i. The protocol (one worker, JSON lines, `gen`, frames, the GPU lock, idle unload) stays as it is.
+
+`make_engine` uses a `register_engine` factory before the generic fake. Repair and Profiler register nothing, so `FIZGIG_WEB_FAKE_ENGINE=1` still builds `FakeEngine` for them. Each tool module calls `register_engine` when it is imported. `python -m fizgig.web.engine_worker` imports the three modules, so the child process has the factories. A factory returns its fake when `FIZGIG_WEB_FAKE_ENGINE=1`, and the real adapter otherwise. The fake sleeps `FIZGIG_WEB_FAKE_STEP` seconds per step, writes tiny PNGs, and does not import a model.
+
+A render result may include `records`, a JSON object. The worker copies it onto the `done` event the same way it copies `profile`. Images stay on `frame`, `baseline`, `image`, and `clip`. `records` holds labels and parameters, not file paths.
+
+Every load follows Repair Studio: 409 when a training or caption job holds the GPU, and 409 when a job starts while an engine is loaded. Paths stay inside the configured roots.
+
+Review fix: Royale export images and its run folder, Royale epoch and reference paths, the Explorer reference, and the RefMod scan folder are resolved inside the configured roots before use, and a path outside them is rejected with 403 before a job or render starts.
+
+### RefMod Studio
+
+The desktop tab is H3 only (`_rms_desc`). The page is the same.
+
+`GET /api/refmod/form` is the setup: model (`Reference (ref2va)`, `First / Last Frame (fl2va)`), base (`REPAIR_H3_BASE_OPTIONS`), folder, prompt, seed, frames, width, height, steps, turbo, sound, early, retention, scramble, frame curve, step curve, step on, numbered, LoRA, compare (`No mod (LoRA alone)`, `No LoRA (mods alone)`, `Neither (base model)`), and the mod rows. Defaults match a fresh tab: model the first string, base the first base option, prompt `a woman smiles at the camera, soft window light`, seed `300`, frames `22 frames (~1s)`, width `640`, height `768`, steps `4`, turbo `1.0`, sound on, early on, retention `1`, scramble `-1`, frame curve and step curve the `refmod_apply` defaults, step curve off, numbered off, compare the first string. The length choices are the `_RMS_LENGTHS` labels (`Still (1 frame)`, `22 frames (~1s)`, `39 frames (~1.6s)`, and the rest of that map). `debounce_redraw_ms` is 60 (`_rms_schedule_redraw`).
+
+`POST /api/refmod/scan` lists visual mods in the folder via `refmod_apply.scan_refmods` (audio mods stay out). An empty folder returns no mods. The import of that module happens only when the folder contains a `.safetensors` file.
+
+`POST /api/refmod/load` loads engine `refmod` for family `minimax`. The real adapter's plan follows `_rms_engine_plan`: ref2va uses the `ref_dit` preference, fl2va uses `dit`, plus the video VAE, the text encoder, the speed LoRA at turbo strength 0.75, and the base mode (`stream`, `nf4`, or `auto` from the same prefixes as `_rms_base_mode`). Under the fake flag the load args are the paths only.
+
+`POST /api/refmod/render` sends the setup and a `gen`. The page posts on Render. It waits 60 ms before it swaps the shown image (`_rms_schedule_redraw`). A higher `gen` cancels the render in flight. Early look matches `_rms_job`: `early_step` is 2 when early is on and steps are greater than 2, otherwise 0. The fake emits that early frame, then the with-mods image and the comparison image. `records` echoes `seed`, `prompt`, `early_step`, `compare`, and the row list. The real adapter builds the bundle with `refmod_apply.build_bundle_entries` and calls `render_refmod`, including the no-mod, no-LoRA, and neither comparison (`_rms_render`).
+
+`GET /api/refmod/presets` lists `presets/refmod_studio/*.json` (`FIZGIG_WEB_PRESET_ROOT` when that is set). `PUT /api/refmod/presets` writes one file with `json` indent 2, the object `_rms_state` writes: `base`, `model`, `prompt`, `seed`, `frames`, `width`, `height`, `steps`, `turbo`, `sound`, `early`, `folder`, `rows` (`on`, `mod`, `value` rounded to 3 decimals, `copies`), `retention`, `scramble`, `frame_curve`, `step_curve`, `step_on`, `numbered`, `lora`, `compare`. Seed, frames, width, height, steps, turbo, and scramble are the widget strings (`300`, `22 frames (~1s)`, `640`, `768`, `4`, `1.0`, `-1`), not parsed numbers. Retention is a float. `GET /api/refmod/presets/file?name=` reads that object back (`_rms_setup_save`, `_rms_setup_load`).
+
+### LoRA the Explorer
+
+The mutation loop lives in `src/fizgig/web/explorer.py` as `roll_variants`. It mirrors `_explorer_generate_baseline_and_roll` and calls `SliderState.mutate`. It does not reseed. Variant 1 and 2 use the structure value. Variant 3 uses structure 0. Variant 4 drops the last pick's blocks when at least two candidates remain, and otherwise uses the full active set. Active blocks are the LoRA's blocks minus the frozen set, and the anchor is added back when it is not frozen (`_explorer_anchor_block`: the family's first block).
+
+`GET /api/explorer/form?family=` is the setup: families with `explorer` in the workbench, LoRA, prompt, reference, reference MP, reference strength, seed `42`, resolution `512` (choices `256`, `384`, `512`, `768`), intensity `0.964`, mutations `8`, structure `1`. `debounce_ms` is 750 (the intensity and structure sliders).
+
+`POST /api/explorer/load` loads engine `explorer` and the LoRA, and starts a baseline `SliderState` for that family with the strength on `primary_scale` (`_explorer_apply_strength`).
+
+`POST /api/explorer/roll` syncs prompt, seed, resolution, and reference into the baseline, builds four variants, and renders. The host params are `states`: the baseline JSON, then the four variants. The fake emits one frame per state (`baseline`, then `variant`) and puts the same states on `records`. A higher `gen` cancels the roll. The page waits 750 ms after an intensity or structure edit before it sends.
+
+`POST /api/explorer/pick` with `index` pushes the current baseline, its image name, and the frozen set onto the undo stack, records the blocks `diff_blocks` reports, and makes the picked variant the baseline (`_explorer_pick`). It then rolls.
+
+`POST /api/explorer/freeze` with `choice` mirrors `_explorer_freeze_tweaked`. Tweaked means disabled or strength more than 0.01 away from 1. `choice` replaces the desktop's dialog: `freeze` locks the tweaked blocks, `add` unions them into the frozen set, `unlock` clears the set, `undo` restores the previous frozen set and baseline, `cancel` changes nothing. The frozen set is what the next roll leaves alone.
+
+`POST /api/explorer/undo` pops the stack and restores the baseline and the frozen set (`_explorer_undo`). The page then rolls.
+
+`POST /api/explorer/reset` with `mode` `full` unloads and clears the session (`_explorer_full_reset`). `defaults` unlocks and replaces the baseline with the family's default state. `baseline` unlocks and keeps the current blocks (`_explorer_restart`).
+
+`POST /api/explorer/save` writes `<stem>_explored.safetensors` through `save_repaired_lora`, donor off. An existing file gets `_2`, `_3`, … The bake import stays inside the function.
+
+Session state (baseline, variants, frozen blocks, last pick, undo stack) lives in the server process. `clear_session()` empties it. Tests call that before each case.
+
+### LoRA Royale
+
+`GET /api/royale/form?family=` is the setup: families with `royale` in the workbench, folder or one LoRA, prompt, seed `42`, width and height `512`, reference, max renders (`All` or a count), and the travel fields.
+
+`POST /api/royale/scan` calls `lora_royale.scan.scan_checkpoints` on a folder. A single LoRA path is one item, `(stem, path)`. The result is `[{label, path}]`, the same pairs the scan returns. `select_epochs(items, max_renders)` is the desktop subset: `All` keeps every item; a count keeps that many, evenly spaced, always the first and the last (`_royale_render`).
+
+`POST /api/royale/load` loads engine `royale`.
+
+`POST /api/royale/render` renders the selected epochs on one seed. Params are `mode: "epochs"`, `seed`, `prompt`, `width`, `height`, `reference`, and `epochs`. The fake emits one frame per epoch with `side: "epoch"` and lists the labels on `records`. A higher `gen` cancels the render. The page does not contact the server while the crossfade slider moves. The slider blends the two neighbouring epoch images in the browser: the lower image is the left epoch, the upper image's opacity is the fraction between them (`Image.blend` in `_royale_scrub`).
+
+`POST /api/royale/travel` with `mode` `seed`, `strength`, or `prompt` renders one scrubber sequence. Seed travel uses `journey_seeds`, the mirror of `_royale_journey_seeds` (same start seed, same waypoint count, same list). Strength travel ramps from start to end across the frames (`_royale_lora_travel`). Prompt travel builds the waypoint prompts with `lora_royale.prompt_travel` (`_royale_prompt_travel`). The fake emits one frame per step with `side: "travel"`. The page scrubs by index, client side (`_royale_sc_scrub`): one frame at a time, no blend request.
+
+`POST /api/royale/export` starts a job with `kind: "royale"`. The body is the image paths already rendered, `format` `MP4` or `GIF`, `speed` (`Slow`, `Normal`, `Fast`), `pingpong`, `brand`, and `show_epoch`. The output name is `<run>-royale.mp4` or `.gif` (`run_name_for_folder`, else `lora`). The job's `command` is the argv `lora_royale.export.write_mp4` builds:
+
+```
+ffmpeg -y -loglevel error -f rawvideo -pix_fmt rgb24 -s WxH -r FPS -i - -an -c:v libx264 -pix_fmt yuv420p -crf 18 -preset medium -movflags +faststart OUTPUT
+```
+
+`W` and `H` are the even dimensions `_even` produces (minimum 2). `FPS` is the speed preset's third value (Normal is 22). `ffmpeg_command(binary, width, height, fps, path)` returns that list. Under `FIZGIG_WEB_FAKE_ENGINE=1` the runner records the command and writes the output file without starting ffmpeg. Otherwise the runner calls `build_frames` and `write_mp4` (or `write_gif`). The export job does not load a model. It still uses the job folder and refuses to start while an engine is loaded, the same rule as the other jobs.
+
+### Mirror pins
+
+`checks/test_web_mirrors.py` also hashes `create_refmod_studio_tab`, `_rms_state`, `_rms_setup_save`, `_rms_setup_load`, `_rms_job`, `_rms_render`, `_rms_show_early`, `_rms_schedule_redraw`, `create_explorer_tab`, `_explorer_generate_baseline_and_roll`, `_explorer_worker`, `_explorer_pick`, `_explorer_freeze_tweaked`, `_explorer_undo`, `_explorer_save`, `_explorer_restart`, `_explorer_full_reset`, `create_lora_royale_tab`, `_royale_scan`, `_royale_render`, `_royale_render_worker`, `_royale_scrub`, `_royale_export`, `_royale_export_worker`, `_royale_journey_seeds`, `_royale_seed_travel`, `_royale_lora_travel`, `_royale_prompt_travel`.
+
+### Tests and build
+
+`.\venv\Scripts\python.exe -m unittest discover -s checks -p "test_*.py"`
+
+65 tests, 63 passed, 2 skipped, 0 failed. Three runs in a row, same counts each time (236.676s, 236.24s, 246.29s). The two skipped tests are the golden tests. The new tests use the fake engines registered for `refmod`, `explorer`, and `royale`: each tool's render through the host, newest-gen cancellation, the RefMod preset round-trip in the desktop setup shape, Explorer `roll_variants` against the same `SliderState.mutate` loop on fixed seeds, freeze and undo state, the Royale epoch scan against `scan_checkpoints`, and the export job's ffmpeg argv against `write_mp4`.
+
+`FIZGIG_GOLDEN=1` and `python -m unittest checks.test_web_golden -v`
+
+2 tests, passed (9.759s).
+
+`npm --prefix webui run build` passed. `checks\check_appearance.py` passed.
+
+### Gaps
+
+- Likeness scoring stays on the desktop. It needs the face embedder.
+- The RefMod sweep, the render-history strip, and curve-preset files stay on the desktop.
+- Explorer does not hand the baseline to Repair Studio. The desktop's Refine button stays there.
+- Royale's comparison sheet, promote, save-stills, and likeness clip stay on the desktop.
+- The RefMod page shows the middle frame. It does not build the desktop's mp4 from the clip frames.
+- Royale prompt travel on the real adapter changes the prompt for each frame. It does not interpolate prompt embeddings, and it does not chain sequential reference latents.
+- A real load and render of these three tools on the GPU were not run from this page.
+
+### Still manual (3b-ii)
+
+- Load the H3 base from the page, render a RefMod, and compare the clip with the desktop.
+- Roll the Explorer on a real LoRA and confirm one variant matches the desktop for the same seed and intensity.
+- Scan a real training folder, scrub the crossfade, and export an mp4.
+
+## No console windows
+
+A Windows process whose parent has no console opens a console of its own unless the launch passes `CREATE_NO_WINDOW`. That flag is right for a short tool (`ffmpeg`, `taskkill`, `nvidia-smi`): `fizgig.web.procs.creationflags` returns it. The tool itself opens no window.
+
+A training run or an engine render is different. The trainer and the engines start their own children with no flags. A parent created with `CREATE_NO_WINDOW` has no console to hand down, so Windows opens a visible console for each of those children. `fizgig.web.procs.hidden_console` avoids that. It returns `CREATE_NEW_CONSOLE` plus a `STARTUPINFO` of `STARTF_USESHOWWINDOW` and `SW_HIDE`, so the new console is never shown. A child that does not ask for its own console inherits the hidden one, and so does the rest of the tree.
+
+The job runner is the detached case. `hidden_console(detached=True)` adds `CREATE_NEW_PROCESS_GROUP` and does not use `DETACHED_PROCESS`. `CREATE_NEW_CONSOLE` already separates the run from the server's console, and the new process group keeps a server restart or Ctrl+C from killing it. On other platforms the same call returns `start_new_session`. The runner's stage launches pass `creationflags=0` and inherit that hidden console. The engine worker uses `hidden_console()` and keeps its stdin and stdout pipes.
+
+Every `subprocess` call under `src/fizgig/web/` passes `creationflags=` or spreads `hidden_console`. `checks/test_web_no_window.py` reads those files with `ast` and fails when a call does neither. On Windows it also starts a job through `jobs.start` and an engine through `EngineHost`, each with a stand-in that starts a grandchild with no flags. The grandchild reports `GetConsoleWindow` and `IsWindowVisible`. The test requires a console that is not visible. Off Windows that check is skipped. The checks that start a process pass `CREATE_NO_WINDOW`. The trainer, caption, profile, and extract stand-ins do not start processes of their own.

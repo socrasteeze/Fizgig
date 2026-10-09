@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 from fizgig.gpu_lock import GpuLock, held
 from fizgig.web import jobs
 from fizgig.web.app import app
+from fizgig.web.procs import creationflags
 
 _PNG = (
     b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
@@ -308,6 +309,7 @@ class WebJobTests(unittest.TestCase):
         self._holder = subprocess.Popen(
             [sys.executable, "-c", "import time\nfrom fizgig.gpu_lock import GpuLock\nlock = GpuLock()\nassert lock.acquire()\ntime.sleep(30)\n"],
             env=env,
+            creationflags=creationflags(),
         )
         self.wait_for(held)
         blocked = self.client.post("/api/jobs", json=self._payload())

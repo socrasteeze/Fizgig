@@ -1,28 +1,27 @@
 # HANDOFF
 
-**Updated:** 2026-10-09 · **Branch:** master · **HEAD:** 38e7d67 · **Tree:** dirty (Phase 3b-i uncommitted)
+**Updated:** 2026-10-09 · **Branch:** master · **HEAD:** 99e472a · **Tree:** dirty (Phase 3b-ii uncommitted)
 
 ## State
-Phase 3b-i is uncommitted on 38e7d67. The page has an engine host, Repair Studio, and Profiler Quick and Thorough. Checks use a fake engine. A real load and render are still manual (`docs/WEBUI_PHASE3.md`).
-The next step is Phase 3b-ii: RefMod Studio, LoRA the Explorer, and LoRA Royale. They register on the same host.
+Phase 3b-i is committed (99e472a). Phase 3b-ii is uncommitted on that commit. RefMod Studio, LoRA the Explorer, and LoRA Royale register on the same engine host. Checks use fake engines. A real load and render are still manual (`docs/WEBUI_PHASE3.md`).
+The next step is Phase 4: Gizmo and the checkpoint-to-LoRA converter.
 
 ## Done this session
-- One worker process, JSON lines, one engine. A higher render gen cancels the one in flight. Early frames stream on the SSE `engine` event. Images sit under the jobs root and are served from there.
-- The worker holds the GPU lock while an engine is loaded. A job blocks a load, and a loaded engine blocks a job. Both return 409.
-- Idle unload (10 minutes, `FIZGIG_WEB_ENGINE_IDLE`), explicit unload, and shutdown. A dead worker restarts on the next request.
-- Repair Studio: family, DiT choice, primary and donor, sliders, presets in the desktop `SliderState` shape, baseline against repaired, metrics, bake through `save_repaired_lora`, and a `<video>` clip when ffmpeg can make one.
-- Profiler Quick (seed 1234) and Thorough (1234 and 5678). Open in Repair Studio hands over the LoRA and the suggested sliders.
-- Default suite: 51 tests, 49 passed, 2 skipped. Three runs (188.344s, 188.381s, 184.070s). Golden: 2 passed (8.805s). `npm --prefix webui run build` passed. `checks\check_appearance.py` passed.
+- `register_engine` is consulted before the generic fake. The worker imports the three tool modules. A render may return a JSON `records` object on the `done` event.
+- RefMod Studio: H3 setup, mod scan, load, render with early look and a 60 ms redraw wait, presets in `presets/refmod_studio/` as `_rms_state`.
+- LoRA the Explorer: `roll_variants` mirrors the desktop mutation loop. Baseline, four variants, pick, freeze, undo, reset, and save through `save_repaired_lora`. Intensity and structure wait 750 ms.
+- LoRA Royale: epoch scan, one-seed render, browser crossfade (two images and a slider), seed, strength, and prompt travel scrubbers, and an ffmpeg export job whose argv matches `write_mp4`.
+- Default suite: 65 tests, 63 passed, 2 skipped. Three runs (236.676s, 236.24s, 246.29s). Golden: 2 passed (9.759s). `npm --prefix webui run build` passed. `checks\check_appearance.py` passed.
 
 ## Open
-1. Phase 3b-ii: RefMod Studio, LoRA the Explorer, LoRA Royale, on this host.
+1. Phase 4: Gizmo and the checkpoint-to-LoRA converter.
 2. Review the dialogs (Queue, Gallery, Browse, preset windows) at 100%, 125%, and 150%; none were opened.
 3. At 150% the fixed 1580x1124 window truncates tab labels in both appearances. This predates the appearance work (`lora_trainer_gui.py:1327`).
 4. A real GPU run from the page: load an engine, compare slider latency with the desktop, run Quick, and play a video clip. Phone access through `tailscale serve` is still open.
 
 ## Decisions
 - Fork-only, nothing offered upstream (user, 2026-10-08). New files only, no imports of `lora_trainer_gui.py`. GUI logic is mirrored and pinned.
-- One worker, one engine. RefMod, Explorer and Royale are names on the protocol and are not built yet.
+- One worker, one engine. RefMod, Explorer, and Royale register on it. The epoch crossfade stays in the browser.
 - The page bakes with `save_repaired_lora`. The desktop's live `save_repaired` path stays on the desktop.
 - Quick and Thorough run on the host, not as queue jobs. Weights stays on `profile_lora.py`.
 - Likeness and bleed scores stay on the desktop. The page's profile measures picture change.

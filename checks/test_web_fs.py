@@ -17,6 +17,7 @@ sys.path.insert(0, str(_REPO / "src"))
 from fastapi.testclient import TestClient
 
 from fizgig.web.app import app
+from fizgig.web.procs import creationflags
 
 _PNG = (
     b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
@@ -32,7 +33,11 @@ def _link(link: Path, target: Path) -> str:
         return "symlink"
     except OSError:
         pass
-    subprocess.check_call(["cmd", "/c", "mklink", "/J", str(link), str(target)], stdout=subprocess.DEVNULL)
+    subprocess.check_call(
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+        stdout=subprocess.DEVNULL,
+        creationflags=creationflags(),
+    )
     return "junction"
 
 
@@ -55,6 +60,7 @@ def _junction(link: Path, target: Path) -> bool:
             ["cmd", "/c", "mklink", "/J", str(link), str(target)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            creationflags=creationflags(),
         )
         return True
     except (OSError, subprocess.CalledProcessError):
@@ -122,6 +128,7 @@ class WebFsTests(unittest.TestCase):
             subprocess.check_call(
                 ["cmd", "/c", "mklink", "/J", str(other), str(self.outside)],
                 stdout=subprocess.DEVNULL,
+                creationflags=creationflags(),
             )
             jumped = self.client.get("/api/fs", params={"path": str(other)})
             self.assertEqual(jumped.status_code, 403, jumped.text)

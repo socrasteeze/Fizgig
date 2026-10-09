@@ -26,6 +26,7 @@ from fizgig.families.registry import get as get_family
 from fizgig.gpu_lock import held
 from fizgig.training.progress import TrainingProgressTracker
 from fizgig.web.inputs import build
+from fizgig.web.procs import creationflags, hidden_console
 
 _REPO = Path(__file__).resolve().parents[3]
 _IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
@@ -600,16 +601,8 @@ def _spawn(job_id: str) -> None:
         cwd=str(_REPO),
         close_fds=True,
     )
-    if os.name == "nt":
-        # Leave the server's process tree: a server restart must not kill the run.
-        kwargs["creationflags"] = (
-            subprocess.DETACHED_PROCESS
-            | subprocess.CREATE_NEW_PROCESS_GROUP
-            | subprocess.CREATE_NO_WINDOW
-        )
-        process = subprocess.Popen(cmd, **kwargs)
-    else:
-        process = subprocess.Popen(cmd, start_new_session=True, **kwargs)
+    # Own hidden console and process group, so a restart or Ctrl+C leaves the run alive.
+    process = subprocess.Popen(cmd, **hidden_console(detached=True), **kwargs)
     # The runner is detached on purpose. Dropping this handle is not the run exiting.
     process.returncode = 0
 
@@ -706,7 +699,7 @@ def stop(job_id: str) -> dict:
             subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(pid)],
                 capture_output=True,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=creationflags(),
             )
         else:
             try:

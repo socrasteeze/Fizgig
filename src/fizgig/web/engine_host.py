@@ -7,8 +7,9 @@ are written as they are produced and dropped when their ``gen`` is no longer
 current, the same rule as ``_repair_show_early``.
 
 ``FIZGIG_WEB_FAKE_ENGINE=1`` selects a fake engine. It does not import a model
-and does not touch CUDA. RefMod, Explorer and Royale register through
-``register_engine``; this phase does not build them.
+and does not touch CUDA. A factory registered with ``register_engine`` is used
+first, including under that flag, so RefMod, Explorer and Royale supply their
+own fake. Repair and Profiler have no factory and still get ``FakeEngine``.
 
 Idle unload uses ``FIZGIG_WEB_ENGINE_IDLE`` seconds (default 600).
 """
@@ -26,6 +27,8 @@ import zlib
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import quote
+
+from fizgig.web.procs import creationflags, hidden_console
 
 _HOST = None
 _PLUGINS: dict[str, type] = {}
@@ -78,6 +81,11 @@ class FakeEngine:
     def load(self, family: str, args: dict) -> None:
         if args.get("crash"):
             os._exit(1)
+        probe = str((args or {}).get("console_probe") or "")
+        if probe:
+            # Console test stand-in. It starts a grandchild with no window flags.
+            import runpy
+            runpy.run_path(probe, run_name="__main__")
         self.family = family
         self.args = dict(args or {})
 
@@ -200,6 +208,7 @@ def _clip_file(frames, dest: Path, fps: int) -> str | None:
         ["ffmpeg", "-y", "-framerate", str(int(fps) or 24), "-i", str(folder / "f%04d.png"),
          "-pix_fmt", "yuv420p", str(dest)],
         check=False, capture_output=True,
+        creationflags=creationflags(),
     )
     return dest.name if dest.is_file() else None
 
@@ -354,11 +363,11 @@ class WorkbenchAdapter:
 def make_engine(kind: str):
     if kind not in ENGINES:
         raise RuntimeError(f"unknown engine {kind}")
-    if os.environ.get("FIZGIG_WEB_FAKE_ENGINE") == "1":
-        return FakeEngine(kind)
     factory = _PLUGINS.get(kind)
     if factory is not None:
         return factory()
+    if os.environ.get("FIZGIG_WEB_FAKE_ENGINE") == "1":
+        return FakeEngine(kind)
     if kind in _LATER:
         raise RuntimeError(f"{kind} plugs into this host in a later phase")
     return WorkbenchAdapter(kind)
@@ -569,6 +578,8 @@ class Worker:
                         done[key] = blob
                 if result.get("profile"):
                     done["profile"] = result["profile"]
+                if result.get("records") is not None:
+                    done["records"] = result["records"]
                 self.emit(done)
             except Cancelled:
                 self.emit({"event": "cancelled", "gen": gen})
@@ -716,6 +727,7 @@ class EngineHost:
             env=env,
             text=True,
             bufsize=1,
+            **hidden_console(),
         )
         self._announced = False
         threading.Thread(target=self._read, args=(self.proc,), daemon=True).start()

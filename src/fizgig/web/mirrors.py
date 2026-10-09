@@ -2,8 +2,8 @@
 
 The hash is of the function source from ``ast.get_source_segment``, with line endings
 normalised to ``\\n``. A mismatch means the desktop function changed: update the mirror
-(``form_spec.py``, ``inputs.py``, ``jobs.py``, ``repair.py``, ``profile.py``, or
-``system.py``), then replace the hash.
+(``form_spec.py``, ``inputs.py``, ``jobs.py``, ``repair.py``, ``profile.py``,
+``refmod.py``, ``explorer.py``, ``royale.py``, or ``system.py``), then replace the hash.
 """
 from __future__ import annotations
 
@@ -78,6 +78,34 @@ FUNCTIONS = (
     "_get_inference_blocks_to_swap",
     "_get_inference_int8",
     "_auto_detect_blocks_to_swap",
+    "create_refmod_studio_tab",
+    "_rms_state",
+    "_rms_setup_save",
+    "_rms_setup_load",
+    "_rms_job",
+    "_rms_render",
+    "_rms_show_early",
+    "_rms_schedule_redraw",
+    "create_explorer_tab",
+    "_explorer_generate_baseline_and_roll",
+    "_explorer_worker",
+    "_explorer_pick",
+    "_explorer_freeze_tweaked",
+    "_explorer_undo",
+    "_explorer_save",
+    "_explorer_restart",
+    "_explorer_full_reset",
+    "create_lora_royale_tab",
+    "_royale_scan",
+    "_royale_render",
+    "_royale_render_worker",
+    "_royale_scrub",
+    "_royale_export",
+    "_royale_export_worker",
+    "_royale_journey_seeds",
+    "_royale_seed_travel",
+    "_royale_lora_travel",
+    "_royale_prompt_travel",
 )
 
 
@@ -161,4 +189,32 @@ PINNED = {
     "_get_inference_blocks_to_swap": "dfdd560e16069a0c7ba6d66b667951620a72272ace50bb216cd5437dd21201ea",
     "_get_inference_int8": "5366d3fb78d63a9740643a16736e9614288e994a8cdfb98fea831e4d42036286",
     "_auto_detect_blocks_to_swap": "240af8e2653415512494c19ed227ae23f4a2d03eba014893cfc59000687e0402",
+    "create_refmod_studio_tab": "c9966d5095a3208e1b54928cc14ba4617f8893a3a711d7db85834b56355d5fe3",
+    "_rms_state": "a40023d163549ce981a9d5b91840eaeaefe5159db4be16990c6911037f7cb055",
+    "_rms_setup_save": "0225d2341fdbebfc9ce898cb1063d73d5cef171754ef6a1c0726346368e28c1f",
+    "_rms_setup_load": "00b8349cfb78ba90247c0c9e00af004197ea4ea9e75b31a922490f8e67a155fc",
+    "_rms_job": "9a2aee46d570317ecb57bbc37c0c7eae808c49494a0fa692d8b2c7936f54654e",
+    "_rms_render": "71b4aaa93f5d45e9a8d809cb87df83d0804b3cc6ef60e3901de5388387937c12",
+    "_rms_show_early": "359986d5bfdedae9f5cdfc810dbf23da2d264c2369b52b835e58a529f77d60d6",
+    "_rms_schedule_redraw": "46b3553fdfce10be01c656b3e4f9d86e06a574dc42c9f5f015bef196da426634",
+    "create_explorer_tab": "f6613c0682d688fd29ea125475c88fde25143059fbdbacd83e020f5a9aa83adb",
+    "_explorer_generate_baseline_and_roll": "d1ce7508f20a992f8cd6e885f2105f1cd2d6b0c4014fa247e1934c4d9e0989a5",
+    "_explorer_worker": "87f8bcb83d84269ada001f5d2eeaef5d1d9aaaa9077fc933691163dd116cf9e9",
+    "_explorer_pick": "cb94a7dbb6bc39bb5a3dfc3d7e022858c30ba88fe98e84d77577f88f5d0110f9",
+    "_explorer_freeze_tweaked": "803771aed38c5e993c244ebfa583df5d65e38435cc5b1555cbc36e9a923e24d3",
+    "_explorer_undo": "965c10f6e2c2d27812fd2df003f89cfa8585a94864e429436bbb58ec1c78bc66",
+    "_explorer_save": "1fe2e706ca467a73d000a2795f23a1036b8cd90da7855f39122681f4502e5ec6",
+    "_explorer_restart": "a068f4d1625c18b38f07bc510388568d3ed43c8dbfa144a32ecb27d4e93fb70d",
+    "_explorer_full_reset": "dca684049865794b15fdab22cbcde7c0c9825ad70ca1bf8debfd3a693ca4e504",
+    "create_lora_royale_tab": "0a008fe6c7cb0760d74192e26e027fa6aeac1ff672a5c9adbe8d2674abbfd503",
+    "_royale_scan": "8b886f7e158adc935c243824c24b9de310430677570429b8a00f9e2ba981f235",
+    "_royale_render": "9f9c060a751b9747239c110307912ca187e9ae433ba37af0cb449ce3b55ec5c4",
+    "_royale_render_worker": "32d3b48403b557d623fa034555c72802eed122a18647261fd77a849c9b90414a",
+    "_royale_scrub": "d78bcf233b2cd956979141817fcaa73ff2f9f5f7e51c0000cd87a6b2f55e482f",
+    "_royale_export": "5b499d5f0dbc7716462b30e08645dfcacd2ce73f4218ed15644e204c0c0737f9",
+    "_royale_export_worker": "8b6e633692095334180b9858037738b2b2daee48f9b097238a7add1607e255c4",
+    "_royale_journey_seeds": "aaf3a163265ca813788b8071837413e6d7f730a9f84d39b92deca835c1af0a61",
+    "_royale_seed_travel": "49e2db6dd0f76f5d3b417501d8e6dafb25ef8ded1b985e0d80ed7ca3f784cb35",
+    "_royale_lora_travel": "4bb89b893171da4969ec256ddc3b0394676c1035b206b5782b79b46d122a0436",
+    "_royale_prompt_travel": "5ef1d0e067500b5478f181ca4e4466e6fd1a67b1bec728d8895d7014f0012920",
 }

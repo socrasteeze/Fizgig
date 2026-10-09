@@ -7,6 +7,10 @@ from fizgig.web.engine_host import worker_main
 
 
 def main() -> None:
+    # Import registers each tool's factory in this process.
+    import fizgig.web.explorer
+    import fizgig.web.refmod
+    import fizgig.web.royale
     worker_main()
 
 

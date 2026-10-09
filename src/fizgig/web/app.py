@@ -793,6 +793,132 @@ def repair_metrics(body: dict = Body(...)):
     return _call(repair_metrics_for, body)
 
 
+@app.get("/api/refmod/form")
+def refmod_form():
+    from fizgig.web.refmod import form as refmod_form_for
+    return _call(refmod_form_for)
+
+
+@app.post("/api/refmod/scan", responses={422: {"model": ProblemsOut}})
+def refmod_scan(body: dict = Body(...)):
+    from fizgig.web.refmod import scan as refmod_scan_for
+    return _call(refmod_scan_for, body)
+
+
+@app.post("/api/refmod/load", responses={409: {"model": ConflictOut}, 422: {"model": ProblemsOut}})
+def refmod_load(body: dict = Body(...)):
+    from fizgig.web.refmod import load as refmod_load_for
+    return _call(refmod_load_for, body)
+
+
+@app.post("/api/refmod/render", responses={422: {"model": ProblemsOut}})
+def refmod_render(body: dict = Body(...)):
+    from fizgig.web.refmod import render as refmod_render_for
+    return _call(refmod_render_for, body)
+
+
+@app.get("/api/refmod/presets")
+def refmod_presets():
+    from fizgig.web.refmod import presets as refmod_presets_for
+    return _call(refmod_presets_for)
+
+
+@app.put("/api/refmod/presets", responses={409: {"model": ConflictOut}, 422: {"model": ProblemsOut}})
+def refmod_save_preset(body: dict = Body(...)):
+    from fizgig.web.refmod import save_preset as refmod_save_preset_for
+    return _call(refmod_save_preset_for, body)
+
+
+@app.get("/api/refmod/presets/file", responses={404: {"model": ConflictOut}})
+def refmod_read_preset(name: str):
+    from fizgig.web.refmod import read_preset as refmod_read_preset_for
+    return _call(refmod_read_preset_for, name)
+
+
+@app.get("/api/explorer/form")
+def explorer_form(family: str = ""):
+    from fizgig.web.explorer import form as explorer_form_for
+    return _call(explorer_form_for, family)
+
+
+@app.post("/api/explorer/load", responses={409: {"model": ConflictOut}, 422: {"model": ProblemsOut}})
+def explorer_load(body: dict = Body(...)):
+    from fizgig.web.explorer import load as explorer_load_for
+    return _call(explorer_load_for, body)
+
+
+@app.post("/api/explorer/roll", responses={422: {"model": ProblemsOut}})
+def explorer_roll(body: dict = Body(...)):
+    from fizgig.web.explorer import roll as explorer_roll_for
+    return _call(explorer_roll_for, body)
+
+
+@app.post("/api/explorer/pick", responses={422: {"model": ProblemsOut}})
+def explorer_pick(body: dict = Body(...)):
+    from fizgig.web.explorer import pick as explorer_pick_for
+    return _call(explorer_pick_for, body)
+
+
+@app.post("/api/explorer/freeze", responses={422: {"model": ProblemsOut}})
+def explorer_freeze(body: dict = Body(...)):
+    from fizgig.web.explorer import freeze as explorer_freeze_for
+    return _call(explorer_freeze_for, body)
+
+
+@app.post("/api/explorer/undo", responses={422: {"model": ProblemsOut}})
+def explorer_undo(body: dict = Body(...)):
+    from fizgig.web.explorer import undo as explorer_undo_for
+    return _call(explorer_undo_for, body)
+
+
+@app.post("/api/explorer/reset", responses={422: {"model": ProblemsOut}})
+def explorer_reset(body: dict = Body(...)):
+    from fizgig.web.explorer import reset as explorer_reset_for
+    return _call(explorer_reset_for, body)
+
+
+@app.post("/api/explorer/save", responses={422: {"model": ProblemsOut}})
+def explorer_save(body: dict = Body(...)):
+    from fizgig.web.explorer import save as explorer_save_for
+    return _call(explorer_save_for, body)
+
+
+@app.get("/api/royale/form")
+def royale_form(family: str = ""):
+    from fizgig.web.royale import form as royale_form_for
+    return _call(royale_form_for, family)
+
+
+@app.post("/api/royale/scan", responses={422: {"model": ProblemsOut}})
+def royale_scan(body: dict = Body(...)):
+    from fizgig.web.royale import scan as royale_scan_for
+    return _call(royale_scan_for, body)
+
+
+@app.post("/api/royale/load", responses={409: {"model": ConflictOut}, 422: {"model": ProblemsOut}})
+def royale_load(body: dict = Body(...)):
+    from fizgig.web.royale import load as royale_load_for
+    return _call(royale_load_for, body)
+
+
+@app.post("/api/royale/render", responses={422: {"model": ProblemsOut}})
+def royale_render(body: dict = Body(...)):
+    from fizgig.web.royale import render as royale_render_for
+    return _call(royale_render_for, body)
+
+
+@app.post("/api/royale/travel", responses={422: {"model": ProblemsOut}})
+def royale_travel(body: dict = Body(...)):
+    from fizgig.web.royale import travel as royale_travel_for
+    return _call(royale_travel_for, body)
+
+
+@app.post("/api/royale/export", responses={409: {"model": ConflictOut}, 422: {"model": ProblemsOut}})
+def royale_export(body: dict = Body(...)):
+    from fizgig.web.royale import export as royale_export_for
+    return _call(royale_export_for, body)
+
+
 @app.get("/api/engine/status")
 def engine_status():
     from fizgig.web.repair import status as repair_status_for

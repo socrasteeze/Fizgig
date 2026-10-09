@@ -39,7 +39,17 @@ def _persist_blocked() -> bool:
     return bool(os.environ.get("FIZGIG_NO_PERSIST")) and not os.environ.get("FIZGIG_PREFS_FILE", "").strip()
 
 
+_DEFAULTS: dict | None = None
+
+
 def _defaults() -> dict:
+    """``DEFAULT_PREFS`` from the GUI source, plus empty family model keys.
+
+    The source is parsed once. Callers get a copy because they update it.
+    """
+    global _DEFAULTS
+    if _DEFAULTS is not None:
+        return dict(_DEFAULTS)
     text = _GUI.read_text(encoding="utf-8")
     tree = ast.parse(text)
     found = None
@@ -56,7 +66,8 @@ def _defaults() -> dict:
     for desc in FAMILIES.values():
         for key in desc.pref_keys:
             found.setdefault(key, "")
-    return found
+    _DEFAULTS = found
+    return dict(found)
 
 
 def _resolve(value: str) -> str:
