@@ -191,6 +191,7 @@ def public(job: dict) -> dict:
         "started": shown.get("started") or "",
         "ended": shown.get("ended") or "",
         "output_dir": shown.get("output_dir") or "",
+        "kind": shown.get("kind") or "train",
     }
 
 
@@ -466,6 +467,7 @@ def start(family: str, values: dict, context: dict, confirm: list[str], existing
     fake = os.environ.get("FIZGIG_WEB_FAKE_TRAINER", "").strip()
     job = {
         "id": job_id,
+        "kind": "train",
         "family": family,
         "values": values,
         "context": context,
@@ -488,8 +490,88 @@ def start(family: str, values: dict, context: dict, confirm: list[str], existing
         "exit_code": None,
     }
     _write(folder, job)
+    from fizgig.web.queue import arm
+    arm(job_id)
     _spawn(job_id)
     return public(job)
+
+
+def _train_only(job: dict) -> None:
+    if (job.get("kind") or "train") != "train":
+        raise JobError(409, {"detail": "not a training run"})
+
+
+def start_task(kind: str, family: str, values: dict, output_dir: str, before_spawn) -> dict:
+    """A caption or prep job. Same folder, lock, and runner as a training job."""
+    if _busy():
+        raise JobError(409, {"detail": "a run is already active"})
+    if held():
+        raise JobError(409, {"detail": "the GPU is in use"})
+    job_id = uuid.uuid4().hex[:12]
+    folder = jobs_root() / job_id
+    job = {
+        "id": job_id,
+        "kind": kind,
+        "family": family,
+        "values": values,
+        "context": {},
+        "plan": {"summary": [kind], "stages": []},
+        "status": "queued",
+        "pid": 0,
+        "pid_create_time": None,
+        "stage": "",
+        "step": 0,
+        "total": 0,
+        "loss": None,
+        "created": _now(),
+        "started": "",
+        "ended": "",
+        "output_dir": output_dir,
+        "exit_code": None,
+    }
+    if _busy():
+        raise JobError(409, {"detail": "a run is already active"})
+    if held():
+        raise JobError(409, {"detail": "the GPU is in use"})
+    _write(folder, job)
+    try:
+        if before_spawn is not None:
+            before_spawn(folder, job)
+    except Exception:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+    _spawn(job_id)
+    return public(job)
+
+
+def _duration(started: str, ended: str):
+    if not started or not ended:
+        return None
+    try:
+        begin = datetime.strptime(started, "%Y-%m-%dT%H:%M:%SZ")
+        stop = datetime.strptime(ended, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return None
+    return max(0, int((stop - begin).total_seconds()))
+
+
+def history() -> list[dict]:
+    rows = []
+    for job in _each():
+        if job.get("status") in _ACTIVE:
+            continue
+        shown = public(job)
+        shown["duration"] = _duration(shown.get("started") or "", shown.get("ended") or "")
+        rows.append(shown)
+    return rows
+
+
+def delete_record(job_id: str) -> None:
+    """Remove the job folder only. Training outputs and datasets stay where they are."""
+    folder, job = _get(job_id)
+    if job.get("status") in _ACTIVE:
+        raise JobError(409, {"detail": "the job is still active"})
+    shutil.rmtree(folder)
 
 
 def _spawn(job_id: str) -> None:
@@ -524,6 +606,7 @@ def _spawn(job_id: str) -> None:
 def pause(job_id: str) -> dict:
     """Write ``.pause_requested``. Mirrors the file write in ``_pause_training``."""
     folder, job = _get(job_id)
+    _train_only(job)
     if job.get("status") != "running":
         raise JobError(409, {"detail": "No active training to pause."})
     output = Path(job.get("output_dir") or ".")
@@ -554,6 +637,7 @@ def _ft_epochs(path: str) -> tuple[int, int]:
 def resume(job_id: str, confirm: list[str] | None = None) -> dict:
     """Start the paused job again. Mirrors ``_resume_training`` and ``.fizgig_paused.json``."""
     _folder, job = _get(job_id)
+    _train_only(job)
     if job.get("status") != "paused":
         raise JobError(409, {"detail": "No paused training to resume."})
     output = Path(job.get("output_dir") or ".")
@@ -637,6 +721,7 @@ def _whole(value, default: int) -> int:
 def write_override(job_id: str, prompt, seed, width, height) -> dict:
     """Write or remove ``.sample_override.json``. Mirrors ``_on_sample_override_changed``."""
     _folder, job = _get(job_id)
+    _train_only(job)
     output = Path(job.get("output_dir") or ".")
     if not _inside(output, output):
         raise JobError(404, {"detail": "not found"})

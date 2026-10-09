@@ -19,7 +19,7 @@ class WebMirrorTests(unittest.TestCase):
                 self.assertEqual(
                     current,
                     PINNED[name],
-                    f"{name} changed. Update form_spec.py, then the hash in src/fizgig/web/mirrors.py.",
+                    f"{name} changed. Update the web mirror, then the hash in src/fizgig/web/mirrors.py.",
                 )
 
 

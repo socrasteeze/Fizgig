@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -158,6 +158,7 @@ class JobOut(BaseModel):
     started: str = ""
     ended: str = ""
     output_dir: str = ""
+    kind: str = "train"
 
 
 class JobCreate(BaseModel):
@@ -219,6 +220,75 @@ class OverrideOut(BaseModel):
     active: bool | None = None
 
 
+class HistoryItem(JobOut):
+    duration: int | None = None
+
+
+class QueueItem(BaseModel):
+    id: str
+    family: str
+    values: dict
+    context: dict
+    added: str = ""
+    label: str = ""
+
+
+class QueueOut(BaseModel):
+    items: list[QueueItem]
+
+
+class QueueImport(BaseModel):
+    imported: int
+    skipped: int
+    items: list[QueueItem]
+
+
+class OrderIn(BaseModel):
+    ids: list[str]
+
+
+class StartOut(BaseModel):
+    folder: str = ""
+    images: int = 0
+    captions: int = 0
+    missing: int = 0
+    ready: bool = False
+
+
+class StartIn(BaseModel):
+    folder: str = ""
+
+
+class PrefsIn(BaseModel):
+    values: dict = Field(default_factory=dict)
+
+
+class HistoryOut(BaseModel):
+    jobs: list[HistoryItem]
+
+
+class CaptionIn(BaseModel):
+    folder: str = ""
+    name: str = ""
+    text: str = ""
+    trigger: str = ""
+    model: str = ""
+    task: str = ""
+    max_tokens: int | None = None
+    overwrite: bool = False
+    instruction: str = ""
+    include_video: bool = False
+
+
+class PrepIn(BaseModel):
+    folder: str = ""
+    mode: str = ""
+    megapixels: str = ""
+    face: str = ""
+    padding: str = ""
+    replace_originals: bool = False
+
+
 class MemoryOut(BaseModel):
     used: int
     total: int
@@ -268,6 +338,10 @@ def create_job(body: JobCreate):
 @app.get("/api/jobs", response_model=JobList)
 def list_jobs():
     from fizgig.web import jobs
+    from fizgig.web.queue import observe
+
+    rows = jobs.list_jobs()
+    observe(rows)
     return {"jobs": jobs.list_jobs()}
 
 
@@ -339,6 +413,12 @@ def _event_round(seen_status, seen_samples, first):
         current = jobs.list_jobs()
     except Exception:
         current = []
+    try:
+        from fizgig.web.queue import observe
+        observe(current)
+        current = jobs.list_jobs()
+    except Exception:
+        pass
     for job in current:
         lines.append(f"event: job\ndata: {json.dumps(job)}\n\n")
         progress = {
@@ -399,6 +479,162 @@ async def events(request: Request, once: int = 0):
 def ping():
     """No training route exists yet. This POST exists so the Origin check has a request to reject."""
     return {"ok": True}
+
+
+@app.get("/api/queue", response_model=QueueOut)
+def read_queue():
+    from fizgig.web.queue import list_items
+    return list_items()
+
+
+@app.post("/api/queue", response_model=QueueItem)
+def add_queue(body: JobCreate):
+    from fizgig.web.queue import add
+    return _call(add, body.family, body.values, body.context)
+
+
+@app.post("/api/queue/order", response_model=QueueOut)
+def order_queue(body: OrderIn):
+    from fizgig.web.queue import reorder
+    return _call(reorder, body.ids)
+
+
+@app.delete("/api/queue/{item_id}", response_model=QueueOut)
+def delete_queue_item(item_id: str):
+    from fizgig.web.queue import remove
+    return _call(remove, item_id)
+
+
+@app.post("/api/queue/advance", response_model=JobOut, responses={409: {"model": ConflictOut}, 422: {"model": ProblemsOut}})
+def advance_queue(body: ConfirmIn | None = None):
+    from fizgig.web.queue import advance
+    return _call(advance, [] if body is None else body.confirm)
+
+
+@app.post("/api/queue/import", response_model=QueueImport)
+def import_queue():
+    from fizgig.web.queue import import_desktop
+    return _call(import_desktop)
+
+
+@app.get("/api/history", response_model=HistoryOut)
+def read_history():
+    from fizgig.web.jobs import history
+    return {"jobs": history()}
+
+
+@app.delete("/api/jobs/{job_id}", status_code=204)
+def delete_job(job_id: str):
+    from fastapi import Response
+    from fizgig.web.jobs import delete_record
+
+    result = _call(delete_record, job_id)
+    if isinstance(result, JSONResponse):
+        return result
+    return Response(status_code=204)
+
+
+@app.get("/api/prefs")
+def read_prefs():
+    from fizgig.web.prefs import view
+    return view()
+
+
+@app.put("/api/prefs")
+def write_prefs(body: PrefsIn):
+    from fizgig.web.prefs import save
+    return _call(save, body.values)
+
+
+@app.get("/api/fs")
+def read_fs(path: str = ""):
+    from fizgig.web.fs import listing
+    return _call(listing, path)
+
+
+@app.post("/api/upload")
+def upload_files(
+    dest: str = Form(""),
+    overwrite: str = Form(""),
+    files: list[UploadFile] | None = File(None),
+    archive: UploadFile | None = File(None),
+):
+    from fizgig.web.fs import upload
+    return _call(upload, dest, files or [], archive, overwrite == "1")
+
+
+@app.get("/api/download")
+def download_lora(path: str):
+    from fizgig.web.fs import lora_file
+
+    found = _call(lora_file, path)
+    if isinstance(found, JSONResponse):
+        return found
+    return FileResponse(found, filename=found.name)
+
+
+@app.get("/api/start", response_model=StartOut)
+def read_start():
+    from fizgig.web.start import current
+    return current()
+
+
+@app.put("/api/start", response_model=StartOut)
+def write_start(body: StartIn):
+    from fizgig.web.start import set_folder
+    return _call(set_folder, body.folder)
+
+
+@app.get("/api/captions/form")
+def caption_form():
+    from fizgig.web.captions import form
+    return form()
+
+
+@app.post("/api/captions/jobs", response_model=JobOut, responses={409: {"model": ConflictOut}, 422: {"model": ProblemsOut}})
+def caption_job(body: CaptionIn):
+    from fizgig.web.captions import launch
+    return _call(launch, body.model_dump())
+
+
+@app.post("/api/captions/static")
+def caption_static(body: CaptionIn):
+    from fizgig.web.captions import static
+    return _call(static, body.model_dump())
+
+
+@app.get("/api/captions")
+def caption_list(folder: str = "", q: str = ""):
+    from fizgig.web.captions import listing
+    return _call(listing, folder, q)
+
+
+@app.get("/api/captions/image")
+def caption_image(folder: str, name: str):
+    from fizgig.web.captions import image_file
+
+    found = _call(image_file, folder, name)
+    if isinstance(found, JSONResponse):
+        return found
+    return FileResponse(found)
+
+
+@app.put("/api/captions")
+def caption_save(body: CaptionIn):
+    from fizgig.web.captions import save_caption
+    return _call(save_caption, body.folder, body.name, body.text)
+
+
+@app.get("/api/prep/form")
+def prep_form():
+    from fizgig.web.image_prep import form
+    return form()
+
+
+@app.post("/api/prep/jobs", response_model=JobOut, responses={409: {"model": ConflictOut}, 422: {"model": ProblemsOut}})
+def prep_job(body: PrepIn):
+    from fizgig.web.image_prep import launch
+    return _call(launch, body.model_dump())
 
 
 _dist = _REPO / "webui" / "dist"

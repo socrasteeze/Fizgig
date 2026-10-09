@@ -232,3 +232,73 @@ h2, summary {
 .meta {
   color: var(--muted);
 }
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 20px 0;
+}
+
+.listing {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.listing button, textarea {
+  width: 100%;
+  text-align: left;
+}
+
+textarea {
+  min-height: 72px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+}
+
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 48px 16px;
+}
+
+.sheet {
+  width: min(640px, 100%);
+  max-height: 80vh;
+  overflow: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.drop {
+  margin-top: 12px;
+  padding: 28px 12px;
+  text-align: center;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  color: var(--secondary);
+}
+
+.drop.on {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.field img {
+  width: 160px;
+  height: 160px;
+  object-fit: contain;
+  background: var(--bg);
+  border-radius: 6px;
+}

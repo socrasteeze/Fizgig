@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { components } from "./api";
+import { BrowseButton, browserNotify, NotifyButton, Phase2 } from "./extra";
 import { fieldVisible } from "./visibility";
 
 const FAMILIES: { id: string; name: string }[] = [
@@ -116,6 +117,8 @@ export function App() {
   const [seed, setSeed] = useState("1234");
   const [width, setWidth] = useState("768");
   const [height, setHeight] = useState("768");
+  const [tab, setTab] = useState("Training");
+  const tabs = ["Training", "Start", "Captions", "Image Prep", "Queue", "History", "Preferences"];
 
   const fields = (form?.fields ?? []).map(asField);
   const models = (form?.models ?? []).map(asModel);
@@ -142,7 +145,6 @@ export function App() {
         }
         setValues(next);
         setModelPaths({});
-        setImageFolder("");
         setProblems([]);
         setWarnings([]);
       })
@@ -169,6 +171,14 @@ export function App() {
       .then((response) => response.json())
       .then((body: System) => setSystem(body))
       .catch(() => undefined);
+    fetch("/api/start")
+      .then((response) => response.json())
+      .then((body: { folder?: string }) => {
+        if (body.folder) {
+          setImageFolder(body.folder);
+        }
+      })
+      .catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -186,6 +196,7 @@ export function App() {
     source.addEventListener("notice", (event) => {
       const notice = JSON.parse((event as MessageEvent).data) as Notice;
       setNotices((current) => [notice, ...current].slice(0, 6));
+      browserNotify(notice);
     });
     return () => source.close();
   }, []);
@@ -243,22 +254,54 @@ export function App() {
 
   function setValue(key: string, value: unknown) {
     setValues((current) => ({ ...current, [key]: value }));
+    if (key === "image_folder") {
+      setImageFolder(String(value ?? ""));
+    }
+  }
+
+  function rememberFolder(path: string) {
+    setImageFolder(path);
+    void fetch("/api/start", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ folder: path }),
+    });
+  }
+
+  async function queueCurrent(samples: Record<string, unknown>): Promise<string> {
+    const hasFolder = fields.some((field) => field.key === "image_folder");
+    const folder = String((hasFolder ? values.image_folder : "") || imageFolder || "");
+    const response = await fetch("/api/queue", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        family,
+        values: hasFolder ? { ...values, image_folder: folder } : values,
+        context: { models: modelPaths, image_folder: folder, samples },
+      }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({})) as { detail?: string; problems?: string[] };
+      return body.problems?.join("\n") || body.detail || `queue failed (${response.status})`;
+    }
+    return "";
   }
 
   async function start(confirm: string[]) {
     setProblems([]);
     setWarnings([]);
     const hasFolder = fields.some((field) => field.key === "image_folder");
+    const folder = String((hasFolder ? values.image_folder : "") || imageFolder || "");
     const response = await fetch("/api/jobs", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         family,
-        values,
+        values: hasFolder ? { ...values, image_folder: folder } : values,
         confirm,
         context: {
           models: modelPaths,
-          image_folder: hasFolder ? values.image_folder : imageFolder,
+          image_folder: folder,
         },
       }),
     });
@@ -331,8 +374,14 @@ export function App() {
         <div className="bars">
           <Bar label="VRAM" pair={system.vram} from="#3FB950" to="#E5534B" />
           <Bar label="RAM" pair={system.ram} from="#3B82F6" to="#EAC54F" />
+          <NotifyButton />
         </div>
       </header>
+      <nav className="tabs">
+        {tabs.map((name) => (
+          <button key={name} type="button" className={tab === name ? "chip on" : "chip"} onClick={() => setTab(name)}>{name}</button>
+        ))}
+      </nav>
       {notices.length > 0 ? (
         <div className="notices">
           {notices.map((notice, index) => (
@@ -342,6 +391,9 @@ export function App() {
           ))}
         </div>
       ) : null}
+      {tab !== "Training" ? (
+        <Phase2 tab={tab} imageFolder={imageFolder} setImageFolder={rememberFolder} queueCurrent={queueCurrent} />
+      ) : (
       <main>
         <label>
           Family
@@ -402,8 +454,24 @@ export function App() {
                           <input
                             value={values[field.key] == null ? "" : String(values[field.key])}
                             onChange={(event) => setValue(field.key, event.target.value)}
+                            onBlur={() => {
+                              if (field.key === "image_folder") {
+                                rememberFolder(String(values[field.key] ?? ""));
+                              }
+                            }}
                           />
                         )}
+                        {field.kind === "folder" || field.kind === "path" ? (
+                          <BrowseButton
+                            select={field.kind === "path" ? "file" : "folder"}
+                            onPick={(path) => {
+                              setValue(field.key, path);
+                              if (field.key === "image_folder") {
+                                rememberFolder(path);
+                              }
+                            }}
+                          />
+                        ) : null}
                       </label>
                     )}
                     {field.help ? <p className="help">{field.help}</p> : null}
@@ -417,8 +485,9 @@ export function App() {
                 <div className="field">
                   <label>
                     Training image folder
-                    <input value={imageFolder} onChange={(event) => setImageFolder(event.target.value)} />
+                    <input value={imageFolder} onChange={(event) => setImageFolder(event.target.value)} onBlur={() => rememberFolder(imageFolder)} />
                   </label>
+                  <BrowseButton select="folder" onPick={(path) => rememberFolder(path)} />
                 </div>
               </section>
             ) : null}
@@ -434,6 +503,7 @@ export function App() {
                         onChange={(event) => setModelPaths((current) => ({ ...current, [model.key]: event.target.value }))}
                       />
                     </label>
+                    <BrowseButton select="file" onPick={(path) => setModelPaths((current) => ({ ...current, [model.key]: path }))} />
                   </div>
                 ))}
               </section>
@@ -472,7 +542,10 @@ export function App() {
                 <button type="button" onClick={() => start(warnings.map((item) => item.code))}>Start anyway</button>
               </div>
             ) : null}
-            <button type="button" className="start" onClick={() => start([])}>Start training</button>
+            <div className="controls">
+              <button type="button" className="start" onClick={() => start([])}>Start training</button>
+              <button type="button" onClick={() => void queueCurrent({ enabled: true, prompts: ["A high quality photo"] })}>Add to queue</button>
+            </div>
           </>
         ) : null}
 
@@ -529,6 +602,7 @@ export function App() {
           )}
         </section>
       </main>
+      )}
     </>
   );
 }

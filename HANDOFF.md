@@ -1,44 +1,41 @@
 # HANDOFF
 
-**Updated:** 2026-10-08 · **Branch:** master · **HEAD:** 6c0f49a · **Tree:** dirty (Phase 1b and 1c uncommitted)
+**Updated:** 2026-10-09 · **Branch:** master · **HEAD:** f635346 · **Tree:** dirty (Phase 2 uncommitted)
 
 ## State
-Phase 1b and 1c are uncommitted on 6c0f49a. The training page can create a job, watch it, and pause, resume, stop, or override the next sample. A stand-in trainer covers the checks. A real GPU run and phone access through `tailscale serve` are still manual (`docs/WEBUI_PHASE1.md`).
-The next step is Phase 2.
+Phase 2 is uncommitted on f635346. The page can queue a training run, browse and upload a dataset, edit prefs, caption, and prep images. A stand-in trainer, a fake caption server, and a stubbed face detector cover the checks. A real GPU run and phone access through `tailscale serve` are still manual (`docs/WEBUI_PHASE2.md`).
+The next step is Phase 3a: Profiler, Extract, Metadata, Samples settings.
 
 ## Done this session
-- Jobs on disk, a detached runner, and the routes in `docs/WEBUI_PHASE1.md` — `src/fizgig/web/jobs.py`, `runner.py`, `app.py`.
-- GPU lock shared with the desktop — `src/fizgig/gpu_lock.py`. The desktop diff is 19 added lines in `start_training`, `_start_training_launch`, and `_on_training_subprocess_exited`.
-- Training page, job monitor, top bar — `webui/src/App.tsx`. API types from `app.openapi()`, checked by `npm run build`.
-- `run_webui.bat`. It rebuilds `webui/` when a source file is newer than `webui/dist`, then listens on 127.0.0.1 only.
-- Default suite: 22 tests, 21 passed, 1 skipped. Golden suite: 1 passed. `npm --prefix webui run build` passed. `checks\check_appearance.py` passed.
+- Queue, history, prefs, folder browser, upload, Start folder, captions, and image prep. API in `docs/WEBUI_PHASE2.md`.
+- New modules under `src/fizgig/web/`: `queue.py`, `prefs.py`, `fs.py`, `start.py`, `captions.py`, `image_prep.py`. Routes in `app.py`. Caption and prep run through the existing runner and GPU lock.
+- Page tabs in `webui/src/extra.tsx`, wired from `webui/src/App.tsx`. In-page notices stay. Browser notifications ask only from a button.
+- `python-multipart==0.0.20` in `requirements-web.txt` (upload). No other new dependency.
+- Default suite: 34 tests, 33 passed, 1 skipped. Three runs, same counts (77.785s, 77.641s, 79.969s). Golden: 1 passed. `npm --prefix webui run build` passed. `checks\check_appearance.py` passed.
 
 ## Open
-1. Phase 2: persistent queue, job history, folder browser and upload, Start tab, Captions, Image Prep.
+1. Phase 3a: Profiler, Extract, Metadata, Samples settings.
 2. Review the dialogs (Queue, Gallery, Browse, preset windows) at 100%, 125%, and 150%; none were opened.
 3. At 150% the fixed 1580x1124 window truncates tab labels in both appearances. This predates the appearance work (`lora_trainer_gui.py:1327`).
-4. A real GPU run from the page, and phone access through `tailscale serve`.
+4. A real GPU run from the page, phone access through `tailscale serve`, a real caption model, and a real face detector.
 
 ## Decisions
-- Fork-only, nothing offered upstream (user, 2026-10-08). The scope's "Keeping the fork mergeable" rules follow from it: new files only, no imports of `lora_trainer_gui.py`, GUI logic mirrored and pinned by a hash test rather than moved.
-- Recommended jobs on disk (job folder, detached run, reattach by pid) over an in-memory queue, so runs survive a server restart (ai-toolkit's model; ComfyUI loses its queue).
-- Web stack (user, 2026-10-08): Python FastAPI server, React + TypeScript page built by Vite, forms generated from `/api/schema`, because the trainer, schema and engines are Python and hand-written forms drift (upstream closed PR #164). The spike reads `families/train.py`'s parser from source so a schema request does not import torch.
-- No login (user): the server listens on 127.0.0.1 only, with no listen option, and Tailscale Serve is the only way in. Every request checks Host; state-changing requests check Origin when that header is present. `POST /api/ping` exists only so that check has a route.
-- The pre-push gate scans only commits not on `origin/*`, because upstream's commits carry AI-session trailers and would block every push after a sync.
-- No `CHANGELOG.md` in the fork: release notes are upstream's `docs/RELEASE_NOTES_*.md`. The user can still overrule this.
-- Kept `dark-clam` as the pre-change spacing instead of adding a third appearance — the default must not add padding the old styles left unset.
-- sv-ttk stays rejected — `docs/GUI_THEME.md`. A saved appearance applies on the next start because `setup_styles` runs once.
-- Low disk and a resume already at max epochs are warnings. The page sends the codes back in `confirm` to start anyway. That is the desktop's Yes on those dialogs.
+- Fork-only, nothing offered upstream (user, 2026-10-08). New files only, no imports of `lora_trainer_gui.py`, GUI logic mirrored and pinned by a hash test rather than moved.
+- The queue advances only after a training job this process watched finishes cleanly. Failure, stop, and pause hold it. A server restart keeps the list and does not start it.
+- Desktop `presets/training_queue.json` is imported read-only. The mapping follows `_apply_queue_item`.
+- Prefs secrets (`runpod_api_key`, and keys ending in `_key`, `_token`, or `_secret`) are never sent and never overwritten by a web save.
+- Caption and prep are jobs on the same lock as training. `FIZGIG_WEB_FAKE_CAPTION` and `FIZGIG_WEB_FAKE_FACE=1` stand in for the checks. Translation, Whisper, the Look filter, and Gizmo stay on the desktop.
+- No login (user): the server listens on 127.0.0.1 only. Tailscale Serve is the only way in.
+- Low disk and a resume already at max epochs are warnings. The page sends the codes back in `confirm` to start anyway.
 
 ## Traps
 - `origin` is upstream: fetch only, push disabled. Push only to fork, on master, when asked, via the clean workflow. `AGENTS.md`, the agent notes file, and `.git/hooks/pre-push` exist only in this checkout.
-- The golden test fills the edit Originals folder and the slider -1 end folder before it compares commands. An empty pair folder is refused by both `_generic_validate_paths` and `launch.problems`. The three command builders still return a launch in that state. Do not change `launch.py` or the GUI to hide a difference (`docs/WEBUI_PHASE1.md`).
+- The golden test fills the edit Originals folder and the slider -1 end folder before it compares commands. Do not change `launch.py` or the GUI to hide a difference (`docs/WEBUI_PHASE1.md`).
 - Never post on upstream issues or PRs, and never open one. If a sync brings in `src/fizgig/web` (#165 is open), stop and ask the user whether to switch to it.
 - This checkout's venv, prefs and output LoRAs are real. Test launches use `FIZGIG_NO_PERSIST` and an isolated prefs file. `--launch` may create a CUDA context. Don't run `update_fizgig.bat`.
-- Do not import `families/train.py` from the web server (that import loads torch). The Host check rejects a test client's default host, so tests use 127.0.0.1. Build `webui/` before starting the server. Starlette 1.7 warns that TestClient wants httpx2; `requirements-web.txt` stays on httpx.
-- `FIZGIG_WEB_FAKE_TRAINER` replaces plan stages after `plan()` succeeds. Unset, the runner executes the real commands. Do not set it in a real launch.
+- Do not import `families/train.py` from the web server (that import loads torch). The Host check rejects a test client's default host, so tests use 127.0.0.1. `FIZGIG_WEB_FAKE_TRAINER` replaces plan stages after `plan()` succeeds. Do not set it in a real launch.
 - `plan()` does not point `--dit` at a fine-tune checkpoint. A fine-tune resume from the page is not the desktop's continuation.
-- Fizgig is not DPI-aware: screen captures must scale Tk coordinates by the display scale. The splash screen, Gizmo and the converter keep their own style setup.
+- Deleting a job record removes only the job folder. It must not delete the output directory or the dataset.
 
 ## Verify
 ```powershell
