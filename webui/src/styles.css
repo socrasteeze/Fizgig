@@ -2,11 +2,16 @@
 :root {
   --bg: #1e2530;
   --surface: #252d38;
+  --hover: #2a3542;
+  --header: #1a2028;
   --text: #f0f4f8;
   --secondary: #8a9bae;
   --explain: #c3cdd9;
+  --muted: #5a6b7e;
   --accent: #3b82f6;
   --border: #3a4555;
+  --success: #10b981;
+  --warning: #f59e0b;
   --error: #ef4444;
 }
 
@@ -23,26 +28,93 @@ body {
   line-height: 1.45;
 }
 
-main {
-  max-width: 880px;
-  margin: 0 auto;
-  padding: 28px 20px 48px;
+.top {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 16px 20px 12px;
+  background: var(--header);
+  border-bottom: 1px solid var(--border);
+}
+
+.top-title {
+  min-width: 0;
 }
 
 h1 {
-  margin: 0 0 16px;
+  margin: 0 0 8px;
   font-size: 22px;
   font-weight: 650;
 }
 
+.jobs, .chips, .controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.bars {
+  width: min(360px, 100%);
+}
+
+.bar {
+  position: relative;
+  height: 27px;
+  margin-bottom: 6px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.bar-fill {
+  position: absolute;
+  inset: 1px auto 1px 0;
+}
+
+.bar span, .progress {
+  position: relative;
+}
+
+.bar span {
+  display: block;
+  padding: 4px 10px;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.notices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 20px 0;
+}
+
+.notice {
+  background: var(--hover);
+  color: var(--explain);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+
+main {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 20px 20px 48px;
+}
+
 label {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
   color: var(--secondary);
 }
 
-select {
+.top label, .field label {
+  width: 100%;
+}
+
+input, select, button {
   background: var(--surface);
   color: var(--text);
   border: 1px solid var(--border);
@@ -51,37 +123,112 @@ select {
   font: inherit;
 }
 
-.status {
+input[type="checkbox"] {
+  width: auto;
+}
+
+.field label:has(input[type="checkbox"]) {
+  flex-direction: row;
+  align-items: center;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
+.chip {
+  border-radius: 999px;
+}
+
+.chip.on, .start {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.status, .help {
   color: var(--explain);
+}
+
+.help {
+  margin: 4px 0 0;
+  font-size: 13px;
 }
 
 .error {
   color: var(--error);
+  white-space: pre-wrap;
 }
 
-section {
+.warn {
+  border: 1px solid var(--warning);
+  border-radius: 8px;
+  padding: 12px;
+  white-space: pre-wrap;
+}
+
+section, .advanced {
   margin-top: 22px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 14px 16px 8px;
+  padding: 14px 16px;
 }
 
-h2 {
+h2, summary {
   margin: 0 0 8px;
   font-size: 15px;
   font-weight: 650;
 }
 
-ul {
-  margin: 0;
-  padding: 0 0 8px 18px;
+.field {
+  margin: 10px 0;
 }
 
-li {
-  margin: 2px 0;
+.field input, .field select {
+  width: 100%;
+}
+
+.progress {
+  height: 10px;
+  background: var(--bg);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.progress div {
+  height: 100%;
+  background: var(--success);
+}
+
+.log {
+  max-height: 280px;
+  overflow: auto;
+  background: var(--bg);
+  padding: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.gallery {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.gallery img {
+  width: 160px;
+  height: 160px;
+  object-fit: contain;
+  background: var(--bg);
+  border-radius: 6px;
 }
 
 .meta {
-  color: var(--secondary);
+  color: var(--muted);
 }

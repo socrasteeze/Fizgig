@@ -29626,6 +29626,13 @@ class LoRATrainerGUI:
         except Exception:
             pass
 
+        from fizgig.gpu_lock import held as _gpu_held
+        if _gpu_held():
+            messagebox.showerror(
+                "GPU in use",
+                "Another Fizgig run already has this GPU. Wait for it to finish, then start again.")
+            return
+
         # Validate inputs before starting
         if not self.validate_inputs():
             return
@@ -29927,6 +29934,30 @@ class LoRATrainerGUI:
             _runs_cache = _launch.caches(_fdesc, self._family_launch_inputs(_fdesc))
         else:
             _runs_cache = bool(self.enable_cache_var.get() and not is_resuming)
+        def _launch_holding_gpu(cmd, name, callback):
+            """Take the GPU lock and start the first subprocess.
+
+            A return or a raise before that process exists releases the lock.
+            The exit handler releases it once a subprocess has started.
+            """
+            from fizgig.gpu_lock import GpuLock
+            lock = GpuLock()
+            if not lock.acquire():
+                messagebox.showerror(
+                    "GPU in use",
+                    "Another Fizgig run already has this GPU. Wait for it to finish, then start again.")
+                return False
+            self._gpu_lock = lock
+            before = getattr(self, "current_process", None)
+            try:
+                self.run_subprocess(cmd, name, callback)
+            finally:
+                proc = getattr(self, "current_process", None)
+                if proc is None or proc is before:
+                    lock.release()
+                    self._gpu_lock = None
+            return proc is not None and proc is not before
+
         if _runs_cache:
             self.update_console(f"Starting cache preparation for {arch}...\n")
 
@@ -29959,13 +29990,15 @@ class LoRATrainerGUI:
                     return
                 _after_latents()
 
-            self.run_subprocess(cache_latents_cmd, "Cache Preparation", on_cache_preparation_complete)
+            if not _launch_holding_gpu(cache_latents_cmd, "Cache Preparation", on_cache_preparation_complete):
+                return
         else:
             if is_resuming:
                 self.update_console("Resuming from saved state — skipping cache preparation (cache already built).\n")
             else:
                 self.update_console(f"Starting {arch} training without caching...\n")
-            self.run_subprocess(command, "Training", on_training_complete)
+            if not _launch_holding_gpu(command, "Training", on_training_complete):
+                return
         # Mark as running for the pause/resume state machine
         self.training_state = "running"
         self._refresh_training_buttons()
@@ -30608,6 +30641,10 @@ class LoRATrainerGUI:
         # Same hygiene for the FT twin: the armed continuation lives until its run ends
         # (it must survive the async caption-worker launch path), then dies here.
         self._ft_resume = None
+        _gpu_lock = getattr(self, "_gpu_lock", None)
+        if _gpu_lock is not None:
+            _gpu_lock.release()
+            self._gpu_lock = None
         self._refresh_training_buttons()
 
     def _resume_training(self):

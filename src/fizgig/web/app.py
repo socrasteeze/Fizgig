@@ -7,14 +7,17 @@ from __future__ import annotations
 
 import argparse
 import ast
+import asyncio
 import dataclasses
+import json
 import os
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 LOOPBACK = "127.0.0.1"
 PORT = 8081
@@ -133,16 +136,263 @@ def schema(family: str):
     return body
 
 
-@app.get("/api/form")
+class FormOut(BaseModel):
+    family: str
+    display_name: str
+    fields: list[dict]
+    advanced: list[dict]
+    presets: list[dict]
+    models: list[dict]
+
+
+class JobOut(BaseModel):
+    id: str
+    family: str
+    status: str
+    pid: int | None = None
+    stage: str = ""
+    step: int = 0
+    total: int = 0
+    loss: float | None = None
+    created: str = ""
+    started: str = ""
+    ended: str = ""
+    output_dir: str = ""
+
+
+class JobCreate(BaseModel):
+    family: str
+    values: dict = Field(default_factory=dict)
+    context: dict = Field(default_factory=dict)
+    confirm: list[str] = Field(default_factory=list)
+
+
+class ConfirmIn(BaseModel):
+    confirm: list[str] = Field(default_factory=list)
+
+
+class WarningItem(BaseModel):
+    code: str
+    message: str
+
+
+class ProblemsOut(BaseModel):
+    problems: list[str]
+
+
+class ConflictOut(BaseModel):
+    detail: str | None = None
+    warnings: list[WarningItem] | None = None
+
+
+class JobList(BaseModel):
+    jobs: list[JobOut]
+
+
+class LogOut(BaseModel):
+    offset: int
+    next: int
+    text: str
+
+
+class SampleItem(BaseModel):
+    name: str
+    url: str
+
+
+class SampleList(BaseModel):
+    samples: list[SampleItem]
+
+
+class OverrideIn(BaseModel):
+    prompt: str = ""
+    seed: str | int | None = None
+    width: str | int | None = None
+    height: str | int | None = None
+
+
+class OverrideOut(BaseModel):
+    prompt: str = ""
+    seed: int | None = None
+    width: int | None = None
+    height: int | None = None
+    active: bool | None = None
+
+
+class MemoryOut(BaseModel):
+    used: int
+    total: int
+
+
+class SystemOut(BaseModel):
+    vram: MemoryOut | None = None
+    ram: MemoryOut | None = None
+
+
+def _call(fn, *args):
+    from fizgig.web.jobs import JobError
+    try:
+        return fn(*args)
+    except JobError as exc:
+        return JSONResponse(exc.body, status_code=exc.status)
+
+
+@app.get("/api/form", response_model=FormOut)
 def form(family: str):
     """Training-tab fields for one family, then the argparse flags the form does not already cover."""
     from fizgig.families.registry import get as get_family
-    from fizgig.web.form_spec import form_for
+    from fizgig.web.form_spec import form_for, web_values
 
     desc = get_family(family)
     if desc is None:
         raise HTTPException(status_code=404, detail="unknown family")
-    return form_for(desc, advanced_options())
+    body = form_for(desc, advanced_options())
+    body["display_name"] = desc.display_name
+    body["presets"] = [
+        {"name": item[0], "values": web_values(desc, item[1])}
+        for item in desc.presets
+    ]
+    body["models"] = [
+        {"key": item.pref_key, "label": item.label, "required": bool(item.required)}
+        for item in desc.model_files
+    ]
+    return body
+
+
+@app.post("/api/jobs", response_model=JobOut, responses={409: {"model": ConflictOut}, 422: {"model": ProblemsOut}})
+def create_job(body: JobCreate):
+    from fizgig.web import jobs
+    return _call(jobs.start, body.family, body.values, body.context, body.confirm)
+
+
+@app.get("/api/jobs", response_model=JobList)
+def list_jobs():
+    from fizgig.web import jobs
+    return {"jobs": jobs.list_jobs()}
+
+
+@app.get("/api/jobs/{job_id}", response_model=JobOut)
+def read_job(job_id: str):
+    from fizgig.web import jobs
+    return _call(jobs.get_job, job_id)
+
+
+@app.get("/api/jobs/{job_id}/log", response_model=LogOut)
+def read_log(job_id: str, offset: int = 0):
+    from fizgig.web import jobs
+    return _call(jobs.read_log, job_id, offset)
+
+
+@app.post("/api/jobs/{job_id}/pause", response_model=JobOut)
+def pause_job(job_id: str):
+    from fizgig.web import jobs
+    return _call(jobs.pause, job_id)
+
+
+@app.post("/api/jobs/{job_id}/resume", response_model=JobOut, responses={409: {"model": ConflictOut}})
+def resume_job(job_id: str, body: ConfirmIn | None = None):
+    from fizgig.web import jobs
+    confirm = list(body.confirm) if body is not None else []
+    return _call(jobs.resume, job_id, confirm)
+
+
+@app.post("/api/jobs/{job_id}/stop", response_model=JobOut)
+def stop_job(job_id: str):
+    from fizgig.web import jobs
+    return _call(jobs.stop, job_id)
+
+
+@app.post("/api/jobs/{job_id}/override", response_model=OverrideOut)
+def override_job(job_id: str, body: OverrideIn):
+    from fizgig.web import jobs
+    return _call(jobs.write_override, job_id, body.prompt, body.seed, body.width, body.height)
+
+
+@app.get("/api/jobs/{job_id}/samples", response_model=SampleList)
+def list_samples(job_id: str):
+    from fizgig.web import jobs
+    return _call(jobs.list_samples, job_id)
+
+
+@app.get("/api/jobs/{job_id}/samples/{name}")
+def read_sample(job_id: str, name: str):
+    from fizgig.web import jobs
+    found = _call(jobs.sample_path, job_id, name)
+    if isinstance(found, JSONResponse):
+        return found
+    return FileResponse(found)
+
+
+@app.get("/api/system", response_model=SystemOut)
+def system():
+    from fizgig.web.system import stats
+    return stats()
+
+
+def _event_round(seen_status, seen_samples, first):
+    """One SSE snapshot. ``once=1`` on the route returns a single round and closes."""
+    from fizgig.web import jobs
+    from fizgig.web.system import stats
+
+    lines = []
+    try:
+        current = jobs.list_jobs()
+    except Exception:
+        current = []
+    for job in current:
+        lines.append(f"event: job\ndata: {json.dumps(job)}\n\n")
+        progress = {
+            "id": job["id"], "stage": job["stage"], "step": job["step"],
+            "total": job["total"], "loss": job["loss"],
+        }
+        lines.append(f"event: progress\ndata: {json.dumps(progress)}\n\n")
+        previous = seen_status.get(job["id"])
+        seen_status[job["id"]] = job["status"]
+        if not first and previous != job["status"] and job["status"] in {"done", "failed", "paused"}:
+            kind = {"done": "finished", "failed": "failed", "paused": "paused"}[job["status"]]
+            notice = {"id": job["id"], "kind": kind, "message": f"{job['family']} {kind}"}
+            lines.append(f"event: notice\ndata: {json.dumps(notice)}\n\n")
+        try:
+            listed = jobs.list_samples(job["id"]).get("samples") or []
+        except Exception:
+            listed = []
+        known = seen_samples.setdefault(job["id"], set())
+        for sample in listed:
+            if sample["name"] in known:
+                continue
+            known.add(sample["name"])
+            if not first:
+                body = {"id": job["id"], "name": sample["name"], "url": sample["url"]}
+                lines.append(f"event: sample\ndata: {json.dumps(body)}\n\n")
+    lines.append(f"event: system\ndata: {json.dumps(stats())}\n\n")
+    return lines
+
+
+@app.get("/api/events")
+async def events(request: Request, once: int = 0):
+    """Server-sent events: job, progress, sample, system, notice.
+
+    ``once=1`` sends a single round and closes. The page leaves it off and keeps the stream open.
+    """
+    async def stream():
+        seen_status = {}
+        seen_samples = {}
+        first = True
+        while True:
+            for line in _event_round(seen_status, seen_samples, first):
+                yield line
+            first = False
+            if once:
+                return
+            await asyncio.sleep(0.8)
+            if await request.is_disconnected():
+                return
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/api/ping")
@@ -159,6 +409,8 @@ if _dist.is_dir():
 def serve(host: str = LOOPBACK, port: int = PORT) -> None:
     if host != LOOPBACK:
         raise SystemExit("refusing to listen on a non-loopback address")
+    from fizgig.web.jobs import reconcile
+    reconcile()
     import uvicorn
     uvicorn.run(app, host=host, port=port)
 
