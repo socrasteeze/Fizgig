@@ -485,6 +485,16 @@ def read_devices():
     return {"devices": visible_devices()}
 
 
+def _engine_cursor() -> int:
+    """The newest engine event seq now. A new or reconnected stream starts here, so it does not replay old events."""
+    try:
+        from fizgig.web.engine_host import events_since
+        _batch, cursor = events_since(0)
+        return int(cursor)
+    except Exception:
+        return 0
+
+
 def _event_round(seen_status, seen_samples, first, engine_after):
     """One SSE snapshot. ``once=1`` on the route returns a single round and closes.
 
@@ -546,7 +556,7 @@ async def events(request: Request, once: int = 0):
         seen_status = {}
         seen_samples = {}
         first = True
-        engine_after = 0
+        engine_after = await asyncio.to_thread(_engine_cursor)
         while True:
             lines, engine_after = await asyncio.to_thread(
                 _event_round, seen_status, seen_samples, first, engine_after)
@@ -1026,9 +1036,9 @@ def gizmo_name(source: str = "", dataset: str = "", muted: int = 0, kind: str = 
 
 
 @app.post("/api/gizmo/upload")
-def gizmo_upload(dest: str = Form(""), file: UploadFile | None = File(None)):
+def gizmo_upload(dest: str = Form(""), overwrite: str = Form(""), file: UploadFile | None = File(None)):
     from fizgig.web.gizmo import upload_source
-    return _call(upload_source, dest, file)
+    return _call(upload_source, dest, file, overwrite == "1")
 
 
 @app.post("/api/gizmo/recordings")

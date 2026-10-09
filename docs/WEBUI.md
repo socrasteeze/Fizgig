@@ -4,18 +4,18 @@ The page talks to a server on this machine. The server listens on `127.0.0.1:808
 
 Nothing starts Fizgig on its own. There is no scheduled task, no startup shortcut, no service, and no systemd unit. The server runs only while `run_webui.bat`, `run_webui.sh`, or the Docker container is running. The queue starts the next job it already holds from a thread inside the running server, including while the browser is closed. Opening the page does not start a job. A failed run does not start the next one. A training job that has already started keeps running if you close the browser.
 
-Blank model paths, the cache folder, and the captioner are filled from Preferences when a run starts. The Training page shows the saved model paths for the family. The Captions trigger word is remembered for a later training launch. Advanced flags are shown for reference and are not sent.
+Blank model paths, the cache folder, and the captioner are filled from Preferences when a run starts. The Training page shows the saved model paths for the family and reads them again each time you open the tab. A path you type or browse there is sent with the run. A path you leave alone comes from Preferences when the run starts. The Captions trigger word is saved when you leave its box. A later training launch uses it for the Metadata trigger phrase when that field is blank. Advanced flags are shown for reference and are not sent.
 
 ## First run
 
-You need the Fizgig folder, its Python environment, and Node.js (the launcher builds the page).
+You need the Fizgig folder, its `venv` (the folder the desktop install makes, such as `install_fizgig.bat` on Windows), and Node.js (the launcher builds the page).
 
-Install the web packages from the Fizgig folder, then start the page.
+Install the web packages into that `venv`, not into whatever `pip` is on PATH. When the `venv` exists, the launchers and the build's API check use its Python. Then start the page.
 
 Command Prompt:
 
 ```
-pip install -r requirements-web.txt
+venv\Scripts\python -m pip install -r requirements-web.txt
 npm --prefix webui ci
 run_webui.bat
 ```
@@ -23,7 +23,7 @@ run_webui.bat
 PowerShell:
 
 ```
-pip install -r requirements-web.txt
+.\venv\Scripts\python -m pip install -r requirements-web.txt
 npm --prefix webui ci
 .\run_webui.bat
 ```
@@ -31,10 +31,12 @@ npm --prefix webui ci
 sh:
 
 ```
-pip install -r requirements-web.txt
+venv/bin/python -m pip install -r requirements-web.txt
 npm --prefix webui ci
 sh run_webui.sh
 ```
+
+If the launcher stops with `ModuleNotFoundError: No module named 'fastapi'`, the packages went into a different Python. Run the install line for your shell again.
 
 The launcher rebuilds `webui/` when a source file is newer than the last build, then starts the server. Open `http://127.0.0.1:8081`.
 

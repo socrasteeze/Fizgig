@@ -19,10 +19,19 @@ async function readError(response: Response): Promise<string> {
   return body.problems?.length ? body.problems.join("\n") : (body.detail || `request failed (${response.status})`);
 }
 
-async function poll(id: string): Promise<string> {
+// Polls until the job leaves the live states. "unreadable" covers a missing or corrupt record.
+// Returns "cancelled" when alive() turns false, so an unmounted page stops polling.
+async function poll(id: string, alive: () => boolean): Promise<string> {
   for (;;) {
-    const body = await fetch(`/api/jobs/${id}`).then((response) => response.json()) as { status?: string };
-    if (body.status === "done" || body.status === "failed" || body.status === "stopped") return body.status;
+    if (!alive()) return "cancelled";
+    const response = await fetch(`/api/jobs/${id}`);
+    let status = "";
+    if (response.ok) {
+      const body = await response.json().catch(() => ({})) as { status?: string };
+      status = body.status ?? "";
+    }
+    if (status === "corrupt" || !status) return "unreadable";
+    if (status !== "queued" && status !== "running" && status !== "paused") return status;
     await new Promise((resolve) => window.setTimeout(resolve, 250));
   }
 }
@@ -49,7 +58,15 @@ export function GizmoPanel() {
   const [recording, setRecording] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
+  const alive = useRef(true);
   const fps = probe?.fps || form?.fps || 24;
+
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     fetch("/api/gizmo/form").then((response) => response.json()).then((body: GizmoForm) => {
@@ -104,7 +121,7 @@ export function GizmoPanel() {
     });
     if (!response.ok) { setError(await readError(response)); return null; }
     const job = await response.json() as { id: string };
-    return { id: job.id, status: await poll(job.id) };
+    return { id: job.id, status: await poll(job.id, () => alive.current) };
   }
 
   async function cut(rows: Array<Record<string, unknown>>) {

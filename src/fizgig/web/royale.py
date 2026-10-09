@@ -125,19 +125,26 @@ def _epochs(raw) -> list[dict]:
     return found
 
 
+def _existing_folder(text: str) -> str:
+    """The resolved folder, or "" when nothing is there. A path outside the roots is refused before any stat."""
+    from fizgig.web.fs import resolve_dir, within_roots
+    within_roots(text)
+    return str(resolve_dir(text)) if Path(text).is_dir() else ""
+
+
 def scan(body: dict) -> dict:
     """``LoRATrainerGUI._royale_scan``. One LoRA path is a single ``(stem, path)`` item."""
     from fizgig.lora_royale.scan import scan_checkpoints
-    from fizgig.web.fs import resolve_dir, resolve_file
+    from fizgig.web.fs import resolve_file
     body = body or {}
     if str(body.get("lora") or "").strip():
         path = resolve_file(str(body.get("lora")), ".safetensors")
         return {"items": [{"label": path.stem, "path": str(path)}]}
     text = str(body.get("folder") or "").strip()
-    if not text or not Path(text).is_dir():
+    folder = _existing_folder(text) if text else ""
+    if not folder:
         return {"items": []}
-    folder = resolve_dir(text)
-    pairs = scan_checkpoints(str(folder))
+    pairs = scan_checkpoints(folder)
     return {"items": [{"label": label, "path": path} for label, path in pairs]}
 
 
@@ -170,22 +177,23 @@ def form(family: str = "") -> dict:
 
 
 def _load_args(desc, body: dict) -> dict:
-    from fizgig.web.fs import resolve_dir, resolve_file
+    from fizgig.web.fs import resolve_file
     lora = str(body.get("lora") or "").strip()
     folder = str(body.get("folder") or "").strip()
+    found = _existing_folder(folder) if folder else ""
     if _fake():
         args = {"crash": bool(body.get("crash"))}
         if lora:
             args["lora"] = str(resolve_file(lora, ".safetensors"))
-        elif folder and Path(folder).is_dir():
-            args["folder"] = str(resolve_dir(folder))
+        elif found:
+            args["folder"] = found
         return args
     from fizgig.web.repair import load_plan
     plan = load_plan(desc, "fast")
     if lora:
         plan["lora"] = str(resolve_file(lora, ".safetensors"))
-    if folder and Path(folder).is_dir():
-        plan["folder"] = str(resolve_dir(folder))
+    if found:
+        plan["folder"] = found
     settings = body.get("preview_settings")
     if desc.workbench_follows_samples and isinstance(settings, dict):
         plan["preview_settings"] = dict(settings)

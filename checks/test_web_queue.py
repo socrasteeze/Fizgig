@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
+sys.path.insert(0, str(_REPO / "checks"))
 
 from fastapi.testclient import TestClient
 
@@ -22,6 +23,7 @@ from fizgig.families.registry import get as get_family
 from fizgig.gpu_lock import GpuLock
 from fizgig.web import jobs, queue
 from fizgig.web.app import app
+import runner_guard
 
 _PNG = (
     b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
@@ -71,13 +73,8 @@ class WebQueueTests(unittest.TestCase):
         self.client = self._client.__enter__()
 
     def tearDown(self):
-        try:
-            for job in jobs.list_jobs():
-                if job["status"] in {"queued", "running"}:
-                    self.client.post(f"/api/jobs/{job['id']}/stop")
-        except Exception:
-            pass
         self._client.__exit__(None, None, None)
+        runner_guard.end_runs(Path(os.environ["FIZGIG_WEB_JOBS"]))
         for key, value in self._env.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -85,6 +82,12 @@ class WebQueueTests(unittest.TestCase):
                 os.environ[key] = value
         _reset_queue()
         self._tmp.cleanup()
+
+    def _status_of(self, label):
+        for job in jobs._each():
+            if (job.get("values") or {}).get("LORA_NAME") == label:
+                return job.get("status")
+        return None
 
     def _body(self, output, name):
         return {
@@ -310,6 +313,53 @@ class WebQueueTests(unittest.TestCase):
             )
         finally:
             holder.release()
+        self._wait(lambda: self.client.get("/api/queue").json()["items"] == [], timeout=15)
+        # Releasing the GPU let the ready mark launch Retry. Its runner must end here, not in tearDown.
+        self._wait(lambda: self._status_of("Retry") in {"done", "failed", "stopped"}, timeout=15)
+        self.assertEqual(self._status_of("Retry"), "done")
+
+    def test_unexpected_launch_error_keeps_the_ready_mark(self):
+        def record(job_id, status, device):
+            folder = self.root / "jobs" / job_id
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "job.json").write_text(json.dumps({
+                "id": job_id,
+                "kind": "train",
+                "family": "sdxl",
+                "status": status,
+                "device": device,
+                "pid": 0,
+                "values": {"LORA_NAME": "Old"},
+                "created": "2020-01-01T00:00:00Z",
+                "output_dir": str(self.output),
+            }), encoding="utf-8")
+
+        for device, label, output in ((0, "Locked", self.output), (1, "Other", self.output2)):
+            body = self._body(output, label)
+            body["device"] = device
+            added = self.client.post("/api/queue", json=body)
+            self.assertEqual(added.status_code, 200, added.text)
+        record("slow-disk", "running", 0)
+        record("other-gpu", "running", 1)
+        queue.observe(jobs.list_jobs())
+        record("slow-disk", "done", 0)
+        record("other-gpu", "done", 1)
+
+        real_start = jobs.start
+
+        def flaky(family, values, context, confirm, existing=None, device=0):
+            if device == 0:
+                raise OSError("dataset.toml is locked")
+            return real_start(family, values, context, confirm, existing=existing, device=device)
+
+        with patch("fizgig.web.jobs.start", side_effect=flaky):
+            queue.observe(jobs.list_jobs())
+        self.assertIn("slow-disk", queue._READY)
+        self.assertEqual(
+            [item["label"] for item in self.client.get("/api/queue").json()["items"]],
+            ["Locked"],
+        )
+        queue.observe(jobs.list_jobs())
         self._wait(lambda: self.client.get("/api/queue").json()["items"] == [], timeout=15)
 
     def test_queue_write_retries_permission_error(self):

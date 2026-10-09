@@ -1550,6 +1550,11 @@ export interface components {
              * @default
              */
             dest: string;
+            /**
+             * Overwrite
+             * @default
+             */
+            overwrite: string;
             /** File */
             file?: string | null;
         };

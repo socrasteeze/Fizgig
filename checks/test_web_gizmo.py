@@ -19,12 +19,13 @@ from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
+sys.path.insert(0, str(_REPO / "checks"))
 
 from fastapi.testclient import TestClient
 
 from fizgig.web import gizmo as web_gizmo
-from fizgig.web import jobs
 from fizgig.web.app import app
+import runner_guard
 
 
 def desktop(*names):
@@ -73,13 +74,8 @@ class WebGizmoTests(unittest.TestCase):
         self.client = self._client.__enter__()
 
     def tearDown(self):
-        try:
-            for job in jobs.list_jobs():
-                if job["status"] in {"queued", "running"}:
-                    self.client.post(f"/api/jobs/{job['id']}/stop")
-        except Exception:
-            pass
         self._client.__exit__(None, None, None)
+        runner_guard.end_runs(Path(os.environ["FIZGIG_WEB_JOBS"]))
         for key, value in self._env.items():
             if value is None:
                 os.environ.pop(key, None)

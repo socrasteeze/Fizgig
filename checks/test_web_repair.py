@@ -220,6 +220,38 @@ class WebRepairTests(unittest.TestCase):
         self.assertTrue(payload["include_donor"])
         self.assertTrue(body["summary"].get("engine"))
 
+    def test_bake_refuses_a_lora_the_engine_does_not_hold(self):
+        loaded = self.client.post("/api/repair/load", json={"family": "klein", "primary": str(self.lora)})
+        self.assertEqual(loaded.status_code, 200, loaded.text)
+        other = self.output / "Other.safetensors"
+        other.write_bytes(b"not a model")
+        refused = self.client.post("/api/repair/bake", json={
+            "family": "klein",
+            "primary": str(other),
+            "state": {"blocks": {"double_0": {
+                "primary_enabled": True, "primary_strength": 0.5,
+                "donor_enabled": False, "donor_strength": 1.0,
+            }}},
+        })
+        self.assertEqual(refused.status_code, 422, refused.text)
+        self.assertIn("different LoRA", refused.text)
+        self.assertEqual(list(self.output.glob("Other_repaired*")), [])
+
+    def test_bake_refuses_a_donor_the_engine_does_not_hold(self):
+        loaded = self.client.post("/api/repair/load", json={"family": "klein", "primary": str(self.lora)})
+        self.assertEqual(loaded.status_code, 200, loaded.text)
+        refused = self.client.post("/api/repair/bake", json={
+            "family": "klein",
+            "primary": str(self.lora),
+            "donor": str(self.donor),
+            "state": {"blocks": {"double_0": {
+                "primary_enabled": True, "primary_strength": 1.0,
+                "donor_enabled": True, "donor_strength": 0.4,
+            }}},
+        })
+        self.assertEqual(refused.status_code, 422, refused.text)
+        self.assertEqual(list(self.output.glob("*_with_*")), [])
+
     def test_bake_refuses_unmapped_family(self):
         for family in ("zimage", "qwen_image21", "sdxl"):
             reply = self.client.post("/api/repair/bake", json={

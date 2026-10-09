@@ -232,7 +232,11 @@ def start_engine(body: dict) -> dict:
         args = _args(desc, {"primary": settings["lora"], "dit": "fast"})
         host.load("profiler", desc.key, args)
         host.profile = None
+        host.profile_gen = None
         host.result = None
+        # The old profile is gone once the render starts. If this run fails, nothing is current.
+        _ENGINE["gen"] = None
+        _ENGINE["result"] = None
         gen = host.render({
             "profile": True,
             "mode": settings["mode"],
@@ -256,24 +260,33 @@ def start_engine(body: dict) -> dict:
 
 
 def engine_view() -> dict:
+    """The Profiler's state for the current gen, plus ``ready``: true only when that gen has a finished profile."""
+    state = _engine_state()
+    return {**state, "ready": state.get("status") == "done"}
+
+
+def _engine_state() -> dict:
+    """The finished profile is looked up by the gen it came from, so a render in another
+    tool that replaces ``host.result`` does not hide it. "running" needs the host to be
+    busy on this gen; a gen that another render has taken over did not finish.
+    """
     from fizgig.web.engine_host import get_host
     host = get_host()
     gen = _ENGINE.get("gen")
-    result = host.result or {}
-    if gen and result.get("gen") == gen and host.profile:
-        captured = _capture(host)
-        if captured:
-            return captured
     stored = _ENGINE.get("result")
     if stored and stored.get("gen") == gen:
         return stored
+    if gen and host.profile_gen == gen:
+        captured = _capture(host)
+        if captured:
+            return captured
     if host.restarted:
         return {
             "status": "failed",
             "gen": gen,
             "message": "The engine worker stopped. It will start again on the next request.",
         }
-    if host.busy:
+    if host.busy and host.latest == gen:
         return {"status": "running", "gen": gen}
     if gen:
         return {"status": "failed", "gen": gen, "message": "The profile did not finish."}

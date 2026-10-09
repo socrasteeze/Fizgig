@@ -179,7 +179,12 @@ def view() -> dict:
         seen.add(key)
         present = str(raw.get(key) or "").strip()
         secrets.append({"key": key, "set": bool(present)})
-    return {"directories": directories, "families": _sections(prefs), "secrets": secrets}
+    return {
+        "directories": directories,
+        "families": _sections(prefs),
+        "secrets": secrets,
+        "web_caption_trigger": str(prefs.get("web_caption_trigger") or ""),
+    }
 
 
 def roots_from_prefs() -> dict:

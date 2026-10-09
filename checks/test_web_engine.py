@@ -14,13 +14,14 @@ from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
+sys.path.insert(0, str(_REPO / "checks"))
 
 from fastapi.testclient import TestClient
 
 from fizgig.gpu_lock import held
-from fizgig.web import jobs
 from fizgig.web.app import app
 from fizgig.web.engine_host import EngineError, get_host, shutdown
+import runner_guard
 
 _PNG = (
     b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
@@ -73,13 +74,8 @@ class WebEngineTests(unittest.TestCase):
 
     def tearDown(self):
         shutdown()
-        try:
-            for job in jobs.list_jobs():
-                if job["status"] in {"queued", "running"}:
-                    self.client.post(f"/api/jobs/{job['id']}/stop")
-        except Exception:
-            pass
         self._client.__exit__(None, None, None)
+        runner_guard.end_runs(Path(os.environ["FIZGIG_WEB_JOBS"]))
         for key, value in self._env.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -102,6 +98,17 @@ class WebEngineTests(unittest.TestCase):
         found = self._wait(lambda: seen.extend(host.drain()) or any(
             item.get("event") == "done" for item in seen) and seen, timeout)
         return found
+
+    def _finished(self, host, gen, timeout=8):
+        """Wait for the done event of ``gen``. Returns every event read on the way."""
+        seen = []
+
+        def check():
+            seen.extend(host.drain())
+            return any(item.get("event") == "done" and item.get("gen") == gen for item in seen)
+
+        self._wait(check, timeout)
+        return seen
 
     def test_protocol_round_trip(self):
         host = get_host()
@@ -313,17 +320,9 @@ class WebEngineTests(unittest.TestCase):
         self.assertFalse(marker.exists())
         self._wait(lambda: not held(), timeout=5)
 
-    def test_spawn_drops_old_sessions_and_sets_pci_order(self):
+    def _spawn_without_worker(self, host):
+        """Run ``_spawn`` up to the Popen call, and return the env it would start the worker with."""
         from fizgig.web import engine_host as hostmod
-        from fizgig.web.jobs import jobs_root
-        old = jobs_root() / "engine" / "old-session"
-        old.mkdir(parents=True)
-        (old / "junk.txt").write_text("x", encoding="utf-8")
-        host = hostmod.get_host()
-        host.load("repair", "klein", {"primary": str(self.lora)})
-        self.assertFalse(old.exists())
-        self.assertTrue(host.session is not None and host.session.is_dir())
-        bare = hostmod.EngineHost()
         seen = {}
 
         def spy(*_args, **kwargs):
@@ -334,13 +333,137 @@ class WebEngineTests(unittest.TestCase):
         hostmod.subprocess.Popen = spy
         try:
             with self.assertRaises(RuntimeError):
-                bare._spawn()
+                host._spawn()
         finally:
             hostmod.subprocess.Popen = original
-            if bare._stderr is not None:
-                bare._stderr.close()
-        self.assertEqual(seen["env"].get("CUDA_DEVICE_ORDER"), "PCI_BUS_ID")
-        self.assertEqual(seen["env"].get("CUDA_VISIBLE_DEVICES"), str(bare.device))
+            if host._stderr is not None:
+                host._stderr.close()
+        return seen["env"]
+
+    def test_spawn_drops_old_sessions_and_sets_pci_order(self):
+        from fizgig.web import engine_host as hostmod
+        from fizgig.web.jobs import jobs_root
+        old = jobs_root() / "engine" / "old-session"
+        old.mkdir(parents=True)
+        (old / hostmod._SESSION_MARK).write_text("session\n", encoding="utf-8")
+        (old / "junk.txt").write_text("x", encoding="utf-8")
+        host = hostmod.get_host()
+        host.load("repair", "klein", {"primary": str(self.lora)})
+        self.assertFalse(old.exists())
+        self.assertTrue(host.session is not None and host.session.is_dir())
+        bare = hostmod.EngineHost()
+        env = self._spawn_without_worker(bare)
+        self.assertEqual(env.get("CUDA_DEVICE_ORDER"), "PCI_BUS_ID")
+        self.assertEqual(env.get("CUDA_VISIBLE_DEVICES"), str(bare.device))
+
+    def test_spawn_keeps_folders_a_person_made_under_engine(self):
+        from fizgig.web import engine_host as hostmod
+        from fizgig.web.jobs import jobs_root
+        root = jobs_root() / "engine"
+        mine = root / "run1"
+        mine.mkdir(parents=True)
+        (mine / "Demo.safetensors").write_bytes(b"not a model")
+        host = hostmod.get_host()
+        host.load("repair", "klein", {"primary": str(self.lora)})
+        self.assertTrue((mine / "Demo.safetensors").is_file())
+
+    def test_spawn_keeps_sessions_while_a_job_may_read_them(self):
+        from fizgig.web import engine_host as hostmod
+        from fizgig.web.jobs import jobs_root
+        root = jobs_root() / "engine"
+        held = root / "held-session"
+        held.mkdir(parents=True)
+        (held / hostmod._SESSION_MARK).write_text("session\n", encoding="utf-8")
+        job = jobs_root() / "export1"
+        job.mkdir(parents=True)
+        job_file = job / "job.json"
+        job_file.write_text(json.dumps({
+            "id": "export1", "kind": "royale", "status": "running", "device": 0,
+            "created": "2020-01-01T00:00:00Z",
+        }), encoding="utf-8")
+        self._spawn_without_worker(hostmod.EngineHost())
+        self.assertTrue(held.is_dir())
+        job_file.write_text(json.dumps({
+            "id": "export1", "kind": "royale", "status": "done", "device": 0,
+            "created": "2020-01-01T00:00:00Z",
+        }), encoding="utf-8")
+        self._spawn_without_worker(hostmod.EngineHost())
+        self.assertFalse(held.exists())
+
+    def test_render_after_unload_and_reload_is_accepted(self):
+        host = get_host()
+        host.load("repair", "klein", {"primary": str(self.lora)})
+        host.unload()
+        host.load("repair", "klein", {"primary": str(self.lora)})
+        gen = host.render({"steps": 2})
+        self.assertEqual(gen, host.latest)
+        self._finished(host, gen)
+        self.assertFalse(host.busy)
+        self.assertEqual(host.status()["gen"], gen)
+        host.unload()
+        self.assertFalse(host.status()["loaded"])
+
+    def test_cancelled_render_clears_worker_busy(self):
+        os.environ["FIZGIG_WEB_FAKE_STEP"] = "0.05"
+        shutdown()
+        host = get_host()
+        host.load("repair", "klein", {"primary": str(self.lora)})
+        gen = host.render({"steps": 200})
+        seen = []
+        self._wait(lambda: seen.extend(host.drain()) or any(
+            item.get("event") == "frame" and item.get("gen") == gen for item in seen))
+        started = time.monotonic()
+        host.unload()
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertFalse(host.status()["busy"])
+        host.load("repair", "klein", {"primary": str(self.lora)})
+        again = host.render({"steps": 1})
+        self._finished(host, again)
+        self.assertFalse(host.status()["busy"])
+
+    def test_timed_out_request_does_not_block_set_device(self):
+        import threading
+        from fizgig.web.engine_host import EngineError
+        host = get_host()
+        errors = []
+
+        def loader():
+            try:
+                host.load("repair", "klein", {"primary": str(self.lora), "delay": 0.6})
+            except Exception as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=loader)
+        thread.start()
+        self._wait(lambda: bool(host._waiters), timeout=3)
+        with self.assertRaises(EngineError) as caught:
+            host.request({"op": "status"}, timeout=0.05)
+        self.assertIn("did not answer", caught.exception.message)
+        thread.join(3)
+        self.assertEqual(errors, [])
+        self.assertTrue(host.loaded)
+        self.assertEqual(host._waiters, {})
+        host.unload()
+        host.set_device(1)
+        self.assertEqual(host.device, 1)
+        self.assertEqual(host._replies, {})
+
+    def test_epoch_frames_survive_later_travel_renders(self):
+        os.environ["FIZGIG_WEB_FAKE_STEP"] = "0.01"
+        shutdown()
+        host = get_host()
+        host.load("royale", "klein", {"lora": str(self.lora)})
+        epochs = host.render({"mode": "epochs", "steps": 2, "epochs": []})
+        self._finished(host, epochs)
+        folder = host.session
+        self.assertIsNotNone(folder)
+        shown = [folder / f"g{epochs}-s{step}.png" for step in (1, 2)]
+        self.assertTrue(all(path.is_file() for path in shown))
+        for _ in range(4):
+            travel = host.render({"mode": "travel", "kind": "seed", "steps": 2, "seeds": [1, 2]})
+            self._finished(host, travel)
+        self.assertTrue(all(path.is_file() for path in shown), [path.name for path in folder.iterdir()])
+        self.assertTrue(any(path.name.startswith(f"g{travel}-") for path in folder.iterdir()))
 
     def test_old_preview_files_are_dropped(self):
         from fizgig.web.engine_host import get_host

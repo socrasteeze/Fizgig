@@ -453,7 +453,7 @@ def save(body: dict | None = None) -> dict:
     from pathlib import Path
     from fizgig.web.repair import _free, _output_dir, _refuse_unmapped, engine_bake
     dest = _free(_output_dir() / f"{Path(_S['primary']).stem}_explored.safetensors")
-    summary = engine_bake("explorer", state, str(dest), False)
+    summary = engine_bake("explorer", state, str(dest), False, str(_S["primary"]))
     if summary is None:
         _refuse_unmapped(str(_S.get("family") or ""))
         from fizgig.repair_studio.bake import save_repaired_lora

@@ -12,6 +12,7 @@ import time
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
@@ -72,6 +73,68 @@ def _junction(link: Path, target: Path) -> bool:
         _winapi.CreateJunction(str(target), str(link))
         return True
     except (OSError, AttributeError):
+        return False
+
+
+class _VirtualShare:
+    """A local folder that answers to a UNC name, so a root whose resolved form is UNC can be tested offline.
+
+    ``resolve()`` of the local folder gives the UNC name, as it does for a mapped drive. Stat calls on the
+    UNC name are answered from the local folder. Every stat call is recorded in ``touched``.
+    """
+
+    def __init__(self, unc: str, local: str):
+        self.unc = unc
+        self.local = local
+        self.touched: list[str] = []
+        self._patchers: list = []
+        self._real = {
+            name: getattr(Path, name)
+            for name in ("is_dir", "is_file", "exists", "is_symlink", "is_junction", "resolve")
+            if hasattr(Path, name)
+        }
+
+    @staticmethod
+    def _within(text: str, base: str) -> bool:
+        low, cut = text.lower(), base.lower()
+        return low == cut or low.startswith(cut + os.sep)
+
+    def _map(self, path):
+        text = os.fspath(path)
+        if self._within(text, self.unc):
+            return Path(self.local + text[len(self.unc):])
+        return path
+
+    def _stat(self, name):
+        real = self._real[name]
+
+        def call(path):
+            self.touched.append(os.fspath(path))
+            return real(self._map(path))
+
+        return call
+
+    def _resolve(self, path, strict=False):
+        text = os.fspath(path)
+        if self._within(text, self.local):
+            return Path(self.unc + text[len(self.local):])
+        if self._within(text, self.unc):
+            return Path(text)
+        return self._real["resolve"](path, strict)
+
+    def __enter__(self):
+        replacements = [(name, self._stat(name)) for name in self._real if name != "resolve"]
+        replacements.append(("resolve", lambda path, strict=False: self._resolve(path, strict)))
+        for name, fn in replacements:
+            patcher = patch.object(Path, name, fn)
+            patcher.start()
+            self._patchers.append(patcher)
+        return self
+
+    def __exit__(self, *exc):
+        for patcher in reversed(self._patchers):
+            patcher.stop()
+        self._patchers.clear()
         return False
 
 
@@ -329,6 +392,59 @@ class WebFsTests(unittest.TestCase):
         self.assertEqual(plain.status_code, 200, plain.text)
         leaked = self.client.get("/api/download", params={"path": str(out_link / "hook" / "inside.safetensors")})
         self.assertEqual(leaked.status_code, 403, leaked.text)
+
+    def test_mapped_root_resolves_to_unc_and_its_children_still_work(self):
+        from fizgig.web import fs
+
+        unc = r"\\example-nas\share\datasets"
+        (self.dataset / "set1").mkdir()
+        (self.dataset / "set1" / "a.png").write_bytes(_PNG)
+        with _VirtualShare(unc, str(self.dataset)), patch.object(fs, "_win_aliases", lambda path: set()):
+            roots = fs.all_roots()
+            self.assertTrue(any(str(path).lower() == unc.lower() for path in roots), roots)
+            typed = fs.resolve_dir(str(self.dataset / "set1"))
+            self.assertEqual(str(typed).lower(), (unc + r"\set1").lower())
+            self.assertEqual(fs.resolve_dir(str(typed)), typed)
+            picked = fs.resolve_file(str(typed / "a.png"), ".png")
+            self.assertEqual(str(picked).lower(), (unc + r"\set1\a.png").lower())
+
+    def test_unc_outside_the_roots_is_refused_without_a_stat(self):
+        from fizgig.web import fs
+        from fizgig.web.jobs import JobError
+
+        share = _VirtualShare(r"\\example-nas\share\datasets", str(self.dataset))
+        with share:
+            for raw in (r"\\example-other\share\pics", "//example-other/share/pics"):
+                with self.assertRaises(JobError) as caught:
+                    fs.resolve_dir(raw)
+                self.assertEqual(caught.exception.status, 403)
+                with self.assertRaises(JobError) as caught:
+                    fs.resolve_file(raw + "/a.safetensors", "")
+                self.assertEqual(caught.exception.status, 403)
+            self.assertEqual([item for item in share.touched if "example-other" in item.lower()], [])
+
+    def test_job_output_inside_a_dataset_root_downloads(self):
+        browse = self.root / "browse"
+        run = browse / "mychar" / "out"
+        run.mkdir(parents=True)
+        (run / "mychar.safetensors").write_bytes(b"lora")
+        (self.root / "prefs.json").write_text(json.dumps({
+            "lora_output_dir": str(self.output),
+            "input_dataset_dir": str(browse),
+        }), encoding="utf-8")
+        folder = self.root / "jobs" / "finished-run"
+        folder.mkdir(parents=True)
+        (folder / "job.json").write_text(json.dumps({
+            "id": "finished-run",
+            "kind": "train",
+            "family": "sdxl",
+            "status": "done",
+            "output_dir": str(run),
+            "created": "2020-01-01T00:00:00Z",
+        }), encoding="utf-8")
+        got = self.client.get("/api/download", params={"path": str(run / "mychar.safetensors")})
+        self.assertEqual(got.status_code, 200, got.text)
+        self.assertEqual(got.content, b"lora")
 
     def test_upload_rejects_duplicate_leaf_names(self):
         dup = self.client.post(

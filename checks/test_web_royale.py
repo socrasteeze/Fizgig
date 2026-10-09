@@ -11,9 +11,11 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
+sys.path.insert(0, str(_REPO / "checks"))
 
 from fastapi.testclient import TestClient
 
@@ -22,6 +24,7 @@ from fizgig.web import jobs, royale
 from fizgig.web.app import app
 from fizgig.web.engine_host import get_host, png, shutdown
 from fizgig.web.fs import resolve_dir, resolve_file
+import runner_guard
 
 
 class WebRoyaleTests(unittest.TestCase):
@@ -59,14 +62,9 @@ class WebRoyaleTests(unittest.TestCase):
         self.client = self._client.__enter__()
 
     def tearDown(self):
-        try:
-            for job in jobs.list_jobs():
-                if job["status"] in {"queued", "running"}:
-                    self.client.post(f"/api/jobs/{job['id']}/stop")
-        except Exception:
-            pass
         shutdown()
         self._client.__exit__(None, None, None)
+        runner_guard.end_runs(Path(os.environ["FIZGIG_WEB_JOBS"]))
         for key, value in self._env.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -101,8 +99,11 @@ class WebRoyaleTests(unittest.TestCase):
         one_path = resolve_file(str(self.lora), ".safetensors")
         one = royale.scan({"lora": str(self.lora)})
         self.assertEqual(one["items"], [{"label": one_path.stem, "path": str(one_path)}])
-        missing = royale.scan({"folder": str(self.root / "no-such-folder")})
+        missing = royale.scan({"folder": str(self.output / "no-such-folder")})
         self.assertEqual(missing["items"], [])
+        with self.assertRaises(jobs.JobError) as caught:
+            royale.scan({"folder": str(self.root / "no-such-folder")})
+        self.assertEqual(caught.exception.status, 403)
 
     def test_select_epochs(self):
         items = [f"e{i}" for i in range(10)]
@@ -315,12 +316,25 @@ class WebRoyaleTests(unittest.TestCase):
         self.assertFalse(get_host().loaded)
 
     def test_load_does_not_forward_a_file_as_folder(self):
-        stray = self.root / "notes.txt"
+        stray = self.output / "notes.txt"
         stray.write_text("x", encoding="utf-8")
         royale.load({"family": "klein", "folder": str(stray)})
         args = get_host().args
         self.assertNotIn("folder", args)
         self.assertNotIn(str(stray), list(args.values()))
+
+    def test_scan_refuses_an_unc_folder_before_any_stat(self):
+        touched = []
+        real = Path.is_dir
+
+        def spy(path):
+            touched.append(os.fspath(path))
+            return real(path)
+
+        with patch.object(Path, "is_dir", spy):
+            response = self.client.post("/api/royale/scan", json={"folder": r"\\example-nas\share\pics"})
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual([item for item in touched if item.startswith("\\\\")], [])
 
 
 if __name__ == "__main__":

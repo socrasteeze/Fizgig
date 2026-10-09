@@ -227,7 +227,7 @@ class WebPageSourceTests(unittest.TestCase):
         self.assertIn("/api/repair/presets?family=", repair)
         gizmo = (_REPO / "webui" / "src" / "gizmo.tsx").read_text(encoding="utf-8")
         self.assertNotIn("attempts > 80", gizmo)
-        self.assertIn("stopped", gizmo)
+        self.assertIn('return "cancelled"', gizmo)
 
 
 if __name__ == "__main__":

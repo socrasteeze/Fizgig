@@ -337,7 +337,13 @@ def observe(rows: list[dict]) -> None:
                 continue
             _drop_ready(ids)
     for head, ids in launches:
-        if _launch(head) is None:
+        try:
+            outcome = _launch(head)
+        except Exception:
+            # An unexpected failure (a locked dataset.toml, a failed job.json write) keeps the mark, so the
+            # next poll retries. The other devices in this batch still launch.
+            outcome = None
+        if outcome is None:
             with _LOCK:
                 _READY.update(ids)
 

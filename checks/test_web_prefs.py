@@ -98,6 +98,15 @@ class WebPrefsTests(unittest.TestCase):
         self.assertEqual(on_disk["custom_token"], _TOKEN)
         self.assertEqual(on_disk["base_dit"], "D:/models/a.safetensors")
 
+    def test_caption_trigger_reads_back_and_fills_a_blank_launch(self):
+        from fizgig.families.registry import get as get_family
+        from fizgig.web.inputs import build
+
+        saved = self.client.put("/api/prefs", json={"values": {"web_caption_trigger": "ohwx"}})
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertEqual(self.client.get("/api/prefs").json()["web_caption_trigger"], "ohwx")
+        self.assertEqual(build(get_family("klein"), {}, {"caption_trigger": ""})["caption_trigger"], "ohwx")
+
 
 if __name__ == "__main__":
     unittest.main()

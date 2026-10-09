@@ -17,14 +17,16 @@ from unittest.mock import patch
 
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
+sys.path.insert(0, str(_REPO / "checks"))
 
 from fastapi.testclient import TestClient
 
 from fizgig.gpu_lock import held
-from fizgig.web import devices, jobs, queue
+from fizgig.web import devices, queue
 from fizgig.web.app import app
 from fizgig.web.engine_host import get_host, shutdown
 from fizgig.web.procs import creationflags
+import runner_guard
 
 _PNG = (
     b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
@@ -98,16 +100,11 @@ class WebDeviceTests(unittest.TestCase):
 
     def tearDown(self):
         try:
-            for job in jobs.list_jobs():
-                if job["status"] in {"queued", "running"}:
-                    self.client.post(f"/api/jobs/{job['id']}/stop")
-        except Exception:
-            pass
-        try:
             shutdown()
         except Exception:
             pass
         self._client.__exit__(None, None, None)
+        runner_guard.end_runs(Path(os.environ["FIZGIG_WEB_JOBS"]))
         _reset_queue()
         deadline = time.time() + 8
         while time.time() < deadline and (held(0) or held(1)):

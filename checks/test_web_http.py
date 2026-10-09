@@ -71,20 +71,51 @@ class WebHttpTests(unittest.TestCase):
             right = client.post("/api/ping", headers={"Origin": "https://allowed.example"})
             self.assertEqual(right.status_code, 200, right.text)
 
-    def test_engine_events_reach_every_stream(self):
+    def test_engine_events_reach_every_open_stream(self):
+        from fizgig.web.app import _event_round
+        from fizgig.web.engine_host import events_since, get_host
+
+        host = get_host()
+        _batch, cursor = events_since(0)
+        host.publish({"event": "done", "gen": 1, "message": "broadcast-token"})
+        for _stream in range(2):
+            lines, _after = _event_round({}, {}, False, cursor)
+            self.assertTrue(any("broadcast-token" in line for line in lines))
+        again, after = host.events_since(0)
+        self.assertTrue(any(item.get("message") == "broadcast-token" for item in again))
+        self.assertGreater(after, cursor)
+
+    def test_new_stream_starts_at_the_current_engine_cursor(self):
         from fizgig.web.engine_host import get_host
 
         host = get_host()
-        host.publish({"event": "done", "gen": 1, "message": "broadcast-token"})
+        host.publish({"event": "loading", "gen": 2, "message": "old-loading-token"})
+        host.publish({"event": "error", "gen": 2, "message": "old-error-token"})
         first = self.client.get("/api/events", params={"once": 1})
-        second = self.client.get("/api/events", params={"once": 1})
         self.assertEqual(first.status_code, 200, first.text)
+        self.assertNotIn("old-loading-token", first.text)
+        self.assertNotIn("old-error-token", first.text)
+        self.assertNotIn("event: engine", first.text)
+
+    def test_gizmo_upload_can_overwrite_a_source(self):
+        dest = self.root / "clips"
+        dest.mkdir()
+        (dest / "clip.mp4").write_bytes(b"old")
+        first = self.client.post(
+            "/api/gizmo/upload",
+            data={"dest": str(dest)},
+            files={"file": ("clip.mp4", b"new", "video/mp4")},
+        )
+        self.assertEqual(first.status_code, 409, first.text)
+        self.assertEqual(first.json().get("conflicts"), ["clip.mp4"])
+        self.assertEqual((dest / "clip.mp4").read_bytes(), b"old")
+        second = self.client.post(
+            "/api/gizmo/upload",
+            data={"dest": str(dest), "overwrite": "1"},
+            files={"file": ("clip.mp4", b"new", "video/mp4")},
+        )
         self.assertEqual(second.status_code, 200, second.text)
-        self.assertIn("broadcast-token", first.text)
-        self.assertIn("broadcast-token", second.text)
-        again, cursor = host.events_since(0)
-        self.assertTrue(any(item.get("message") == "broadcast-token" for item in again))
-        self.assertGreater(cursor, 0)
+        self.assertEqual((dest / "clip.mp4").read_bytes(), b"new")
 
 
 if __name__ == "__main__":

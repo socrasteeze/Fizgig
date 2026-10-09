@@ -515,7 +515,12 @@ def _write_plan_files(planned, output: Path) -> None:
 
 
 def _confine_paths(values: dict, context: dict) -> None:
-    """Resolve client paths inside the configured roots before a plan is built."""
+    """Resolve client paths inside the configured roots before a plan is built.
+
+    A path the run needs is refused when it is missing or outside the roots. A path the run may not
+    need (a model, the captioner, a preview reference) is refused only when something is there outside
+    the roots. A missing one is left for the family's own checks to report.
+    """
     from fizgig.web import fs
 
     roots = fs.all_roots()
@@ -568,10 +573,27 @@ def _confine_paths(values: dict, context: dict) -> None:
             context["samples"] = samples
     models = context.get("models")
     if isinstance(models, dict):
-        context["models"] = {
-            key: existing_file(str(value).strip()) if str(value or "").strip() else ""
-            for key, value in models.items()
-        }
+        context["models"] = {key: fs.optional_path(str(value or ""), roots) for key, value in models.items()}
+    captioner = str(context.get("captioner") or "").strip()
+    if captioner:
+        context["captioner"] = fs.optional_path(captioner, roots)
+    checkpoint = context.get("ft_resume")
+    if isinstance(checkpoint, dict) and str(checkpoint.get("checkpoint") or "").strip():
+        checkpoint = dict(checkpoint)
+        checkpoint["checkpoint"] = str(fs.resolve_file(str(checkpoint["checkpoint"]).strip(), "", parent_roots))
+        context["ft_resume"] = checkpoint
+    thumbnail = str(values.get("METADATA_THUMBNAIL") or "").strip()
+    if thumbnail:
+        values["METADATA_THUMBNAIL"] = existing_file(thumbnail)
+    ref = str(values.get("FAMILY_EDIT_REF") or "").strip()
+    if ref:
+        values["FAMILY_EDIT_REF"] = fs.optional_path(ref, roots)
+    if str(values.get("FAMILY_MULTICONCEPT") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        raw = values.get("MINIMAX_CONCEPT_DIRS", values.get("extra_folders", ""))
+        if isinstance(raw, (list, tuple)):
+            values["MINIMAX_CONCEPT_DIRS"] = [existing_dir(str(item).strip()) for item in raw if str(item or "").strip()]
+        elif str(raw or "").strip():
+            values["MINIMAX_CONCEPT_DIRS"] = existing_dir(str(raw).strip())
     config = str(context.get("DATASET_CONFIG") or values.get("DATASET_CONFIG") or "").strip()
     if config:
         resolved = str(fs.resolve_unmade(config, roots))
@@ -806,7 +828,7 @@ def delete_record(job_id: str) -> None:
         raise JobError(409, {"detail": "could not delete the job"}) from exc
 
 
-def _fail_queued(job_id: str) -> None:
+def _fail_queued(job_id: str, reason: str) -> None:
     folder = jobs_root() / job_id
     job = _load(folder)
     if not job or job.get("status") not in _ACTIVE:
@@ -814,7 +836,13 @@ def _fail_queued(job_id: str) -> None:
     job["status"] = "failed"
     job["exit_code"] = 1
     job["ended"] = _now()
+    job["error"] = reason
     _write(folder, job)
+    try:
+        with (folder / "log.txt").open("a", encoding="utf-8", errors="replace") as log:
+            log.write(reason + "\n")
+    except OSError:
+        pass
 
 
 def _reap_runner(process: subprocess.Popen) -> None:
@@ -838,17 +866,17 @@ def _spawn(job_id: str) -> None:
     cmd = [sys.executable, "-m", "fizgig.web.runner", str(jobs_root() / job_id)]
     kwargs = dict(
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
         env=env,
         cwd=str(_REPO),
         close_fds=True,
     )
     # Own hidden console and process group, so a restart or Ctrl+C leaves the run alive.
+    # The runner's stdout and stderr go to runner.err, so a crash before log.txt exists keeps its reason.
     try:
-        process = subprocess.Popen(cmd, **hidden_console(detached=True), **kwargs)
-    except OSError:
-        _fail_queued(job_id)
+        with (jobs_root() / job_id / "runner.err").open("ab") as errors:
+            process = subprocess.Popen(cmd, **hidden_console(detached=True), **kwargs, stdout=errors, stderr=errors)
+    except OSError as exc:
+        _fail_queued(job_id, f"Could not start the job runner: {exc}")
         return
     threading.Thread(target=_reap_runner, args=(process,), daemon=True).start()
 

@@ -332,24 +332,50 @@ function CaptionsPanel({ folder }: { folder: string }) {
   const [fields, setFields] = useState<Array<Record<string, unknown>>>([]);
   const [gaps, setGaps] = useState<string[]>([]);
   const [values, setValues] = useState<Record<string, unknown>>({});
+  // null until Preferences reports a value. Preferences may not report it, so the page does not guess.
+  const [savedTrigger, setSavedTrigger] = useState<string | null>(null);
   const [items, setItems] = useState<Array<{ name: string; caption: string; url: string }>>([]);
   const [query, setQuery] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
-    fetch("/api/captions/form")
-      .then((response) => response.json())
-      .then((body) => {
+    Promise.all([
+      fetch("/api/captions/form").then((response) => response.json()),
+      fetch("/api/prefs").then((response) => (response.ok ? response.json() : null)).catch(() => null),
+    ])
+      .then(([body, prefs]) => {
         setFields(body.fields);
         setGaps(body.gaps || []);
         const next: Record<string, unknown> = {};
         for (const field of body.fields) {
           next[String(field.key)] = field.default;
         }
+        const saved: string | null = typeof prefs?.web_caption_trigger === "string" ? prefs.web_caption_trigger : null;
+        next.trigger = saved ?? "";
+        setSavedTrigger(saved);
         setValues(next);
       })
       .catch(() => setError("caption form failed"));
   }, []);
+
+  // Saved once when the box loses focus, not on each keystroke.
+  async function saveTrigger() {
+    const value = String(values.trigger ?? "").trim();
+    if (value === savedTrigger) {
+      return;
+    }
+    setError("");
+    const response = await fetch("/api/prefs", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ values: { web_caption_trigger: value } }),
+    });
+    if (!response.ok) {
+      setError(await readError(response));
+      return;
+    }
+    setSavedTrigger(value);
+  }
 
   function reload(q = query) {
     if (!folder) {
@@ -424,19 +450,19 @@ function CaptionsPanel({ folder }: { folder: string }) {
                       onChange={(event) => {
                         const value = event.target.value;
                         setValues((current) => ({ ...current, [key]: value }));
-                        if (key === "trigger") {
-                          void fetch("/api/prefs", {
-                            method: "PUT",
-                            headers: { "content-type": "application/json" },
-                            body: JSON.stringify({ values: { web_caption_trigger: value } }),
-                          }).catch(() => undefined);
-                        }
                       }}
+                      onBlur={key === "trigger" ? () => void saveTrigger() : undefined}
                     />
                   )}
                 </label>
               )}
               {field.help ? <p className="help">{String(field.help)}</p> : null}
+              {key === "trigger" ? (
+                <p className="help">
+                  {savedTrigger ? `Saved trigger: ${savedTrigger}. ` : savedTrigger === "" ? "No trigger saved. " : ""}
+                  Saved when you leave this box. Later training runs use it for the Metadata trigger phrase when that field is blank.
+                </p>
+              ) : null}
             </div>
           );
         })}
@@ -931,11 +957,11 @@ function ProfilerPanel({ onRepair }: { onRepair: () => void }) {
           setEngineStatus(status);
           setEngineMessage(message);
           if (status === "done") {
-            setReady(true);
-            setError("");
+            // The server says whether the profile is ready. Status alone does not decide it.
+            setReady(body.ready === true);
           } else if (status === "failed") {
+            // The failure line below the buttons shows the message.
             setReady(false);
-            setError(message || "The profiler failed.");
           } else if (status === "running") {
             setReady(false);
             again = true;
@@ -962,8 +988,9 @@ function ProfilerPanel({ onRepair }: { onRepair: () => void }) {
 
   async function run() {
     setError("");
-    setReady(false);
     if (mode === "weights") {
+      setReady(false);
+      setEngineStatus("");
       const response = await fetch("/api/profile/jobs", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -980,9 +1007,12 @@ function ProfilerPanel({ onRepair }: { onRepair: () => void }) {
       body: JSON.stringify({ family, lora, mode, prompt, class_prompt: classPrompt, size }),
     });
     if (!response.ok) {
+      // A refused run may already have cleared the last profile on the server. Re-read it so the page matches.
       setError(await readError(response));
+      setEngineWatch((current) => current + 1);
       return;
     }
+    setReady(false);
     setEngineStatus("running");
     setEngineMessage("");
     setEngineWatch((current) => current + 1);

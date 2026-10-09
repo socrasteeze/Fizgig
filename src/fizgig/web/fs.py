@@ -52,16 +52,14 @@ def _dotdot(text: str) -> bool:
     return any(part == ".." for part in text.replace("\\", "/").split("/"))
 
 
-def _unc_or_device(text: str) -> bool:
-    """UNC (``//``, ``\\``) and device paths (``\\\\?\\``, ``\\\\.\\``)."""
-    raw = (text or "").strip()
-    slash = raw.replace("\\", "/")
-    return slash.startswith("//")
+def _unc_text(text: str) -> bool:
+    """UNC (``//``, ``\\``) and device paths (``\\\\?\\``, ``\\\\.\\``). Checked only for a path outside every root."""
+    return text.replace("\\", "/").startswith("//")
 
 
 def _client_text(text: str) -> str:
     raw = (text or "").strip()
-    if not raw or _dotdot(raw) or _unc_or_device(raw):
+    if not raw or _dotdot(raw):
         raise JobError(403, {"detail": "path is outside the configured roots"})
     return raw
 
@@ -212,12 +210,12 @@ def output_roots() -> list[Path]:
     _add(found, prefs.get("profiles_dir"))
     for part in os.environ.get("FIZGIG_WEB_ROOTS", "").split(";"):
         _add(found, part.strip())
-    configured = list(found)
     from fizgig.web.jobs import _each
 
+    configured = all_roots()
     for job in _each():
         raw = str(job.get("output_dir") or "").strip()
-        if not raw or _dotdot(raw) or _unc_or_device(raw):
+        if not raw or _dotdot(raw):
             continue
         path = Path(raw)
         if not _lexically_under(path, configured):
@@ -286,12 +284,44 @@ def _has_link(path: Path, roots: list[Path]) -> bool:
     return False
 
 
-def resolve_dir(text: str, roots: list[Path] | None = None) -> Path:
-    """An existing directory inside ``roots`` (all roots when omitted)."""
+def within_roots(text: str, roots: list[Path] | None = None) -> Path:
+    """The client path, when its place is inside ``roots`` (all roots when omitted).
+
+    Nothing is stat'd here. A UNC, device or other path outside every root is refused before any
+    filesystem call reaches it. A configured UNC root (a mapped drive's resolved form) matches like any root.
+    """
     roots = all_roots() if roots is None else roots
     path = Path(_client_text(text))
     if not _lexically_under(path, roots):
         raise JobError(403, {"detail": "path is outside the configured roots"})
+    return path
+
+
+def optional_path(text: str, roots: list[Path] | None = None) -> str:
+    """A file a run names but does not always need: a model, the captioner, a preview reference.
+
+    A file inside the roots that exists resolves as ``resolve_file`` does. One that is not there is returned
+    as typed, so the family's own checks report it only when the run needs it. A path outside the roots is
+    refused when something exists there. A UNC path outside the roots is refused without a stat.
+    """
+    roots = all_roots() if roots is None else roots
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    path = Path(_client_text(raw))
+    if _lexically_under(path, roots):
+        if not path.is_file():
+            return raw
+        return str(resolve_file(raw, "", roots))
+    if _unc_text(raw) or path.exists():
+        raise JobError(403, {"detail": "path is outside the configured roots"})
+    return raw
+
+
+def resolve_dir(text: str, roots: list[Path] | None = None) -> Path:
+    """An existing directory inside ``roots`` (all roots when omitted)."""
+    roots = all_roots() if roots is None else roots
+    path = within_roots(text, roots)
     if not path.is_dir() or _has_link(path, roots) or not _under(path, roots):
         raise JobError(403, {"detail": "path is outside the configured roots"})
     return path.resolve()
@@ -300,9 +330,7 @@ def resolve_dir(text: str, roots: list[Path] | None = None) -> Path:
 def resolve_new_dir(text: str, roots: list[Path] | None = None) -> Path:
     """A directory inside ``roots``. The leaf may not exist yet; its parent must."""
     roots = all_roots() if roots is None else roots
-    path = Path(_client_text(text))
-    if not _lexically_under(path, roots):
-        raise JobError(403, {"detail": "path is outside the configured roots"})
+    path = within_roots(text, roots)
     if _linked(path):
         raise JobError(403, {"detail": "path is outside the configured roots"})
     if path.is_dir():
@@ -318,9 +346,7 @@ def resolve_new_dir(text: str, roots: list[Path] | None = None) -> Path:
 def resolve_unmade(text: str, roots: list[Path] | None = None) -> Path:
     """A path whose place is inside ``roots``. The file and its parent may not exist."""
     roots = all_roots() if roots is None else roots
-    path = Path(_client_text(text))
-    if not _lexically_under(path, roots):
-        raise JobError(403, {"detail": "path is outside the configured roots"})
+    path = within_roots(text, roots)
     tail: list[str] = []
     cursor = path
     while not cursor.exists():
@@ -474,12 +500,10 @@ def resolve_file(text: str, suffix: str, roots: list[Path] | None = None) -> Pat
 
     ``suffix`` is required when it is not empty (``.safetensors``, ``.html``).
     """
-    path = Path(_client_text(text))
-    if suffix and path.suffix.lower() != suffix.lower():
+    if suffix and Path(_client_text(text)).suffix.lower() != suffix.lower():
         raise JobError(422, {"problems": [f"not a {suffix} file"]})
     roots = all_roots() if roots is None else roots
-    if not _lexically_under(path, roots):
-        raise JobError(403, {"detail": "path is outside the configured roots"})
+    path = within_roots(text, roots)
     if not path.is_file() or _has_link(path, roots) or not _under(path, roots):
         raise JobError(403, {"detail": "path is outside the configured roots"})
     return path.resolve()

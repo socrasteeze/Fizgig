@@ -7,8 +7,10 @@ tools they start stay hidden as well.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from fizgig.gpu_lock import GpuLock
@@ -16,6 +18,16 @@ from fizgig.training.progress import TrainingProgressTracker
 from fizgig.web.jobs import _load, _now, bind_runner, mark_paused, save
 
 _REPO = Path(__file__).resolve().parents[3]
+
+# batch_caption --serve: "FAIL: <image name> (<reason>)" is one image, and the batch goes on.
+# Any other FAIL line after RUN is fatal for the job.
+_PER_IMAGE_FAIL = re.compile(r"^FAIL: [^()]+?\.[A-Za-z0-9]+ \(.*\)$")
+
+# A loaded engine's worker can still hold the card's lock for a moment after the server
+# has let go. The run waits this long for it, polling every _LOCK_POLL seconds.
+# FIZGIG_WEB_LOCK_GRACE overrides the grace in seconds (tests use 1).
+_LOCK_GRACE = 15.0
+_LOCK_POLL = 0.25
 
 
 def _loss(value):
@@ -25,6 +37,61 @@ def _loss(value):
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _lock_grace() -> float:
+    raw = (os.environ.get("FIZGIG_WEB_LOCK_GRACE") or "").strip()
+    try:
+        value = float(raw) if raw else _LOCK_GRACE
+    except ValueError:
+        return _LOCK_GRACE
+    return value if value >= 0 else _LOCK_GRACE
+
+
+def _log_line(folder: Path, text: str) -> None:
+    with (folder / "log.txt").open("a", encoding="utf-8", errors="replace") as log:
+        log.write(text + "\n")
+
+
+def _wait_for_gpu(folder: Path, job: dict, lock: GpuLock, device: int) -> bool:
+    """Take the card's lock before any stage runs. True only when this process holds it.
+
+    The server refuses a start while the lock is held. A lock that is still held
+    when the runner starts (an engine worker letting go) is waited for, up to the
+    grace. False means the job is already recorded as stopped, paused, or failed.
+    """
+    if lock.acquire():
+        return True
+    grace = _lock_grace()
+    _log_line(folder, f"Waiting up to {grace:g} s for GPU {device} to be released by another process.")
+    # While waiting, the record carries this runner's pid. A pid-less queued record is
+    # failed by reconcile after its grace, and stop and reconcile both read the pid.
+    bind_runner(job)
+    if not save(folder, job):
+        return False
+    deadline = time.monotonic() + grace
+    while True:
+        if (folder / "STOP").is_file():
+            job["status"] = "stopped"
+            job["ended"] = job.get("ended") or _now()
+            save(folder, job)
+            return False
+        if lock.acquire():
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(_LOCK_POLL, remaining))
+    _log_line(folder, f"GPU {device} is in use by another run; job not started.")
+    output = Path(job.get("output_dir") or "")
+    resuming = bool(str((job.get("values") or {}).get("RESUME_TRAINING") or ""))
+    if resuming or (output / ".fizgig_paused.json").is_file():
+        job["status"] = "paused"
+    else:
+        job["status"] = "failed"
+    job["ended"] = _now()
+    save(folder, job)
+    return False
 
 
 def run_folder(folder: Path) -> None:
@@ -46,15 +113,7 @@ def run_folder(folder: Path) -> None:
     os.environ["CUDA_VISIBLE_DEVICES"] = str(device)
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     lock = GpuLock(device)
-    if not lock.acquire():
-        output = Path(job.get("output_dir") or "")
-        resuming = bool(str((job.get("values") or {}).get("RESUME_TRAINING") or ""))
-        if resuming or (output / ".fizgig_paused.json").is_file():
-            job["status"] = "paused"
-        else:
-            job["status"] = "failed"
-        job["ended"] = _now()
-        save(folder, job)
+    if not _wait_for_gpu(folder, job, lock, device):
         return
 
     try:
@@ -251,6 +310,21 @@ def _run_caption(folder: Path, job: dict) -> None:
     assert proc.stdin is not None and proc.stdout is not None
     saw_done = False
     sent_run = False
+    fatal = False
+    quit_sent = False
+
+    def quit_worker() -> None:
+        # The worker reads QUIT only between runs. Keep reading its stdout until it exits, so its pipe never fills.
+        nonlocal quit_sent
+        if quit_sent:
+            return
+        quit_sent = True
+        try:
+            proc.stdin.write("QUIT\n")
+            proc.stdin.flush()
+        except OSError:
+            pass
+
     with log_path.open("a", encoding="utf-8", errors="replace") as log:
         for line in proc.stdout:
             try:
@@ -263,13 +337,9 @@ def _run_caption(folder: Path, job: dict) -> None:
                 proc.stdin.write(f"RUN {folder / 'caption_job.json'}\n")
                 proc.stdin.flush()
                 sent_run = True
-            elif text.startswith("FAIL:") and sent_run:
-                try:
-                    proc.stdin.write("QUIT\n")
-                    proc.stdin.flush()
-                except OSError:
-                    pass
-                break
+            elif text.startswith("FAIL:") and sent_run and not _PER_IMAGE_FAIL.match(text):
+                fatal = True
+                quit_worker()
             elif text.startswith("PROGRESS:"):
                 parts = text.split()
                 if len(parts) >= 3:
@@ -278,26 +348,16 @@ def _run_caption(folder: Path, job: dict) -> None:
                         job["total"] = int(parts[2])
                         job["stage"] = "Caption"
                         if not save(folder, job):
-                            break
+                            quit_worker()
                     except ValueError:
                         pass
             elif text == "DONE":
-                saw_done = True
-                try:
-                    proc.stdin.write("QUIT\n")
-                    proc.stdin.flush()
-                except OSError:
-                    pass
+                # The worker prints DONE after a job-level FAIL too. That job is failed, not done.
+                saw_done = not fatal
+                quit_worker()
             elif text == "STOPPED":
-                try:
-                    proc.stdin.write("QUIT\n")
-                    proc.stdin.flush()
-                except OSError:
-                    pass
-                break
-            elif text.startswith("FAIL:"):
-                # A failure before RUN (model load). Keep reading until the process exits.
-                pass
+                quit_worker()
+            # Per-image FAIL lines and a FAIL before RUN (model load) are logged above. Reading goes on.
     code = proc.wait()
     if (folder / "STOP").is_file() or (folder / "caption_stop").is_file():
         _finish(folder, job, "stopped", code)
@@ -387,7 +447,7 @@ def main(argv: list[str] | None = None) -> None:
     except Exception:
         import traceback
         try:
-            with (folder / "log.txt").open("a", encoding="utf-8") as handle:
+            with (folder / "log.txt").open("a", encoding="utf-8", errors="replace") as handle:
                 handle.write(traceback.format_exc())
             job = _load(folder)
             if job and job.get("status") in {"queued", "running"}:

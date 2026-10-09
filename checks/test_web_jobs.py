@@ -7,6 +7,7 @@ or touches CUDA.
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -17,6 +18,7 @@ from unittest.mock import patch
 
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
+sys.path.insert(0, str(_REPO / "checks"))
 
 from fastapi.testclient import TestClient
 
@@ -24,6 +26,7 @@ from fizgig.gpu_lock import GpuLock, held
 from fizgig.web import jobs, queue
 from fizgig.web.app import app
 from fizgig.web.procs import creationflags
+import runner_guard
 
 _PNG = (
     b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
@@ -74,12 +77,6 @@ class WebJobTests(unittest.TestCase):
         self.client = self._client.__enter__()
 
     def tearDown(self):
-        try:
-            for job in jobs.list_jobs():
-                if job["status"] in {"queued", "running"}:
-                    self.client.post(f"/api/jobs/{job['id']}/stop")
-        except Exception:
-            pass
         if self._holder is not None:
             self._holder.kill()
             try:
@@ -87,11 +84,7 @@ class WebJobTests(unittest.TestCase):
             except Exception:
                 pass
         self._client.__exit__(None, None, None)
-        deadline = time.time() + 5
-        while time.time() < deadline:
-            if not any(self._job_runner_alive(job) for job in jobs._each()):
-                break
-            time.sleep(0.05)
+        runner_guard.end_runs(Path(os.environ["FIZGIG_WEB_JOBS"]))
         for key, value in self._env.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -99,13 +92,6 @@ class WebJobTests(unittest.TestCase):
                 os.environ[key] = value
         _reset_queue()
         self._tmp.cleanup()
-
-    def _job_runner_alive(self, job):
-        pid = int(job.get("pid") or 0)
-        created = job.get("pid_create_time")
-        if created is None:
-            return jobs.pid_alive(pid)
-        return jobs.pid_alive(pid, created)
 
     def wait_for(self, fn, timeout=12):
         end = time.time() + timeout
@@ -147,6 +133,31 @@ class WebJobTests(unittest.TestCase):
 
     def _job_file(self, job_id):
         return json.loads((self.root / "jobs" / job_id / "job.json").read_text(encoding="utf-8"))
+
+    def _log_text(self, job_id):
+        path = self.root / "jobs" / job_id / "log.txt"
+        return path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
+
+    def _hold_gpu(self):
+        """Another process takes GPU 0's lock and keeps it until the test kills it."""
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(_REPO / "src")
+        script = (
+            "import time\n"
+            "from fizgig.gpu_lock import GpuLock\n"
+            "lock = GpuLock(0)\n"
+            "while not lock.acquire():\n"
+            "    time.sleep(0.01)\n"
+            "time.sleep(30)\n"
+        )
+        self._holder = subprocess.Popen([sys.executable, "-c", script], env=env, creationflags=creationflags())
+        self.wait_for(lambda: held(0))
+
+    def _wait_terminal(self, job_id, timeout=30):
+        return self.wait_for(
+            lambda: (body := self.client.get(f"/api/jobs/{job_id}").json())["status"] in {"done", "failed", "stopped"} and body,
+            timeout=timeout,
+        )
 
     def test_create_run_done_log_and_progress(self):
         created = self._create()
@@ -348,6 +359,34 @@ class WebJobTests(unittest.TestCase):
         self.client.post(f"/api/jobs/{job_id}/stop")
         self.wait_for(lambda: not held())
 
+    def test_run_waits_for_a_lock_released_inside_the_grace(self):
+        self._hold_gpu()
+        # The server's check passed a moment before the engine worker let go of the card.
+        with patch("fizgig.web.jobs.held", return_value=False), patch.dict(os.environ, {"FIZGIG_WEB_LOCK_GRACE": "15"}):
+            created = self._create()
+        job_id = created["id"]
+        self.wait_for(lambda: "Waiting up to" in self._log_text(job_id), timeout=30)
+        time.sleep(1)
+        self._holder.kill()
+        self._holder.wait(timeout=5)
+        self._holder = None
+        body = self._wait_terminal(job_id)
+        log = self._log_text(job_id)
+        self.assertEqual(body["status"], "done", f"{body}\n{log}")
+        self.assertIn("Waiting up to 15 s for GPU 0", log)
+        self.assertTrue((self.root / "jobs" / job_id / "runner.err").is_file())
+
+    def test_run_fails_with_a_reason_when_the_lock_outlasts_the_grace(self):
+        self._hold_gpu()
+        with patch("fizgig.web.jobs.held", return_value=False), patch.dict(os.environ, {"FIZGIG_WEB_LOCK_GRACE": "1"}):
+            created = self._create()
+        job_id = created["id"]
+        body = self._wait_terminal(job_id)
+        log = self._log_text(job_id)
+        self.assertEqual(body["status"], "failed", log)
+        self.assertIn("Waiting up to 1 s for GPU 0", log)
+        self.assertIn("GPU 0 is in use by another run; job not started.", log)
+
     def test_problems_are_422(self):
         response = self.client.post("/api/jobs", json={
             "family": "qwen_image21",
@@ -476,6 +515,41 @@ class WebJobTests(unittest.TestCase):
         roots = fs.output_roots()
         self.assertLess(time.time() - started, 2)
         self.assertFalse(any("no-such-host" in str(path) for path in roots))
+
+    def test_confine_refuses_every_client_path_outside_roots(self):
+        outside = Path(tempfile.mkdtemp(prefix="fizgig-outside-"))
+        self.addCleanup(shutil.rmtree, outside, True)
+        (outside / "pic.png").write_bytes(_PNG)
+        (outside / "dir").mkdir()
+        picture = str(outside / "pic.png")
+        cases = [
+            ({"FAMILY_MULTICONCEPT": "1", "MINIMAX_CONCEPT_DIRS": [str(outside / "dir")]}, {}),
+            ({}, {"captioner": picture}),
+            ({}, {"ft_resume": {"checkpoint": picture}}),
+            ({"METADATA_THUMBNAIL": picture}, {}),
+            ({"FAMILY_EDIT_REF": picture}, {}),
+        ]
+        for values, context in cases:
+            with self.subTest(values=values, context=context):
+                with self.assertRaises(jobs.JobError) as caught:
+                    jobs._confine_paths(dict(values), dict(context))
+                self.assertEqual(caught.exception.status, 403)
+
+    def test_missing_model_path_does_not_block_the_run(self):
+        context = {
+            "models": {
+                "speed_lora": str(self.root / "moved" / "speed.safetensors"),
+                "stale_elsewhere": str(Path(self.root.anchor) / "fizgig-gone-xyz" / "x.safetensors"),
+                "sdxl_checkpoint": str(self.checkpoint),
+            },
+        }
+        jobs._confine_paths({}, context)
+        self.assertEqual(context["models"]["speed_lora"], str(self.root / "moved" / "speed.safetensors"))
+        self.assertEqual(
+            context["models"]["stale_elsewhere"],
+            str(Path(self.root.anchor) / "fizgig-gone-xyz" / "x.safetensors"),
+        )
+        self.assertEqual(context["models"]["sdxl_checkpoint"], str(self.checkpoint.resolve()))
 
     def test_pause_records_tidied_name_or_failure(self):
         output = self.root / "tidy-out"
@@ -610,6 +684,15 @@ class WebJobTests(unittest.TestCase):
         os.utime(folder / "job.json", (old, old))
         jobs.reconcile()
         self.assertEqual(json.loads((folder / "job.json").read_text(encoding="utf-8"))["status"], "failed")
+
+    def test_runner_that_cannot_start_records_the_reason(self):
+        with patch("fizgig.web.jobs.subprocess.Popen", side_effect=OSError("nope")):
+            created = self._create()
+        job_id = created["id"]
+        job = self._job_file(job_id)
+        self.assertEqual(job["status"], "failed")
+        self.assertIn("nope", job["error"])
+        self.assertIn("nope", self._log_text(job_id))
 
     def test_log_is_capped_and_tail_is_marked(self):
         created = self._create()

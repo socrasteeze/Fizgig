@@ -15,12 +15,13 @@ from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
+sys.path.insert(0, str(_REPO / "checks"))
 
 from fastapi.testclient import TestClient
 
 from fizgig.families.registry import get as get_family
-from fizgig.web import jobs
 from fizgig.web.app import app
+import runner_guard
 
 
 class WebProfileTests(unittest.TestCase):
@@ -54,13 +55,8 @@ class WebProfileTests(unittest.TestCase):
         self.client = self._client.__enter__()
 
     def tearDown(self):
-        try:
-            for job in jobs.list_jobs():
-                if job["status"] in {"queued", "running"}:
-                    self.client.post(f"/api/jobs/{job['id']}/stop")
-        except Exception:
-            pass
         self._client.__exit__(None, None, None)
+        runner_guard.end_runs(Path(os.environ["FIZGIG_WEB_JOBS"]))
         for key, value in self._env.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -194,6 +190,56 @@ class WebProfileEngineTests(unittest.TestCase):
             time.sleep(0.02)
         self.fail(f"timed out; last={last!r}")
 
+    def _wait(self, fn, timeout=8):
+        end = time.time() + timeout
+        last = None
+        while time.time() < end:
+            last = fn()
+            if last:
+                return last
+            time.sleep(0.02)
+        self.fail(f"timed out; last={last!r}")
+
+    def test_finished_profile_survives_a_later_render(self):
+        """Nobody polls while Repair renders on the same engine. The profile must still read as done."""
+        from fizgig.web import profile
+        from fizgig.web.engine_host import get_host
+        started = self.client.post("/api/profile/engine", json={
+            "family": "klein", "lora": str(self.lora), "mode": "quick",
+            "prompt": "a person", "class_prompt": "a face", "size": "512",
+        })
+        self.assertEqual(started.status_code, 200, started.text)
+        gen = started.json()["gen"]
+        host = get_host()
+        self._wait(lambda: host.result is not None and host.result.get("gen") == gen)
+        later = host.render({"steps": 1})
+        self._wait(lambda: host.result is not None and host.result.get("gen") == later)
+        view = profile.engine_view()
+        self.assertEqual(view["status"], "done", view)
+        self.assertEqual(view["gen"], gen)
+        handoff = self.client.post("/api/profile/repair")
+        self.assertEqual(handoff.status_code, 200, handoff.text)
+        self.assertIn("little effect", handoff.json()["message"])
+
+    def test_running_only_while_the_profile_gen_is_current(self):
+        from fizgig.web import profile
+        from fizgig.web.engine_host import get_host
+        profile._ENGINE.clear()
+        profile._ENGINE.update({"gen": 5, "result": None, "settings": {"family": "klein"}})
+        host = get_host()
+        host.profile = None
+        host.profile_gen = None
+        host.restarted = False
+        host.busy = True
+        host.latest = 5
+        self.assertEqual(profile.engine_view()["status"], "running")
+        host.latest = 6
+        superseded = profile.engine_view()
+        self.assertEqual(superseded["status"], "failed")
+        self.assertEqual(superseded["gen"], 5)
+        host.busy = False
+        host.latest = 5
+
     def test_quick_and_thorough_and_repair_handoff(self):
         quick = self._run("quick")
         self.assertEqual(quick["seeds"], [1234])
@@ -237,6 +283,25 @@ class WebProfileEngineTests(unittest.TestCase):
         stopped = profile.engine_view()
         self.assertEqual(stopped["status"], "failed")
         self.assertIn("stopped", stopped["message"])
+
+    def test_failed_render_leaves_nothing_ready(self):
+        """A new run clears the last profile before it renders. If that render fails, the page must not show it as ready."""
+        from unittest import mock
+        from fizgig.web.engine_host import EngineError, get_host
+        self._run("quick")
+        self.assertTrue(self.client.get("/api/profile/engine").json()["ready"])
+        host = get_host()
+        with mock.patch.object(host, "render", side_effect=EngineError("render refused")):
+            refused = self.client.post("/api/profile/engine", json={
+                "family": "klein", "lora": str(self.lora), "mode": "quick",
+                "prompt": "a person", "class_prompt": "a face", "size": "512",
+            })
+        self.assertEqual(refused.status_code, 422, refused.text)
+        view = self.client.get("/api/profile/engine").json()
+        self.assertEqual(view["status"], "idle", view)
+        self.assertFalse(view["ready"])
+        handoff = self.client.post("/api/profile/repair")
+        self.assertEqual(handoff.status_code, 422, handoff.text)
 
 
 if __name__ == "__main__":

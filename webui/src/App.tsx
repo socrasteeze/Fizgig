@@ -155,10 +155,14 @@ export function App() {
   const [form, setForm] = useState<FormBody | null>(null);
   const [values, setValues] = useState<Record<string, unknown>>({});
   const [modelPaths, setModelPaths] = useState<Record<string, string>>({});
+  // Only the paths the user typed or browsed here. Other paths come from Preferences at launch.
+  const [modelEdits, setModelEdits] = useState<Record<string, string>>({});
   const [imageFolder, setImageFolder] = useState("");
   const [problems, setProblems] = useState<string[]>([]);
+  const [controlProblems, setControlProblems] = useState<string[]>([]);
   const [warnings, setWarnings] = useState<Warning[]>([]);
   const [warnFor, setWarnFor] = useState<"start" | "pause" | "resume" | "stop">("start");
+  const [warnJob, setWarnJob] = useState("");
   const [jobs, setJobs] = useState<Job[]>([]);
   const [selected, setSelected] = useState("");
   const [log, setLog] = useState("");
@@ -185,7 +189,6 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
     setError("");
-    setModelPaths({});
     fetch(`/api/form?family=${encodeURIComponent(family)}`)
       .then(async (response) => {
         if (!response.ok) {
@@ -210,24 +213,6 @@ export function App() {
         setValues(overlay ? mergePreset(next, overlay, loaded) : next);
         setProblems([]);
         setWarnings([]);
-        fetch("/api/prefs")
-          .then((response) => (response.ok ? response.json() : null))
-          .then((prefs: { families?: Array<{ key?: string; files?: Array<{ key?: string; value?: unknown }> }> } | null) => {
-            if (cancelled || !prefs) {
-              return;
-            }
-            const section = (prefs.families || []).find((item) => item.key === family);
-            const paths: Record<string, string> = {};
-            for (const file of section?.files || []) {
-              const key = String(file.key ?? "");
-              const value = String(file.value ?? "").trim();
-              if (key && value) {
-                paths[key] = value;
-              }
-            }
-            setModelPaths(paths);
-          })
-          .catch(() => undefined);
       })
       .catch((reason: unknown) => {
         if (!cancelled) {
@@ -238,6 +223,37 @@ export function App() {
       cancelled = true;
     };
   }, [family]);
+
+  // Re-read the model paths from Preferences each time the Training tab opens or the family changes.
+  useEffect(() => {
+    if (tab !== "Training") {
+      return;
+    }
+    let cancelled = false;
+    setModelPaths({});
+    setModelEdits({});
+    fetch("/api/prefs")
+      .then((response) => (response.ok ? response.json() : null))
+      .then((prefs: { families?: Array<{ key?: string; files?: Array<{ key?: string; value?: unknown }> }> } | null) => {
+        if (cancelled || !prefs) {
+          return;
+        }
+        const section = (prefs.families || []).find((item) => item.key === family);
+        const paths: Record<string, string> = {};
+        for (const file of section?.files || []) {
+          const key = String(file.key ?? "");
+          const value = String(file.value ?? "").trim();
+          if (key && value) {
+            paths[key] = value;
+          }
+        }
+        setModelPaths(paths);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [family, tab]);
 
   useEffect(() => {
     let cancelled = false;
@@ -380,7 +396,8 @@ export function App() {
     if (!selected) {
       return;
     }
-    let offset = 0;
+    // -1 reads the tail of the log (the last chunk), then the loop follows by offset.
+    let offset = -1;
     let text = "";
     let stop = false;
     let timer = 0;
@@ -454,6 +471,20 @@ export function App() {
     }
   }
 
+  function editModel(key: string, value: string) {
+    setModelPaths((current) => ({ ...current, [key]: value }));
+    setModelEdits((current) => ({ ...current, [key]: value }));
+  }
+
+  // A resume or pause warning belongs to the job it came from, so switching jobs drops it.
+  function pickJob(id: string) {
+    setSelected(id);
+    setControlProblems([]);
+    if (warnFor !== "start") {
+      setWarnings([]);
+    }
+  }
+
   function rememberFolder(path: string) {
     setImageFolder(path);
     void fetch("/api/start", {
@@ -480,7 +511,7 @@ export function App() {
         family,
         device,
         values: hasFolder ? { ...values, image_folder: folder } : values,
-        context: { models: modelPaths, image_folder: folder, ...samplePayload() },
+        context: { models: modelEdits, image_folder: folder, ...samplePayload() },
       }),
     });
     if (!response.ok) {
@@ -504,7 +535,7 @@ export function App() {
         values: hasFolder ? { ...values, image_folder: folder } : values,
         confirm,
         context: {
-          models: modelPaths,
+          models: modelEdits,
           image_folder: folder,
           ...samplePayload(),
         },
@@ -534,49 +565,50 @@ export function App() {
     setSelected(created.id);
   }
 
-  async function control(action: "pause" | "resume" | "stop", confirm: string[] = []) {
-    if (!selected) {
+  async function control(action: "pause" | "resume" | "stop", confirm: string[] = [], jobId = selected) {
+    if (!jobId) {
       return;
     }
     if (!confirm.length) {
-      setProblems([]);
+      setControlProblems([]);
       setWarnings([]);
     }
     let response: Response;
     try {
-      response = await fetch(`/api/jobs/${selected}/${action}`, {
+      response = await fetch(`/api/jobs/${jobId}/${action}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(action === "resume" ? { confirm } : {}),
       });
     } catch {
-      setProblems([`${action} failed`]);
+      setControlProblems([`${action} failed`]);
       return;
     }
     if (response.status === 422) {
       const body = (await response.json().catch(() => ({}))) as ProblemBody;
       setWarnings([]);
-      setProblems(body.problems?.length ? body.problems : [`${action} was refused`]);
+      setControlProblems(body.problems?.length ? body.problems : [`${action} was refused`]);
       return;
     }
     if (response.status === 409) {
       const body = (await response.json().catch(() => ({}))) as Conflict;
       if (body.warnings?.length) {
         setWarnFor(action);
-        setProblems([]);
+        setWarnJob(jobId);
+        setControlProblems([]);
         setWarnings(body.warnings);
         return;
       }
       setWarnings([]);
-      setProblems([body.detail || `${action} was refused`]);
+      setControlProblems([body.detail || `${action} was refused`]);
       return;
     }
     if (!response.ok) {
       const body = (await response.json().catch(() => ({}))) as { detail?: string; problems?: string[] };
-      setProblems(body.problems?.length ? body.problems : [body.detail || `${action} failed (${response.status})`]);
+      setControlProblems(body.problems?.length ? body.problems : [body.detail || `${action} failed (${response.status})`]);
       return;
     }
-    setProblems([]);
+    setControlProblems([]);
     setWarnings([]);
   }
 
@@ -586,7 +618,7 @@ export function App() {
       void start(codes);
       return;
     }
-    void control(warnFor, codes);
+    void control(warnFor, codes, warnJob);
   }
 
   async function sendOverride(active: boolean) {
@@ -613,7 +645,7 @@ export function App() {
                 key={item.id}
                 type="button"
                 className={item.id === selected ? "chip on" : "chip"}
-                onClick={() => setSelected(item.id)}
+                onClick={() => pickJob(item.id)}
               >
                 {item.family} {item.status}
               </button>
@@ -770,10 +802,10 @@ export function App() {
                       {model.label}{model.required ? "" : " (optional)"}
                       <input
                         value={modelPaths[model.key] ?? ""}
-                        onChange={(event) => setModelPaths((current) => ({ ...current, [model.key]: event.target.value }))}
+                        onChange={(event) => editModel(model.key, event.target.value)}
                       />
                     </label>
-                    <BrowseButton select="file" onPick={(path) => setModelPaths((current) => ({ ...current, [model.key]: path }))} />
+                    <BrowseButton select="file" onPick={(path) => editModel(model.key, path)} />
                   </div>
                 ))}
               </section>
@@ -829,8 +861,8 @@ export function App() {
                 <button type="button" onClick={() => void control("resume")} disabled={job.status !== "paused"}>Resume</button>
                 <button type="button" onClick={() => void control("stop")} disabled={job.status !== "running" && job.status !== "queued"}>Stop</button>
               </div>
-              {problems.map((line) => <p key={line} className="error">{line}</p>)}
-              {warnFor !== "start" && warnings.length > 0 ? (
+              {controlProblems.map((line) => <p key={line} className="error">{line}</p>)}
+              {warnFor !== "start" && warnJob === selected && warnings.length > 0 ? (
                 <div className="warn">
                   {warnings.map((item) => <p key={item.code}>{item.message}</p>)}
                   <button type="button" onClick={confirmWarnings}>{warnFor === "resume" ? "Resume anyway" : "Continue anyway"}</button>

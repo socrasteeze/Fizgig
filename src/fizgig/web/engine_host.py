@@ -257,6 +257,27 @@ def _clip_file(frames, dest: Path, fps: int) -> str | None:
     return dest.name if dest.is_file() else None
 
 
+_SESSION_MARK = ".fizgig-session"
+_ACTIVE_JOBS = frozenset({"queued", "running"})
+
+
+def _drop_old_sessions(root: Path, keep: Path) -> None:
+    """Remove earlier engine sessions under ``engine/``.
+
+    Only folders carrying the session mark go. Anything else there is a folder a
+    person chose for output, and it stays. Nothing goes while a job is queued or
+    running, since a detached job can still read frames from an old session.
+    """
+    import shutil
+    from fizgig.web.jobs import list_jobs
+    if any(job.get("status") in _ACTIVE_JOBS for job in list_jobs()):
+        return
+    for child in list(root.iterdir()):
+        if child == keep or not child.is_dir() or not (child / _SESSION_MARK).is_file():
+            continue
+        shutil.rmtree(child, ignore_errors=True)
+
+
 class WorkbenchAdapter:
     """Drives ``desc.make_workbench_engine()``. Imported only for a real load."""
 
@@ -442,6 +463,7 @@ class Worker:
         self.busy = False
         self.pending = None
         self.gpu = None
+        self.keep: dict[str, int] = {}  # side -> newest gen that wrote preview files for it
         self.wake = threading.Condition()
         self.write_lock = threading.Lock()
         self.stop = False
@@ -667,6 +689,8 @@ class Worker:
                     if data:
                         name = f"g{_gen}-s{int(step)}.png"
                         (self.out_dir / name).write_bytes(data)
+                        with self.wake:
+                            self.keep[str(side)] = _gen
                         self._drop_old_previews(_gen)
                     self.emit({
                         "event": "frame", "gen": _gen, "step": int(step), "total": int(total),
@@ -705,11 +729,17 @@ class Worker:
                         self.busy = False
 
     def _drop_old_previews(self, gen: int) -> None:
-        """Drop preview files from gens older than the latest few."""
+        """Drop preview files from gens older than the latest few.
+
+        The newest gen of each side stays whatever its age. The page keeps the
+        last epoch frames while it renders travel, and a Royale export reads them.
+        """
         import shutil
         floor = int(gen) - 3
         if floor < 1:
             return
+        with self.wake:
+            kept = set(self.keep.values())
         try:
             names = list(self.out_dir.iterdir())
         except OSError:
@@ -719,7 +749,7 @@ class Worker:
             if not name.startswith("g"):
                 continue
             head, sep, _rest = name[1:].partition("-")
-            if not sep or not head.isdigit() or int(head) > floor:
+            if not sep or not head.isdigit() or int(head) > floor or int(head) in kept:
                 continue
             try:
                 if path.is_dir():
@@ -785,6 +815,7 @@ class EngineHost:
         self.events: list[dict] = []
         self.result: dict | None = None
         self.profile: dict | None = None
+        self.profile_gen: int | None = None
         self.last = time.monotonic()
         self._next_id = 1
         self._seq = 0
@@ -877,15 +908,12 @@ class EngineHost:
             except Exception:
                 pass
             self._stderr = None
-        import shutil
         root = self._jobs_root() / "engine"
         root.mkdir(parents=True, exist_ok=True)
         self.session = root / uuid.uuid4().hex[:12]
         self.session.mkdir(parents=True, exist_ok=True)
-        for child in list(root.iterdir()):
-            if child == self.session or not child.is_dir():
-                continue
-            shutil.rmtree(child, ignore_errors=True)
+        (self.session / _SESSION_MARK).write_text("engine session\n", encoding="utf-8")
+        _drop_old_sessions(root, self.session)
         env = os.environ.copy()
         env["FIZGIG_WEB_ENGINE_DIR"] = str(self.session)
         env["PYTHONUNBUFFERED"] = "1"
@@ -952,6 +980,13 @@ class EngineHost:
             out[key + "_url"] = "/api/engine/file?path=" + quote(str(path))
         return out
 
+    def _answer(self, msg: dict):
+        """The waiter for a reply, and the reply kept for it. A reply nobody waits for is dropped."""
+        waiter = self._waiters.get(msg["id"])
+        if waiter is not None:
+            self._replies[msg["id"]] = msg
+        return waiter
+
     def _accept(self, msg: dict) -> None:
         event = msg.get("event")
         gen = msg.get("gen")
@@ -959,8 +994,7 @@ class EngineHost:
         with self._state:
             if event in {"frame", "done"} and gen is not None and gen != self.latest:
                 if "id" in msg and "op" in msg:
-                    self._replies[msg["id"]] = msg
-                    waiter = self._waiters.get(msg["id"])
+                    waiter = self._answer(msg)
             else:
                 if event:
                     shown = self._public(msg)
@@ -971,6 +1005,7 @@ class EngineHost:
                         self.result = stored
                         if stored.get("profile"):
                             self.profile = stored["profile"]
+                            self.profile_gen = gen
                         self._touch()
                     elif event in {"cancelled", "error"} and (gen is None or gen == self.latest):
                         self.busy = False
@@ -980,8 +1015,7 @@ class EngineHost:
                         self.busy = False
                         self.engine_name = ""
                 if "id" in msg and "op" in msg:
-                    self._replies[msg["id"]] = msg
-                    waiter = self._waiters.get(msg["id"])
+                    waiter = self._answer(msg)
         if waiter is not None:
             waiter.set()
 
@@ -998,19 +1032,26 @@ class EngineHost:
             raise EngineError("The engine worker stopped. It will start again on the next request.") from exc
 
     def request(self, payload: dict, timeout: float = 30) -> dict:
-        with self._io:
-            self._ensure()
+        ident = None
+        try:
+            with self._io:
+                self._ensure()
+                with self._state:
+                    ident = self._next_id
+                    self._next_id += 1
+                    waiter = threading.Event()
+                    self._waiters[ident] = waiter
+                self._send({**payload, "id": ident})
+            if not waiter.wait(timeout):
+                raise EngineError("the engine did not answer")
             with self._state:
-                ident = self._next_id
-                self._next_id += 1
-                waiter = threading.Event()
-                self._waiters[ident] = waiter
-            self._send({**payload, "id": ident})
-        if not waiter.wait(timeout):
-            raise EngineError("the engine did not answer")
-        with self._state:
-            self._waiters.pop(ident, None)
-            reply = self._replies.pop(ident, None)
+                reply = self._replies.pop(ident, None)
+        finally:
+            # Also on timeout: a waiter left behind would make set_device refuse for good.
+            if ident is not None:
+                with self._state:
+                    self._waiters.pop(ident, None)
+                    self._replies.pop(ident, None)
         if reply is None:
             raise EngineError("The engine worker stopped. It will start again on the next request.")
         return reply
@@ -1029,6 +1070,7 @@ class EngineHost:
     def load(self, engine: str, family: str, args: dict) -> dict:
         self._touch()
         reply = self.request({"op": "load", "engine": engine, "family": family, "args": args}, timeout=3600)
+        self._note_gen(reply.get("gen"))
         if not reply.get("ok"):
             self.loaded = False
             self.engine_name = ""
@@ -1039,7 +1081,6 @@ class EngineHost:
         self.args = dict(args or {})
         self.restarted = False
         self.busy = False
-        self._note_gen(reply.get("gen"))
         self._touch()
         return reply
 

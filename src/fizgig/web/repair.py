@@ -25,6 +25,10 @@ _REPO = Path(__file__).resolve().parents[3]
 _GROUPS: dict[str, list] = {}
 _RESOLUTIONS = ("512", "768", "1024")
 _GPU_BUSY = "A training or caption job is using the GPU. Wait for it to finish before loading an engine."
+_OTHER_LORA = (
+    "The loaded engine has a different LoRA or donor. Load the LoRA and donor you are saving, "
+    "or unload the engine, then save again."
+)
 
 
 def _families():
@@ -512,12 +516,27 @@ def _inside_dir(dest: Path, folder: Path) -> None:
         raise JobError(422, {"problems": ["Enter an output name."]}) from None
 
 
-def engine_bake(engine_name: str, state, dest: str, include_donor: bool):
-    """``save_repaired`` on the loaded engine. None means the file baker should run."""
+def _same_path(held, asked) -> bool:
+    """Whether two stored paths name the same file. Empty matches only empty."""
+    return os.path.normcase(str(held or "")) == os.path.normcase(str(asked or ""))
+
+
+def engine_bake(engine_name: str, state, dest: str, include_donor: bool, primary: str, donor: str = ""):
+    """``save_repaired`` on the loaded engine. None means the file baker should run.
+
+    The engine writes the weights it holds, under the name the caller picked. So the
+    engine must hold the LoRA being saved, and the donor when the save uses one.
+    Otherwise the save is refused.
+    """
     from fizgig.web.engine_host import EngineError, get_host
     host = get_host()
     if host.proc is None or not host.loaded or host.engine_name != engine_name:
         return None
+    held = host.args or {}
+    if not _same_path(held.get("primary") or held.get("lora"), primary):
+        raise JobError(422, {"problems": [_OTHER_LORA]})
+    if include_donor and not _same_path(held.get("donor"), donor):
+        raise JobError(422, {"problems": [_OTHER_LORA]})
     payload = state.to_json() if hasattr(state, "to_json") else state
     try:
         reply = host.request({
@@ -561,7 +580,7 @@ def bake(body: dict) -> dict:
     from fizgig.web.engine_host import get_host
     host = get_host()
     baked_by = host.engine_name if host.loaded and host.engine_name in {"repair", "profiler"} else ""
-    summary = engine_bake(baked_by, state, str(dest), bool(donor_on)) if baked_by else None
+    summary = engine_bake(baked_by, state, str(dest), bool(donor_on), str(primary), donor_path) if baked_by else None
     if summary is None:
         _refuse_unmapped(str(body.get("family") or ""))
         from fizgig.repair_studio.bake import save_repaired_lora

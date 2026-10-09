@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import os
 
-from fizgig.web.fs import IMAGE_EXTENSIONS, resolve_dir
+from fizgig.web.fs import IMAGE_EXTENSIONS, resolve_dir, within_roots
 from fizgig.web.jobs import JobError, jobs_root
 
 _FILE = "start.json"
@@ -16,6 +16,14 @@ _FILE = "start.json"
 
 def _path():
     return jobs_root() / _FILE
+
+
+def _in_roots(text: str) -> bool:
+    try:
+        within_roots(text)
+    except JobError:
+        return False
+    return True
 
 
 def folder() -> str:
@@ -34,7 +42,7 @@ def folder() -> str:
 def summarize(path: str) -> dict:
     """Image count, caption count, and images that have no caption file."""
     text = (path or "").strip()
-    if not text or not os.path.isdir(text):
+    if not text or not _in_roots(text) or not os.path.isdir(text):
         return {"folder": text, "images": 0, "captions": 0, "missing": 0, "ready": False}
     images = []
     captions = 0
@@ -84,6 +92,7 @@ def require_folder(path: str | None = None) -> str:
     text = (path or "").strip() or folder()
     if not text:
         raise JobError(422, {"problems": ["Pick a training image folder on the Start tab first."]})
+    within_roots(text)
     if not os.path.isdir(text):
         raise JobError(422, {"problems": ["The training image folder does not exist."]})
     return str(resolve_dir(text))

@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
@@ -66,6 +67,23 @@ class WebStartTests(unittest.TestCase):
         self.assertEqual(again["missing"], 1)
         refused = self.client.put("/api/start", json={"folder": str(self.root / "missing")})
         self.assertEqual(refused.status_code, 403)
+
+    def test_unc_folder_is_refused_before_any_stat(self):
+        from fizgig.web import start
+        from fizgig.web.jobs import JobError
+
+        touched = []
+        real = os.path.isdir
+
+        def spy(path):
+            touched.append(os.fspath(path))
+            return real(path)
+
+        with patch("os.path.isdir", side_effect=spy):
+            with self.assertRaises(JobError) as caught:
+                start.require_folder(r"\\example-nas\share\images")
+        self.assertEqual(caught.exception.status, 403)
+        self.assertEqual([item for item in touched if item.startswith("\\\\")], [])
 
 
 if __name__ == "__main__":

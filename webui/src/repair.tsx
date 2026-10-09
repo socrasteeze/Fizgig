@@ -467,6 +467,11 @@ export function RepairPanel() {
             Family
             <select value={family} onChange={(event) => {
               const next = event.target.value;
+              // A render scheduled for the old family must not fire against the new one.
+              if (timer.current != null) {
+                window.clearTimeout(timer.current);
+                timer.current = null;
+              }
               setFamily(next);
               setArmed(false);
               setBaselineUrl("");
