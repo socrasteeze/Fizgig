@@ -224,14 +224,19 @@ export function App() {
     };
   }, [family]);
 
+  // Typed or browsed model paths belong to one family. Switching tabs keeps them.
+  useEffect(() => {
+    setModelEdits({});
+    setModelPaths({});
+  }, [family]);
+
   // Re-read the model paths from Preferences each time the Training tab opens or the family changes.
+  // A response fills only the Preferences paths, so a typed path (modelEdits) is never overwritten.
   useEffect(() => {
     if (tab !== "Training") {
       return;
     }
     let cancelled = false;
-    setModelPaths({});
-    setModelEdits({});
     fetch("/api/prefs")
       .then((response) => (response.ok ? response.json() : null))
       .then((prefs: { families?: Array<{ key?: string; files?: Array<{ key?: string; value?: unknown }> }> } | null) => {
@@ -472,8 +477,21 @@ export function App() {
   }
 
   function editModel(key: string, value: string) {
-    setModelPaths((current) => ({ ...current, [key]: value }));
     setModelEdits((current) => ({ ...current, [key]: value }));
+  }
+
+  // The path a model field shows. A blank one makes the server read Preferences for that file.
+  function modelShown(key: string): string {
+    return modelEdits[key] ?? modelPaths[key] ?? "";
+  }
+
+  // Start and queue send these same values, so the fields and the request always agree.
+  function modelContext(): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const model of models) {
+      out[model.key] = modelShown(model.key);
+    }
+    return out;
   }
 
   // A resume or pause warning belongs to the job it came from, so switching jobs drops it.
@@ -511,7 +529,7 @@ export function App() {
         family,
         device,
         values: hasFolder ? { ...values, image_folder: folder } : values,
-        context: { models: modelEdits, image_folder: folder, ...samplePayload() },
+        context: { models: modelContext(), image_folder: folder, ...samplePayload() },
       }),
     });
     if (!response.ok) {
@@ -535,7 +553,7 @@ export function App() {
         values: hasFolder ? { ...values, image_folder: folder } : values,
         confirm,
         context: {
-          models: modelEdits,
+          models: modelContext(),
           image_folder: folder,
           ...samplePayload(),
         },
@@ -801,7 +819,7 @@ export function App() {
                     <label>
                       {model.label}{model.required ? "" : " (optional)"}
                       <input
-                        value={modelPaths[model.key] ?? ""}
+                        value={modelShown(model.key)}
                         onChange={(event) => editModel(model.key, event.target.value)}
                       />
                     </label>

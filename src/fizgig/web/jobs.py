@@ -518,8 +518,9 @@ def _confine_paths(values: dict, context: dict) -> None:
     """Resolve client paths inside the configured roots before a plan is built.
 
     A path the run needs is refused when it is missing or outside the roots. A path the run may not
-    need (a model, the captioner, a preview reference) is refused only when something is there outside
-    the roots. A missing one is left for the family's own checks to report.
+    need (a model, the captioner, a preview reference) is refused when it is outside the roots, with no
+    stat, and a missing one inside the roots is left for the family's own checks to report. Preferences
+    fill is not here: inputs.build takes the blank model paths from Preferences after this step.
     """
     from fizgig.web import fs
 

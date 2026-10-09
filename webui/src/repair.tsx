@@ -70,6 +70,8 @@ function finiteNumber(value: string, fallback: number): number {
 
 let repairGen: number | null = null;
 let repairWait = false;
+// The newest engine event seq this panel has seen. A remount resumes after it with ?since=.
+let repairSince = 0;
 
 interface Draft {
   blocks: Record<string, BlockRow>;
@@ -222,8 +224,12 @@ export function RepairPanel() {
     let stopped = false;
 
     function open() {
-      source = new EventSource("/api/events");
+      source = new EventSource(repairSince > 0 ? `/api/events?since=${repairSince}` : "/api/events");
       source.addEventListener("engine", (event) => {
+        const seq = Number((event as MessageEvent).lastEventId);
+        if (Number.isInteger(seq) && seq > 0) {
+          repairSince = seq;
+        }
         const body = JSON.parse((event as MessageEvent).data) as EngineEvent;
         if (body.gen != null && (body.event === "frame" || body.event === "done" || body.event === "cancelled")) {
           if (repairWait && (body.event === "frame" || body.event === "done")) {

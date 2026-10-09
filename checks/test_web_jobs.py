@@ -528,6 +528,7 @@ class WebJobTests(unittest.TestCase):
             ({}, {"ft_resume": {"checkpoint": picture}}),
             ({"METADATA_THUMBNAIL": picture}, {}),
             ({"FAMILY_EDIT_REF": picture}, {}),
+            ({}, {"models": {"sdxl_vae": str(outside / "gone.safetensors")}}),
         ]
         for values, context in cases:
             with self.subTest(values=values, context=context):
@@ -539,17 +540,30 @@ class WebJobTests(unittest.TestCase):
         context = {
             "models": {
                 "speed_lora": str(self.root / "moved" / "speed.safetensors"),
-                "stale_elsewhere": str(Path(self.root.anchor) / "fizgig-gone-xyz" / "x.safetensors"),
                 "sdxl_checkpoint": str(self.checkpoint),
             },
         }
         jobs._confine_paths({}, context)
         self.assertEqual(context["models"]["speed_lora"], str(self.root / "moved" / "speed.safetensors"))
-        self.assertEqual(
-            context["models"]["stale_elsewhere"],
-            str(Path(self.root.anchor) / "fizgig-gone-xyz" / "x.safetensors"),
-        )
         self.assertEqual(context["models"]["sdxl_checkpoint"], str(self.checkpoint.resolve()))
+
+    def test_stale_optional_preference_does_not_block_the_run(self):
+        outside = Path(tempfile.mkdtemp(prefix="fizgig-outside-"))
+        self.addCleanup(shutil.rmtree, outside, True)
+        prefs = self.root / "prefs.json"
+        prefs.write_text(json.dumps({"sdxl_vae": str(outside / "stale-vae.safetensors")}), encoding="utf-8")
+        before = os.environ.get("FIZGIG_PREFS_FILE")
+        os.environ["FIZGIG_PREFS_FILE"] = str(prefs)
+
+        def restore_prefs_env():
+            if before is None:
+                os.environ.pop("FIZGIG_PREFS_FILE", None)
+            else:
+                os.environ["FIZGIG_PREFS_FILE"] = before
+
+        self.addCleanup(restore_prefs_env)
+        created = self.client.post("/api/jobs", json=self._payload())
+        self.assertEqual(created.status_code, 200, created.text)
 
     def test_pause_records_tidied_name_or_failure(self):
         output = self.root / "tidy-out"

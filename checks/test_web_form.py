@@ -229,6 +229,43 @@ class WebPageSourceTests(unittest.TestCase):
         self.assertNotIn("attempts > 80", gizmo)
         self.assertIn('return "cancelled"', gizmo)
 
+    def test_model_paths_reset_only_with_family(self):
+        app = (_REPO / "webui" / "src" / "App.tsx").read_text(encoding="utf-8")
+        # Typed or browsed paths are cleared when the family changes, not when a tab opens.
+        self.assertRegex(app, r"setModelEdits\(\{\}\);\s*setModelPaths\(\{\}\);\s*\}, \[family\]\);")
+        self.assertEqual(app.count("setModelEdits({})"), 1)
+        # Only the typed-path setter and the family reset touch the edits.
+        self.assertEqual(app.count("setModelEdits("), 2)
+        # A typed path wins over the Preferences value shown in the same field.
+        self.assertIn("modelEdits[key] ?? modelPaths[key]", app)
+        # Start and queue send exactly what the model fields show.
+        self.assertEqual(app.count("models: modelContext()"), 2)
+        self.assertNotIn("models: modelEdits", app)
+
+    def test_panels_resume_engine_stream(self):
+        panels = {
+            "repair": "repairSince",
+            "explorer": "explorerSince",
+            "refmod": "refmodSince",
+            "royale": "royaleSince",
+        }
+        for name, var in panels.items():
+            source = (_REPO / "webui" / "src" / f"{name}.tsx").read_text(encoding="utf-8")
+            with self.subTest(panel=name):
+                # The newest engine seq the panel saw lives at module level, so a remount keeps it.
+                self.assertIn(f"let {var} = 0;", source)
+                self.assertIn("lastEventId", source)
+                self.assertIn(f"{var} = seq;", source)
+                self.assertIn(f"/api/events?since=${{{var}}}", source)
+
+    def test_gizmo_overwrite_asks_first(self):
+        gizmo = (_REPO / "webui" / "src" / "gizmo.tsx").read_text(encoding="utf-8")
+        self.assertRegex(gizmo, r"async function readError[\s\S]*?conflicts")
+        self.assertIn("response.status === 409", gizmo)
+        self.assertIn("window.confirm(", gizmo)
+        self.assertIn('data.set("overwrite", "1")', gizmo)
+        self.assertRegex(gizmo, r"uploadTo\(dataset, file, true\)")
+
 
 if __name__ == "__main__":
     unittest.main()

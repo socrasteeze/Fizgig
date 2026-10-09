@@ -85,6 +85,41 @@ class WebHttpTests(unittest.TestCase):
         self.assertTrue(any(item.get("message") == "broadcast-token" for item in again))
         self.assertGreater(after, cursor)
 
+    def _publish_resume_events(self):
+        from fizgig.web.engine_host import get_host
+
+        host = get_host()
+        anchor = host.publish({"event": "done", "gen": 4, "message": "resume-anchor-token"})
+        host.publish({"event": "done", "gen": 4, "message": "resume-next-token"})
+        newest = host.publish({"event": "done", "gen": 4, "message": "resume-newest-token"})
+        return anchor, newest
+
+    def test_last_event_id_header_resumes_after_that_seq(self):
+        anchor, newest = self._publish_resume_events()
+        response = self.client.get("/api/events", params={"once": 1}, headers={"Last-Event-ID": str(anchor)})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertNotIn("resume-anchor-token", response.text)
+        self.assertIn("resume-next-token", response.text)
+        self.assertIn("resume-newest-token", response.text)
+        self.assertIn(f"id: {newest}\nevent: engine\n", response.text)
+
+    def test_since_query_resumes_after_that_seq(self):
+        anchor, _newest = self._publish_resume_events()
+        response = self.client.get("/api/events", params={"once": 1, "since": anchor})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertNotIn("resume-anchor-token", response.text)
+        self.assertIn("resume-next-token", response.text)
+        self.assertIn("resume-newest-token", response.text)
+
+    def test_resume_point_newer_than_the_engine_starts_at_the_newest(self):
+        from fizgig.web.app import _engine_cursor
+        from fizgig.web.engine_host import get_host
+
+        newest = get_host().publish({"event": "done", "gen": 5, "message": "restart-token"})
+        self.assertEqual(_engine_cursor(None), newest)
+        self.assertEqual(_engine_cursor(newest + 1000), newest)
+        self.assertEqual(_engine_cursor(newest - 1), newest - 1)
+
     def test_new_stream_starts_at_the_current_engine_cursor(self):
         from fizgig.web.engine_host import get_host
 

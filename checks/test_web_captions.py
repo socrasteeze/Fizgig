@@ -134,7 +134,8 @@ class WebCaptionTests(unittest.TestCase):
             "print('READY', flush=True)\n"
             "for line in sys.stdin:\n"
             "    if line.strip().startswith('RUN'):\n"
-            "        print('FAIL: boom', flush=True)\n"
+            "        print('FAIL: job (boom)', flush=True)\n"
+            "        print('DONE', flush=True)\n"
             "    if line.strip() == 'QUIT':\n"
             "        break\n",
             encoding="utf-8",
@@ -193,6 +194,65 @@ class WebCaptionTests(unittest.TestCase):
         job_id = started.json()["id"]
         body = self._wait(lambda: (item := self.client.get(f"/api/jobs/{job_id}").json())["status"] in {"done", "failed", "stopped"} and item)
         self.assertEqual(body["status"], "failed", body)
+
+    def _caption_job_printing(self, name, lines):
+        """Run a caption job whose stand-in worker prints ``lines`` on RUN, then waits for QUIT. Returns the job body."""
+        script = self.root / f"{name}.py"
+        prints = "".join(f"        print({line!r}, flush=True)\n" for line in lines)
+        script.write_text(
+            "import sys\n"
+            "print('READY', flush=True)\n"
+            "for line in sys.stdin:\n"
+            "    text = line.strip()\n"
+            "    if text.startswith('RUN'):\n"
+            + prints +
+            "    if text == 'QUIT':\n"
+            "        break\n",
+            encoding="utf-8",
+        )
+        os.environ["FIZGIG_WEB_FAKE_CAPTION"] = str(script)
+        self.client.put("/api/start", json={"folder": str(self.dataset)})
+        started = self.client.post("/api/captions/jobs", json={"trigger": "ohwx", "model": "MiaoshouAI/Florence-2-base-PromptGen"})
+        self.assertEqual(started.status_code, 200, started.text)
+        job_id = started.json()["id"]
+        return self._wait(lambda: (item := self.client.get(f"/api/jobs/{job_id}").json())["status"] in {"done", "failed", "stopped"} and item)
+
+    def test_per_image_fail_with_parentheses_in_the_name_is_not_fatal(self):
+        body = self._caption_job_printing("paren_names", [
+            "PROGRESS: 1 3",
+            "FAIL: IMG (1).png (empty caption)",
+            "PROGRESS: 2 3",
+            "FAIL: photo - Copy (2).jpg (CUDA out of memory)",
+            "PROGRESS: 3 3",
+            "OK: a.png",
+            "DONE",
+        ])
+        self.assertEqual(body["status"], "done", body)
+
+    def test_multi_line_exception_is_one_failed_image(self):
+        body = self._caption_job_printing("two_line_error", [
+            "PROGRESS: 1 2",
+            "FAIL: a.png (Traceback: decode failed",
+            "UnidentifiedImageError: cannot identify image file)",
+            "PROGRESS: 2 2",
+            "OK: b.png",
+            "DONE",
+        ])
+        self.assertEqual(body["status"], "done", body)
+
+    def test_image_named_like_a_job_fail_after_progress_is_not_fatal(self):
+        body = self._caption_job_printing("job_named_image", [
+            "PROGRESS: 1 1",
+            "FAIL: job (1).png (empty caption)",
+            "DONE",
+        ])
+        self.assertEqual(body["status"], "done", body)
+
+    def test_job_level_fails_end_the_job(self):
+        no_images = self._caption_job_printing("no_images", ["FAIL: no images in list"])
+        self.assertEqual(no_images["status"], "failed", no_images)
+        job_error = self._caption_job_printing("job_error", ["FAIL: job (boom)", "DONE"])
+        self.assertEqual(job_error["status"], "failed", job_error)
 
     def test_unc_folder_is_refused_with_403_on_the_caption_routes(self):
         listing = self.client.get("/api/captions", params={"folder": r"\\example-nas\share\pics"})

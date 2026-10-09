@@ -1,6 +1,6 @@
 """Folder listing, upload, and LoRA download inside configured roots.
 
-A path is refused when it contains ``..``, when a symlink or junction sits
+A path is refused when it contains ``..`` or an NT or device prefix, when a symlink or junction sits
 strictly below the matching root, or when the resolved path is outside the
 roots. The root itself may be a link, or sit under one.
 """
@@ -52,14 +52,14 @@ def _dotdot(text: str) -> bool:
     return any(part == ".." for part in text.replace("\\", "/").split("/"))
 
 
-def _unc_text(text: str) -> bool:
-    """UNC (``//``, ``\\``) and device paths (``\\\\?\\``, ``\\\\.\\``). Checked only for a path outside every root."""
-    return text.replace("\\", "/").startswith("//")
+def _nt_text(text: str) -> bool:
+    """The NT and device prefixes (``\\??\\``, ``\\\\?\\``, ``\\\\.\\``) in any slash form. A client may not send one."""
+    return text.replace("\\", "/").startswith(("/??/", "//?/", "//./"))
 
 
 def _client_text(text: str) -> str:
     raw = (text or "").strip()
-    if not raw or _dotdot(raw):
+    if not raw or _dotdot(raw) or _nt_text(raw):
         raise JobError(403, {"detail": "path is outside the configured roots"})
     return raw
 
@@ -298,24 +298,23 @@ def within_roots(text: str, roots: list[Path] | None = None) -> Path:
 
 
 def optional_path(text: str, roots: list[Path] | None = None) -> str:
-    """A file a run names but does not always need: a model, the captioner, a preview reference.
+    """A file a client names but does not always need: a model, the captioner, a preview reference.
 
-    A file inside the roots that exists resolves as ``resolve_file`` does. One that is not there is returned
-    as typed, so the family's own checks report it only when the run needs it. A path outside the roots is
-    refused when something exists there. A UNC path outside the roots is refused without a stat.
+    The client's path must lie inside the roots by its text, or it is refused with no stat, whether or not
+    anything is there. Inside the roots, a file that exists resolves as ``resolve_file`` does; one that is
+    not there is returned as typed, so the family's own checks report it only when the run needs it.
+    Preferences paths do not come here. The server fills them after this step and trusts them.
     """
     roots = all_roots() if roots is None else roots
     raw = (text or "").strip()
     if not raw:
         return ""
     path = Path(_client_text(raw))
-    if _lexically_under(path, roots):
-        if not path.is_file():
-            return raw
-        return str(resolve_file(raw, "", roots))
-    if _unc_text(raw) or path.exists():
+    if not _lexically_under(path, roots):
         raise JobError(403, {"detail": "path is outside the configured roots"})
-    return raw
+    if not path.is_file():
+        return raw
+    return str(resolve_file(raw, "", roots))
 
 
 def resolve_dir(text: str, roots: list[Path] | None = None) -> Path:

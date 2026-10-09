@@ -242,6 +242,8 @@ export interface paths {
          * @description Server-sent events: job, progress, sample, system, notice, engine.
          *
          *     ``once=1`` sends a single round and closes. The page leaves it off and keeps the stream open.
+         *     Each engine event carries its seq as the SSE id. A stream resumes after the Last-Event-ID header or
+         *     ``?since=<seq>``. Without either, it starts at the newest engine event, so old events are not replayed.
          *     The round reads logs and job files, so it runs off the event loop.
          */
         get: operations["events_api_events_get"];

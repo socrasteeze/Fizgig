@@ -43,6 +43,8 @@ let royaleEpochGen: number | null = null;
 let royaleTravelGen: number | null = null;
 let royaleEpochWait = false;
 let royaleTravelWait = false;
+// The newest engine event seq this panel has seen. A remount resumes after it with ?since=.
+let royaleSince = 0;
 
 function readError(response: Response): Promise<string> {
   return response.json().then(
@@ -127,8 +129,12 @@ export function RoyalePanel() {
     let stopped = false;
 
     function open() {
-      sourceEvents = new EventSource("/api/events");
+      sourceEvents = new EventSource(royaleSince > 0 ? `/api/events?since=${royaleSince}` : "/api/events");
       sourceEvents.addEventListener("engine", (event) => {
+      const seq = Number((event as MessageEvent).lastEventId);
+      if (Number.isInteger(seq) && seq > 0) {
+        royaleSince = seq;
+      }
       const body = JSON.parse((event as MessageEvent).data) as EngineEvent;
       if (body.event === "frame" && body.file_url && body.side === "epoch") {
         if (royaleEpochWait && body.gen != null) {

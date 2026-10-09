@@ -54,6 +54,8 @@ function num(value: string, fallback: number): number {
 
 let explorerGen: number | null = null;
 let explorerWait = false;
+// The newest engine event seq this panel has seen. A remount resumes after it with ?since=.
+let explorerSince = 0;
 
 export function ExplorerPanel() {
   const [form, setForm] = useState<ExplorerForm | null>(null);
@@ -110,7 +112,7 @@ export function ExplorerPanel() {
     let stopped = false;
 
     function open() {
-      source = new EventSource("/api/events");
+      source = new EventSource(explorerSince > 0 ? `/api/events?since=${explorerSince}` : "/api/events");
       source.addEventListener("engine", onEngine);
       source.onerror = () => {
         if (stopped || source == null || source.readyState !== EventSource.CLOSED) {
@@ -128,6 +130,10 @@ export function ExplorerPanel() {
     }
 
     function onEngine(event: Event) {
+      const seq = Number((event as MessageEvent).lastEventId);
+      if (Number.isInteger(seq) && seq > 0) {
+        explorerSince = seq;
+      }
       const body = JSON.parse((event as MessageEvent).data) as EngineEvent;
       if (body.gen != null && (body.event === "frame" || body.event === "done" || body.event === "cancelled")) {
         if (explorerWait && (body.event === "frame" || body.event === "done")) {

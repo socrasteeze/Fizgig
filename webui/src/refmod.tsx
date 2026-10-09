@@ -93,6 +93,8 @@ const BLANK: ModRow = { on: true, mod: "", value: "1", copies: "1" };
 
 let refmodGen: number | null = null;
 let refmodWait = false;
+// The newest engine event seq this panel has seen. A remount resumes after it with ?since=.
+let refmodSince = 0;
 
 function readError(response: Response): Promise<string> {
   return response.json().then(
@@ -259,8 +261,12 @@ export function RefmodPanel() {
     let stopped = false;
 
     function open() {
-      source = new EventSource("/api/events");
+      source = new EventSource(refmodSince > 0 ? `/api/events?since=${refmodSince}` : "/api/events");
       source.addEventListener("engine", (event) => {
+      const seq = Number((event as MessageEvent).lastEventId);
+      if (Number.isInteger(seq) && seq > 0) {
+        refmodSince = seq;
+      }
       const body = JSON.parse((event as MessageEvent).data) as EngineEvent;
       if (body.gen != null && (body.event === "frame" || body.event === "done" || body.event === "cancelled")) {
         if (refmodWait && (body.event === "frame" || body.event === "done")) {

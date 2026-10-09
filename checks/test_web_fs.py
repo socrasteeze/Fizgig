@@ -138,6 +138,43 @@ class _VirtualShare:
         return False
 
 
+class _NoStatFor:
+    """Fails the test when a Path stat or resolve call runs on a path whose text holds ``needle``.
+
+    Enter it after the roots are read, so the roots' own stat calls are not in the way.
+    """
+
+    _NAMES = ("exists", "is_file", "is_dir", "is_symlink", "is_junction", "stat", "resolve")
+
+    def __init__(self, needle: str):
+        self.needle = needle.lower()
+        self._patchers: list = []
+
+    def __enter__(self):
+        for name in self._NAMES:
+            real = getattr(Path, name, None)
+            if real is None:
+                continue
+            patcher = patch.object(Path, name, self._probe(name, real))
+            patcher.start()
+            self._patchers.append(patcher)
+        return self
+
+    def __exit__(self, *exc):
+        for patcher in reversed(self._patchers):
+            patcher.stop()
+        self._patchers.clear()
+        return False
+
+    def _probe(self, name, real):
+        def call(path, *args, **kwargs):
+            text = os.fspath(path)
+            if self.needle in text.lower():
+                raise AssertionError(f"Path.{name} ran on a refused path: {text}")
+            return real(path, *args, **kwargs)
+        return call
+
+
 class WebFsTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -422,6 +459,47 @@ class WebFsTests(unittest.TestCase):
                     fs.resolve_file(raw + "/a.safetensors", "")
                 self.assertEqual(caught.exception.status, 403)
             self.assertEqual([item for item in share.touched if "example-other" in item.lower()], [])
+
+    def test_nt_and_device_prefixes_are_refused_without_a_stat(self):
+        from fizgig.web import fs
+        from fizgig.web.jobs import JobError
+
+        roots = fs.all_roots()
+        for raw in (
+            r"\??\UNC\example-host\share\a.safetensors",
+            r"\\?\UNC\example-host\share\a.safetensors",
+            r"\\.\example-host\share\a.safetensors",
+            "/??/UNC/example-host/share/a.safetensors",
+            "//?/UNC/example-host/share/a.safetensors",
+        ):
+            with self.subTest(raw=raw), _NoStatFor("example-host"):
+                with self.assertRaises(JobError) as caught:
+                    fs.optional_path(raw, roots)
+                self.assertEqual(caught.exception.status, 403)
+                with self.assertRaises(JobError) as caught:
+                    fs.resolve_file(raw, "", roots)
+                self.assertEqual(caught.exception.status, 403)
+
+    def test_client_path_outside_the_roots_is_refused_without_a_stat(self):
+        from fizgig.web import fs
+        from fizgig.web.jobs import JobError
+
+        roots = fs.all_roots()
+        present = self.outside / "probe-model-present.safetensors"
+        present.write_bytes(b"not a model")
+        missing = self.outside / "probe-model-missing.safetensors"
+        for raw in (str(present), str(missing)):
+            with self.subTest(raw=raw), _NoStatFor("probe-model-"):
+                with self.assertRaises(JobError) as caught:
+                    fs.optional_path(raw, roots)
+                self.assertEqual(caught.exception.status, 403)
+
+    def test_missing_path_inside_the_roots_is_returned_as_typed(self):
+        from fizgig.web import fs
+
+        roots = fs.all_roots()
+        typed = str(self.dataset / "later.safetensors")
+        self.assertEqual(fs.optional_path(typed, roots), typed)
 
     def test_job_output_inside_a_dataset_root_downloads(self):
         browse = self.root / "browse"

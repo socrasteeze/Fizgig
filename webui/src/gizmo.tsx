@@ -15,8 +15,18 @@ interface Probe {
 }
 
 async function readError(response: Response): Promise<string> {
-  const body = await response.json().catch(() => ({})) as { detail?: string; problems?: string[] };
+  const body = await response.json().catch(() => ({})) as { detail?: string; problems?: string[]; conflicts?: string[] };
+  if (body.conflicts?.length) return `Already in the dataset folder: ${body.conflicts.join(", ")}`;
   return body.problems?.length ? body.problems.join("\n") : (body.detail || `request failed (${response.status})`);
+}
+
+// Sends the file to a dataset folder. overwrite=1 replaces a file with the same name.
+function uploadTo(dest: string, file: File, overwrite: boolean): Promise<Response> {
+  const data = new FormData();
+  data.set("dest", dest);
+  if (overwrite) data.set("overwrite", "1");
+  data.set("file", file);
+  return fetch("/api/gizmo/upload", { method: "POST", body: data });
 }
 
 // Polls until the job leaves the live states. "unreadable" covers a missing or corrupt record.
@@ -96,10 +106,17 @@ export function GizmoPanel() {
   async function upload(file: File | undefined) {
     if (!file) return;
     if (!dataset) { setError("Pick a dataset folder first."); return; }
-    const data = new FormData();
-    data.set("dest", dataset);
-    data.set("file", file);
-    const response = await fetch("/api/gizmo/upload", { method: "POST", body: data });
+    let response = await uploadTo(dataset, file, false);
+    if (response.status === 409) {
+      const conflict = await response.clone().json().catch(() => ({})) as { conflicts?: string[] };
+      if (conflict.conflicts?.length) {
+        if (!window.confirm(`${conflict.conflicts.join(", ")} is already in the dataset folder. Replace it?`)) {
+          setStatus("Upload cancelled.");
+          return;
+        }
+        response = await uploadTo(dataset, file, true);
+      }
+    }
     if (!response.ok) { setError(await readError(response)); return; }
     const body = await response.json() as { written?: string[]; folder?: string };
     if (body.written?.[0] && body.folder) {

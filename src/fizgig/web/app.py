@@ -485,14 +485,34 @@ def read_devices():
     return {"devices": visible_devices()}
 
 
-def _engine_cursor() -> int:
-    """The newest engine event seq now. A new or reconnected stream starts here, so it does not replay old events."""
+def _resume_point(request: Request) -> int | None:
+    """The engine seq to resume after: the Last-Event-ID header, else ?since=. None when neither is a whole number."""
+    for raw in (request.headers.get("last-event-id"), request.query_params.get("since")):
+        try:
+            value = int(str(raw or "").strip())
+        except ValueError:
+            continue
+        if value >= 0:
+            return value
+    return None
+
+
+def _engine_cursor(resume: int | None = None) -> int:
+    """The engine seq a stream starts after.
+
+    Without a resume point that is the newest event now, so a new stream does not replay old events. A resume
+    point older than the newest event is used as it is. One newer than the newest means the server restarted
+    and its seqs began again, so the stream starts at the newest.
+    """
     try:
         from fizgig.web.engine_host import events_since
         _batch, cursor = events_since(0)
-        return int(cursor)
+        cursor = int(cursor)
     except Exception:
         return 0
+    if resume is None or resume > cursor:
+        return cursor
+    return resume
 
 
 def _event_round(seen_status, seen_samples, first, engine_after):
@@ -539,7 +559,7 @@ def _event_round(seen_status, seen_samples, first, engine_after):
         from fizgig.web.engine_host import events_since
         batch, engine_after = events_since(int(engine_after))
         for event in batch:
-            lines.append(f"event: engine\ndata: {json.dumps(event)}\n\n")
+            lines.append(f"id: {event.get('seq')}\nevent: engine\ndata: {json.dumps(event)}\n\n")
     except Exception:
         pass
     return lines, int(engine_after)
@@ -550,13 +570,17 @@ async def events(request: Request, once: int = 0):
     """Server-sent events: job, progress, sample, system, notice, engine.
 
     ``once=1`` sends a single round and closes. The page leaves it off and keeps the stream open.
+    Each engine event carries its seq as the SSE id. A stream resumes after the Last-Event-ID header or
+    ``?since=<seq>``. Without either, it starts at the newest engine event, so old events are not replayed.
     The round reads logs and job files, so it runs off the event loop.
     """
+    resume = _resume_point(request)
+
     async def stream():
         seen_status = {}
         seen_samples = {}
         first = True
-        engine_after = await asyncio.to_thread(_engine_cursor)
+        engine_after = await asyncio.to_thread(_engine_cursor, resume)
         while True:
             lines, engine_after = await asyncio.to_thread(
                 _event_round, seen_status, seen_samples, first, engine_after)

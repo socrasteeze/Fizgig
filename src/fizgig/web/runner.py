@@ -7,7 +7,6 @@ tools they start stay hidden as well.
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 import sys
 import time
@@ -19,9 +18,15 @@ from fizgig.web.jobs import _load, _now, bind_runner, mark_paused, save
 
 _REPO = Path(__file__).resolve().parents[3]
 
-# batch_caption --serve: "FAIL: <image name> (<reason>)" is one image, and the batch goes on.
-# Any other FAIL line after RUN is fatal for the job.
-_PER_IMAGE_FAIL = re.compile(r"^FAIL: [^()]+?\.[A-Za-z0-9]+ \(.*\)$")
+# batch_caption --serve prints these FAIL lines for the whole job, and each one ends it.
+_JOB_FAIL_LINES = frozenset({
+    "FAIL: no images in list",
+    "FAIL: instruction_file required",
+    "FAIL: empty instruction",
+})
+# "FAIL: job (<error>)" and "FAIL: unknown command ..." end the job too. An image name can begin
+# with the same words, so these count only before the job's first PROGRESS line.
+_JOB_FAIL_PREFIXES = ("FAIL: job (", "FAIL: unknown command ")
 
 # A loaded engine's worker can still hold the card's lock for a moment after the server
 # has let go. The run waits this long for it, polling every _LOCK_POLL seconds.
@@ -293,6 +298,13 @@ def _popen(cmd, env, stdin):
     return subprocess.Popen(cmd, creationflags=0, **kwargs)
 
 
+def _ends_job(text: str, images_started: bool) -> bool:
+    """True for a FAIL line that ends the whole job. Every other FAIL after RUN is one image, and the batch goes on."""
+    if text in _JOB_FAIL_LINES:
+        return True
+    return not images_started and text.startswith(_JOB_FAIL_PREFIXES)
+
+
 def _run_caption(folder: Path, job: dict) -> None:
     """Speak the batch_caption --serve protocol and copy it into log.txt."""
     from fizgig.web.captions import command
@@ -312,6 +324,7 @@ def _run_caption(folder: Path, job: dict) -> None:
     sent_run = False
     fatal = False
     quit_sent = False
+    images_started = False
 
     def quit_worker() -> None:
         # The worker reads QUIT only between runs. Keep reading its stdout until it exits, so its pipe never fills.
@@ -337,10 +350,11 @@ def _run_caption(folder: Path, job: dict) -> None:
                 proc.stdin.write(f"RUN {folder / 'caption_job.json'}\n")
                 proc.stdin.flush()
                 sent_run = True
-            elif text.startswith("FAIL:") and sent_run and not _PER_IMAGE_FAIL.match(text):
+            elif text.startswith("FAIL:") and sent_run and _ends_job(text, images_started):
                 fatal = True
                 quit_worker()
             elif text.startswith("PROGRESS:"):
+                images_started = True
                 parts = text.split()
                 if len(parts) >= 3:
                     try:
