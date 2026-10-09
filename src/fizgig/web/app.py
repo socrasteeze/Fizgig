@@ -133,6 +133,18 @@ def schema(family: str):
     return body
 
 
+@app.get("/api/form")
+def form(family: str):
+    """Training-tab fields for one family, then the argparse flags the form does not already cover."""
+    from fizgig.families.registry import get as get_family
+    from fizgig.web.form_spec import form_for
+
+    desc = get_family(family)
+    if desc is None:
+        raise HTTPException(status_code=404, detail="unknown family")
+    return form_for(desc, advanced_options())
+
+
 @app.post("/api/ping")
 def ping():
     """No training route exists yet. This POST exists so the Origin check has a request to reject."""

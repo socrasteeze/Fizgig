@@ -1,22 +1,22 @@
 # HANDOFF
 
-**Updated:** 2026-10-08 · **Branch:** master · **Base:** e198fb8 (origin/master); fork/master at 0bc8d06, HEAD a0a2ef6 unpushed · **Tree:** dirty (Phase 0 files uncommitted: `webui/`, `src/fizgig/web/`, `requirements-web.txt`, `checks/test_web_schema.py`, `docs/WEBUI_PHASE0.md`, this file)
+**Updated:** 2026-10-08 · **Branch:** master · **HEAD:** 70573c0 · **Tree:** dirty (Phase 1a uncommitted)
 
 ## State
-Phase 0 is uncommitted on master. `/api/schema` round-trips to the Vite page; Phase 1 has not started.
-origin/master (e198fb8) still has no `src/fizgig/web`.
+Phase 1a is uncommitted on 70573c0. The training form is served. The golden test matches all 39 built-in presets. The 8 edit and slider presets match once the pair folder has one PNG. With that folder left empty, `_generic_validate_paths` and `launch.problems()` return the same list (`docs/WEBUI_PHASE1.md`).
+Phase 1b has not started.
 
 ## Done this session
-- Confirmed upstream has no web server; issue 165 is still open — `docs/WEBUI_PHASE0.md`.
-- Scaffolded the Vite page and the FastAPI spike — `webui/`, `src/fizgig/web/`, `requirements-web.txt`.
-- Added schema, Host/Origin, and bind tests — `checks/test_web_schema.py` (suite: 11 passed, 0 failed).
-- Measured Training-tab coverage per family — `docs/WEBUI_PHASE0.md`.
+- Training form and `GET /api/form` — `src/fizgig/web/form_spec.py`, `src/fizgig/web/app.py`.
+- Mirror pins for the desktop functions the form follows — `src/fizgig/web/mirrors.py`, `checks/test_web_mirrors.py`.
+- Form values to `launch.plan()` inputs — `src/fizgig/web/inputs.py`.
+- Golden test, one window for every built-in preset — `checks/test_web_golden.py`. 39 presets match. The 8 edit and slider presets get a pair folder with one PNG. An empty pair folder is the same problem list on both sides.
+- Default suite: 15 tests, 14 passed, 1 skipped. Golden suite: 1 passed. `npm --prefix webui run build` passed.
 
 ## Open
-1. Phase 1 from `docs/WEBUI_SCOPE.md`: generated training form with preset chips, Advanced argparse flags, and the settings `docs/WEBUI_PHASE0.md` lists as undeclared; then job folders and the supervisor.
-2. Phase 1 per the scope's acceptance checks; automate each check in `checks/`.
-3. Review the dialogs (Queue, Gallery, Browse, preset windows) at 100%, 125%, and 150%; none were opened.
-4. At 150% the fixed 1580x1124 window truncates tab labels in both appearances. This predates the appearance work (`lora_trainer_gui.py:1327`).
+1. Phase 1b: job folders, supervisor, GPU lock, streaming.
+2. Review the dialogs (Queue, Gallery, Browse, preset windows) at 100%, 125%, and 150%; none were opened.
+3. At 150% the fixed 1580x1124 window truncates tab labels in both appearances. This predates the appearance work (`lora_trainer_gui.py:1327`).
 
 ## Decisions
 - Fork-only, nothing offered upstream (user, 2026-10-08). The scope's "Keeping the fork mergeable" rules follow from it: new files only, no imports of `lora_trainer_gui.py`, GUI logic mirrored and pinned by a hash test rather than moved.
@@ -30,7 +30,7 @@ origin/master (e198fb8) still has no `src/fizgig/web`.
 
 ## Traps
 - `origin` is upstream: fetch only, push disabled. Push only to fork, on master, when asked, via the clean workflow. `AGENTS.md`, the agent notes file, and `.git/hooks/pre-push` exist only in this checkout.
-- `launch.plan()` has no callers. Don't trust its byte-identical claim until the golden test in the scope passes.
+- The golden test fills the edit Originals folder and the slider -1 end folder before it compares commands. An empty pair folder is refused by both `_generic_validate_paths` and `launch.problems`. The three command builders still return a launch in that state. Do not change `launch.py` or the GUI to hide a difference (`docs/WEBUI_PHASE1.md`).
 - Never post on upstream issues or PRs, and never open one. If a sync brings in `src/fizgig/web` (#165 is open), stop and ask the user whether to switch to it.
 - This checkout's venv, prefs and output LoRAs are real. Test launches use `FIZGIG_NO_PERSIST` and an isolated prefs file. `--launch` may create a CUDA context. Don't run `update_fizgig.bat`.
 - Do not import `families/train.py` from the web server (that import loads torch). The Host check rejects a test client's default host, so tests use 127.0.0.1. Build `webui/` before starting the server. Starlette 1.7 warns that TestClient wants httpx2; `requirements-web.txt` stays on httpx.
@@ -40,6 +40,7 @@ origin/master (e198fb8) still has no `src/fizgig/web`.
 ```powershell
 .\venv\Scripts\python.exe -m unittest discover -s checks -p "test_*.py" -v
 .\venv\Scripts\python.exe checks\check_appearance.py
+$env:FIZGIG_GOLDEN='1'; .\venv\Scripts\python.exe -m unittest checks.test_web_golden -v
 npm --prefix webui run build
 git status --short
 git log fork/master..HEAD --oneline
