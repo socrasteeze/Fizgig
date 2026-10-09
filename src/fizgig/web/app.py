@@ -919,6 +919,82 @@ def royale_export(body: dict = Body(...)):
     return _call(royale_export_for, body)
 
 
+@app.get("/api/gizmo/form")
+def gizmo_form():
+    from fizgig.web.gizmo import form as gizmo_form_for
+    return _call(gizmo_form_for)
+
+
+@app.get("/api/gizmo/probe")
+def gizmo_probe(path: str = ""):
+    from fizgig.web.gizmo import probe
+    return _call(probe, path)
+
+
+@app.get("/api/gizmo/media")
+def gizmo_media(path: str = ""):
+    from fizgig.web.media import resolve_media
+
+    found = _call(resolve_media, path)
+    if isinstance(found, JSONResponse):
+        return found
+    return FileResponse(found)
+
+
+@app.get("/api/gizmo/name")
+def gizmo_name(source: str = "", dataset: str = "", muted: int = 0, kind: str = "clip"):
+    from fizgig.web.gizmo import next_name
+    return _call(next_name, source, dataset, bool(muted), kind)
+
+
+@app.post("/api/gizmo/upload")
+def gizmo_upload(dest: str = Form(""), file: UploadFile | None = File(None)):
+    from fizgig.web.gizmo import upload_source
+    return _call(upload_source, dest, file)
+
+
+@app.post("/api/gizmo/recordings")
+def gizmo_recording(dest: str = Form(""), file: UploadFile | None = File(None)):
+    from fizgig.web.gizmo import save_recording
+    return _call(save_recording, dest, file)
+
+
+@app.post("/api/gizmo/clips", response_model=JobOut, responses={409: {"model": ConflictOut}, 422: {"model": ProblemsOut}})
+def gizmo_clips(body: dict = Body(...)):
+    from fizgig.web.gizmo import launch_clips
+    return _call(launch_clips, body)
+
+
+@app.post("/api/gizmo/voices", response_model=JobOut, responses={409: {"model": ConflictOut}, 422: {"model": ProblemsOut}})
+def gizmo_voices(body: dict = Body(...)):
+    from fizgig.web.gizmo import launch_voices
+    return _call(launch_voices, body)
+
+
+@app.post("/api/gizmo/scan", response_model=JobOut, responses={409: {"model": ConflictOut}, 422: {"model": ProblemsOut}})
+def gizmo_scan(body: dict = Body(...)):
+    from fizgig.web.gizmo import launch_scan
+    return _call(launch_scan, body)
+
+
+@app.post("/api/gizmo/transcribe", response_model=JobOut, responses={409: {"model": ConflictOut}, 422: {"model": ProblemsOut}})
+def gizmo_transcribe(body: dict = Body(...)):
+    from fizgig.web.gizmo import launch_transcribe
+    return _call(launch_transcribe, body)
+
+
+@app.get("/api/convert/form")
+def convert_form():
+    from fizgig.web.convert import form as convert_form_for
+    return _call(convert_form_for)
+
+
+@app.post("/api/convert/jobs", response_model=JobOut, responses={409: {"model": ConflictOut}, 422: {"model": ProblemsOut}})
+def convert_job(body: dict = Body(...)):
+    from fizgig.web.convert import launch
+    return _call(launch, body)
+
+
 @app.get("/api/engine/status")
 def engine_status():
     from fizgig.web.repair import status as repair_status_for

@@ -65,6 +65,15 @@ def run_folder(folder: Path) -> None:
         elif kind == "royale":
             from fizgig.web.royale import run_job
             run_job(folder, job)
+        elif kind == "gizmo":
+            from fizgig.web.gizmo import run_job
+            run_job(folder, job)
+        elif kind == "whisper":
+            from fizgig.web.gizmo import run_whisper
+            run_whisper(folder, job)
+        elif kind == "convert":
+            from fizgig.web.convert import command
+            _run_tool(folder, job, command(job))
         else:
             _run(folder, job)
     finally:

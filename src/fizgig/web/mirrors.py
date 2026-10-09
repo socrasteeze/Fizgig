@@ -3,7 +3,8 @@
 The hash is of the function source from ``ast.get_source_segment``, with line endings
 normalised to ``\\n``. A mismatch means the desktop function changed: update the mirror
 (``form_spec.py``, ``inputs.py``, ``jobs.py``, ``repair.py``, ``profile.py``,
-``refmod.py``, ``explorer.py``, ``royale.py``, or ``system.py``), then replace the hash.
+``refmod.py``, ``explorer.py``, ``royale.py``, ``system.py``, ``gizmo.py``,
+or ``convert.py``), then replace the hash.
 """
 from __future__ import annotations
 
@@ -12,6 +13,8 @@ import hashlib
 from pathlib import Path
 
 _GUI = Path(__file__).resolve().parents[3] / "lora_trainer_gui.py"
+_GIZMO = Path(__file__).resolve().parents[3] / "gizmo.py"
+_CONVERT = Path(__file__).resolve().parents[3] / "diff_to_lora_gui.py"
 
 FUNCTIONS = (
     "create_training_settings",
@@ -109,9 +112,9 @@ FUNCTIONS = (
 )
 
 
-def source_hash(name: str, text: str | None = None) -> str:
+def source_hash(name: str, text: str | None = None, file: Path | None = None) -> str:
     if text is None:
-        text = _GUI.read_text(encoding="utf-8")
+        text = (file or _GUI).read_text(encoding="utf-8")
     tree = ast.parse(text)
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == name:
@@ -217,4 +220,52 @@ PINNED = {
     "_royale_seed_travel": "49e2db6dd0f76f5d3b417501d8e6dafb25ef8ded1b985e0d80ed7ca3f784cb35",
     "_royale_lora_travel": "4bb89b893171da4969ec256ddc3b0394676c1035b206b5782b79b46d122a0436",
     "_royale_prompt_travel": "5ef1d0e067500b5478f181ca4e4466e6fd1a67b1bec728d8895d7014f0012920",
+}
+
+# Desktop helpers copied into web/gizmo.py. The file is gizmo.py, not the trainer.
+GIZMO_FUNCTIONS = (
+    "audio_latents_for",
+    "hop_exact_samples",
+    "build_export_command",
+    "output_name",
+    "target_size",
+    "snap",
+    "build_scene_scan_command",
+    "parse_scene_time",
+    "parse_progress_time",
+    "plan_autochop",
+    "voice_output_name",
+    "probe_source",
+    "_audio_export_worker",
+    "_whisper_worker",
+    "_whisper_degenerate",
+)
+
+GIZMO_PINNED = {
+    "audio_latents_for": "1f4088944aaef13964573b350e07bf48ff1ada435b6625aea3fd872502f1ccaf",
+    "hop_exact_samples": "298e035c626079967ecd7087f72a838903df6cb2b5fc8a2d72519a4268dce405",
+    "build_export_command": "4c28c7f357cd10d2515b1654095eeba1a4fe8ae308e6c4391c8798b6c95384f5",
+    "output_name": "652787952be801b08fa0a2da403714842d16c6f641d5f55b872992e6d4a18671",
+    "target_size": "990afba67aea200b5f1dafda4301a8dad65584ec6e275e4e6169c6df5ec35a96",
+    "snap": "1e46c5e62ce87b6d9e0ba8560222dc2d49720e3420e2b4b5714faf21f8057961",
+    "build_scene_scan_command": "62e0a96ca780f975cbe3e064a971baf3c0c8176009f7a50d82ee44efb098f268",
+    "parse_scene_time": "2ef8c80abfb042493a2b169c2048e7f3564c10ee6d6aec1c02a24590c9bc6536",
+    "parse_progress_time": "794f70eaaaa18feb90e4fafe3df068d41b17750180e15000569ac63bae3bcefe",
+    "plan_autochop": "175fb7b6af79916e4bf21ee4ca1d40d797ac81abe8dbb1644b1381e1b00e520e",
+    "voice_output_name": "fc9274c038d72263d65dd87f429631bcc9ab17b4e98d522914ceff5427b4ce0a",
+    "probe_source": "1ed36550997ea659a41f7b03e130f7aaed2d87bc987db5f8086af749480eb1fc",
+    "_audio_export_worker": "ea8d17948d5f48e0a76381b7ecadab573a13f82e8d15a0a95038f4b9a3a6712f",
+    "_whisper_worker": "65f9185fbe196507a2a3c0c827ccb171fb5b3830124a8fe69a2bed1a60fd7945",
+    "_whisper_degenerate": "ebda0539f6bdb6d4dc40461562574692db3b7f5d2341dab564b1fa7fa36030f4",
+}
+
+# Checkpoint-to-LoRA inputs, from diff_to_lora_gui.py.
+CONVERT_FUNCTIONS = (
+    "_start",
+    "_work",
+)
+
+CONVERT_PINNED = {
+    "_start": "63ecde9c89a1152092ba6e1e5dfea599e9944ab92f87f9832874c8d5da3fbaba",
+    "_work": "80d3a056e6708133fa4771839da412fe865ed9fa808317622a0739291e0d949a",
 }
