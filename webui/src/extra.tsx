@@ -123,20 +123,60 @@ const STEPS = [
   ["1", "Start", "Choose the training image folder."],
   ["2", "Image Prep", "Resize, convert to PNG, or face-crop. Optional."],
   ["3", "Captions", "Write a trigger word or generate captions."],
-  ["4", "Samples", "Preview prompts. The full Samples tab is a later phase."],
+  ["4", "Samples", "Preview prompts, size, and how often they render."],
   ["5", "Training", "Pick a preset and start."],
 ];
+
+export function sampleContext(values: Record<string, unknown>): Record<string, unknown> {
+  const prompts = String(values.prompts ?? "");
+  const samples: Record<string, unknown> = {
+    enabled: values.enabled === undefined ? true : Boolean(values.enabled),
+    prompts: prompts.split(/\r?\n/),
+    every: String(values.every ?? ""),
+    width: String(values.width ?? ""),
+    height: String(values.height ?? ""),
+    steps: String(values.steps ?? ""),
+    cfg: String(values.cfg ?? ""),
+    negative: String(values.negative ?? ""),
+    seed: String(values.seed ?? ""),
+    at_first: Boolean(values.at_first),
+  };
+  if ("checkpoint" in values) {
+    samples.checkpoint = Boolean(values.checkpoint);
+    const cache = String(values.checkpoint_cache ?? "auto");
+    samples.checkpoint_cache = cache === "on" || cache === "off" ? cache : "auto";
+  }
+  const context: Record<string, unknown> = { samples };
+  for (const key of ["FAMILY_TURBO_STRENGTH", "FAMILY_TURBO_STEPS", "FAMILY_TURBO_PACE"]) {
+    if (key in values && String(values[key] ?? "").trim()) {
+      context[key] = String(values[key]).trim();
+    }
+  }
+  return context;
+}
+
+interface SampleForm {
+  fields: Array<Record<string, unknown>>;
+  wording: Record<string, string>;
+  gaps: string[];
+}
 
 export function Phase2({
   tab,
   imageFolder,
   setImageFolder,
   queueCurrent,
+  sampleForm,
+  sampleValues,
+  setSampleValues,
 }: {
   tab: string;
   imageFolder: string;
   setImageFolder: (path: string) => void;
-  queueCurrent: (samples: Record<string, unknown>) => Promise<string>;
+  queueCurrent: () => Promise<string>;
+  sampleForm: SampleForm | null;
+  sampleValues: Record<string, unknown>;
+  setSampleValues: (values: Record<string, unknown>) => void;
 }) {
   if (tab === "Start") {
     return <StartPanel imageFolder={imageFolder} setImageFolder={setImageFolder} />;
@@ -146,6 +186,18 @@ export function Phase2({
   }
   if (tab === "Image Prep") {
     return <PrepPanel folder={imageFolder} />;
+  }
+  if (tab === "Samples") {
+    return <SamplesPanel form={sampleForm} values={sampleValues} setValues={setSampleValues} />;
+  }
+  if (tab === "Profiler") {
+    return <ProfilerPanel />;
+  }
+  if (tab === "Extract") {
+    return <ExtractPanel />;
+  }
+  if (tab === "Metadata") {
+    return <MetadataPanel />;
   }
   if (tab === "Queue") {
     return <QueuePanel queueCurrent={queueCurrent} />;
@@ -472,13 +524,9 @@ function PrepPanel({ folder }: { folder: string }) {
   );
 }
 
-function QueuePanel({ queueCurrent }: { queueCurrent: (samples: Record<string, unknown>) => Promise<string> }) {
+function QueuePanel({ queueCurrent }: { queueCurrent: () => Promise<string> }) {
   const [items, setItems] = useState<Array<{ id: string; family: string; label: string }>>([]);
   const [error, setError] = useState("");
-  const [prompts, setPrompts] = useState("A high quality photo");
-  const [every, setEvery] = useState("");
-  const [width, setWidth] = useState("768");
-  const [height, setHeight] = useState("768");
 
   function reload() {
     fetch("/api/queue")
@@ -513,34 +561,13 @@ function QueuePanel({ queueCurrent }: { queueCurrent: (samples: Record<string, u
     void order(next);
   }
 
-  const samples = {
-    enabled: true,
-    prompts: prompts.split("\n"),
-    every,
-    width,
-    height,
-  };
-
   return (
     <main>
       <section>
         <h2>Training queue</h2>
-        <p className="help">One GPU job at a time. The next item starts when a training run finishes cleanly.</p>
-        <div className="field">
-          <label>
-            Sample prompts
-            <textarea value={prompts} onChange={(event) => setPrompts(event.target.value)} />
-          </label>
-        </div>
-        <div className="field">
-          <label>Every N epochs<input value={every} onChange={(event) => setEvery(event.target.value)} /></label>
-        </div>
+        <p className="help">One GPU job at a time. The next item starts when a training run finishes cleanly. Sample settings come from the Samples tab.</p>
         <div className="controls">
-          <label>Width<input value={width} onChange={(event) => setWidth(event.target.value)} /></label>
-          <label>Height<input value={height} onChange={(event) => setHeight(event.target.value)} /></label>
-        </div>
-        <div className="controls">
-          <button type="button" onClick={() => void queueCurrent(samples).then((message) => { setError(message); reload(); })}>Queue current training form</button>
+          <button type="button" onClick={() => void queueCurrent().then((message) => { setError(message); reload(); })}>Queue current training form</button>
           <button type="button" onClick={() => void fetch("/api/queue/import", { method: "POST" }).then(async (response) => {
             if (!response.ok) {
               setError(await readError(response));
@@ -602,7 +629,7 @@ function HistoryPanel() {
           return (
             <div key={id} className="controls">
               <button type="button" className={id === open ? "chip on" : "chip"} onClick={() => setOpen(id)}>
-                {String(job.family)} {String(job.status)}{duration}{loss}
+                {String(job.kind || "train")} · {String(job.family)} {String(job.status)}{duration}{loss}
               </button>
               <button type="button" onClick={() => void fetch(`/api/jobs/${id}`, { method: "DELETE" }).then(() => {
                 setJobs((current) => current.filter((item) => item.id !== id));
@@ -707,6 +734,373 @@ function PrefsPanel() {
           </div>
         ))}
         <button type="button" className="start" onClick={() => void save()}>Save preferences</button>
+        {error ? <p className="error">{error}</p> : null}
+      </section>
+    </main>
+  );
+}
+
+function fieldOff(field: Record<string, unknown>, values: Record<string, unknown>): boolean {
+  if (field.disabled) {
+    return true;
+  }
+  const gate = String(field.disabled_when || "");
+  return Boolean(gate && values[gate]);
+}
+
+function SamplesPanel({
+  form,
+  values,
+  setValues,
+}: {
+  form: SampleForm | null;
+  values: Record<string, unknown>;
+  setValues: (values: Record<string, unknown>) => void;
+}) {
+  if (!form) {
+    return <main><p className="status">Loading.</p></main>;
+  }
+  return (
+    <main>
+      <section>
+        <h2>Samples</h2>
+        {form.wording.banner ? <p className="help">{form.wording.banner}</p> : null}
+        {form.wording.advanced ? <p className="help">{form.wording.advanced}</p> : null}
+        {form.fields.map((field) => {
+          const key = String(field.key);
+          const kind = String(field.kind);
+          const off = fieldOff(field, values);
+          return (
+            <div key={key} className="field">
+              {kind === "bool" ? (
+                <label>
+                  <input type="checkbox" checked={Boolean(values[key])} disabled={off} onChange={(event) => setValues({ ...values, [key]: event.target.checked })} />
+                  {String(field.label)}
+                </label>
+              ) : (
+                <label>
+                  {String(field.label)}
+                  {kind === "lines" ? (
+                    <textarea value={String(values[key] ?? "")} disabled={off} onChange={(event) => setValues({ ...values, [key]: event.target.value })} />
+                  ) : kind === "choice" && Array.isArray(field.choices) ? (
+                    <select value={String(values[key] ?? "")} disabled={off} onChange={(event) => setValues({ ...values, [key]: event.target.value })}>
+                      {field.choices.map((choice) => <option key={String(choice)} value={String(choice)}>{String(choice)}</option>)}
+                    </select>
+                  ) : (
+                    <input value={String(values[key] ?? "")} disabled={off} onChange={(event) => setValues({ ...values, [key]: event.target.value })} />
+                  )}
+                </label>
+              )}
+              {field.help ? <p className="help">{String(field.help)}</p> : null}
+            </div>
+          );
+        })}
+        {form.gaps.length ? <p className="help">Desktop only for now: {form.gaps.join(", ")}.</p> : null}
+      </section>
+    </main>
+  );
+}
+
+function ProfilerPanel() {
+  const [form, setForm] = useState<Record<string, unknown> | null>(null);
+  const [family, setFamily] = useState("");
+  const [lora, setLora] = useState("");
+  const [mode, setMode] = useState("weights");
+  const [reports, setReports] = useState<Array<{ name: string; path: string; url: string }>>([]);
+  const [error, setError] = useState("");
+
+  function load(next: string) {
+    fetch(`/api/profile/form?family=${encodeURIComponent(next)}`)
+      .then((response) => response.json())
+      .then((body) => {
+        setForm(body);
+        setFamily(String(body.family || ""));
+        setMode(String(body.defaults?.mode || "weights"));
+      })
+      .catch(() => setError("profiler form failed"));
+  }
+
+  useEffect(() => { load(""); }, []);
+
+  useEffect(() => {
+    let stop = false;
+    async function tick() {
+      const response = await fetch("/api/profiles");
+      if (response.ok && !stop) {
+        const body = await response.json();
+        setReports(body.reports || []);
+      }
+      if (!stop) {
+        window.setTimeout(tick, 2000);
+      }
+    }
+    tick();
+    return () => { stop = true; };
+  }, []);
+
+  async function run() {
+    setError("");
+    const response = await fetch("/api/profile/jobs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ family, lora, mode }),
+    });
+    if (!response.ok) {
+      setError(await readError(response));
+    }
+  }
+
+  const families = (form?.families as Array<{ key: string; name: string }> | undefined) || [];
+  const modes = (form?.modes as Array<{ id: string; label: string }> | undefined) || [];
+  return (
+    <main>
+      <section>
+        <h2>Profiler</h2>
+        <p className="help">Weights only runs here. Quick and Thorough need the engine host.</p>
+        <div className="field">
+          <label>
+            Family
+            <select value={family} onChange={(event) => { setFamily(event.target.value); load(event.target.value); }}>
+              {families.map((item) => <option key={item.key} value={item.key}>{item.name}</option>)}
+            </select>
+          </label>
+        </div>
+        <div className="field">
+          <label>
+            LoRA file
+            <input value={lora} onChange={(event) => setLora(event.target.value)} />
+          </label>
+          <BrowseButton select="file" onPick={setLora} />
+        </div>
+        <div className="field">
+          <label>
+            What to measure
+            <select value={mode} onChange={(event) => setMode(event.target.value)}>
+              {modes.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+            </select>
+          </label>
+        </div>
+        <button type="button" className="start" onClick={() => void run()}>Profile LoRA</button>
+        {error ? <p className="error">{error}</p> : null}
+      </section>
+      <section>
+        <h2>Reports</h2>
+        {reports.map((report) => (
+          <p key={report.path}><a href={report.url}>{report.name}</a></p>
+        ))}
+        {reports.length === 0 ? <p className="status">No reports yet.</p> : null}
+      </section>
+    </main>
+  );
+}
+
+function ExtractPanel() {
+  const [form, setForm] = useState<Record<string, unknown> | null>(null);
+  const [family, setFamily] = useState("");
+  const [source, setSource] = useState("");
+  const [outputName, setOutputName] = useState("");
+  const [preset, setPreset] = useState("");
+  const [rank, setRank] = useState("4");
+  const [blocks, setBlocks] = useState<Record<string, boolean>>({});
+  const [error, setError] = useState("");
+
+  function load(next: string) {
+    fetch(`/api/extract/form?family=${encodeURIComponent(next)}`)
+      .then((response) => response.json())
+      .then((body) => {
+        setForm(body);
+        setFamily(String(body.family || ""));
+        setRank(String(body.rank || "4"));
+        const names = (body.presets as string[] | undefined) || [];
+        setPreset(names[0] || "");
+        setBlocks({});
+      })
+      .catch(() => setError("extract form failed"));
+  }
+
+  useEffect(() => { load(""); }, []);
+
+  function suggest(nextSource: string, nextPreset: string, nextRank: string) {
+    const base = nextSource.split(/[/\\]/).pop()?.replace(/\.safetensors$/i, "") || "";
+    if (!base) {
+      return;
+    }
+    const slug = nextPreset.toLowerCase().replaceAll("+", "_").replaceAll(" ", "_");
+    setOutputName(`${base}_${slug}_r${nextRank}.safetensors`);
+  }
+
+  async function run() {
+    setError("");
+    const chosen = Object.entries(blocks).filter(([, on]) => on).map(([id]) => id);
+    const response = await fetch("/api/extract/jobs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ family, source, output_name: outputName, preset, blocks: chosen, rank }),
+    });
+    if (!response.ok) {
+      setError(await readError(response));
+    }
+  }
+
+  const families = (form?.families as Array<{ key: string; name: string }> | undefined) || [];
+  const presets = (form?.presets as string[] | undefined) || [];
+  const ranks = (form?.ranks as string[] | undefined) || [];
+  const groups = (form?.groups as Array<{ label: string; blocks: Array<{ id: string; label: string }> }> | undefined) || [];
+  return (
+    <main>
+      <section>
+        <h2>Extract</h2>
+        <p className="help">{String(form?.time_note || "")}</p>
+        <div className="field">
+          <label>
+            Family
+            <select value={family} onChange={(event) => { setFamily(event.target.value); load(event.target.value); }}>
+              {families.map((item) => <option key={item.key} value={item.key}>{item.name}</option>)}
+            </select>
+          </label>
+        </div>
+        <div className="field">
+          <label>
+            Source LoRA
+            <input value={source} onChange={(event) => setSource(event.target.value)} />
+          </label>
+          <BrowseButton select="file" onPick={(path) => { setSource(path); suggest(path, preset, rank); }} />
+        </div>
+        <div className="field">
+          <label>
+            Output name
+            <input value={outputName} onChange={(event) => setOutputName(event.target.value)} />
+          </label>
+        </div>
+        {presets.length ? (
+          <div className="field">
+            <label>
+              Preset
+              <select value={preset} onChange={(event) => { setPreset(event.target.value); suggest(source, event.target.value, rank); }}>
+                {presets.map((name) => <option key={name} value={name}>{name}</option>)}
+              </select>
+            </label>
+          </div>
+        ) : null}
+        {preset === "Custom" ? groups.map((group) => (
+          <div key={group.label}>
+            <p className="status">{group.label}</p>
+            {group.blocks.map((block) => (
+              <label key={block.id}>
+                <input type="checkbox" checked={Boolean(blocks[block.id])} onChange={(event) => setBlocks({ ...blocks, [block.id]: event.target.checked })} />
+                {block.label}
+              </label>
+            ))}
+          </div>
+        )) : null}
+        <div className="field">
+          <label>
+            Target rank
+            <select value={rank} onChange={(event) => { setRank(event.target.value); suggest(source, preset, event.target.value); }}>
+              {ranks.map((item) => <option key={item} value={item}>{item}</option>)}
+            </select>
+          </label>
+        </div>
+        <button type="button" className="start" onClick={() => void run()}>Extract LoRA</button>
+        {error ? <p className="error">{error}</p> : null}
+      </section>
+    </main>
+  );
+}
+
+function MetadataPanel() {
+  const [path, setPath] = useState("");
+  const [fields, setFields] = useState<Record<string, string>>({
+    title: "", author: "", license: "", tags: "", trigger: "", usage_hint: "", description: "", thumbnail: "",
+  });
+  const [extra, setExtra] = useState<Record<string, string>>({});
+  const [error, setError] = useState("");
+  const [status, setStatus] = useState("");
+
+  function take(body: Record<string, unknown>) {
+    setPath(String(body.path || path));
+    setFields({
+      title: String(body.title || ""),
+      author: String(body.author || ""),
+      license: String(body.license || ""),
+      tags: String(body.tags || ""),
+      trigger: String(body.trigger || ""),
+      usage_hint: String(body.usage_hint || ""),
+      description: String(body.description || ""),
+      thumbnail: String(body.thumbnail || ""),
+    });
+    setExtra((body.extra as Record<string, string>) || {});
+  }
+
+  async function load(next = path) {
+    setError("");
+    const response = await fetch(`/api/metadata?path=${encodeURIComponent(next)}`);
+    if (!response.ok) {
+      setError(await readError(response));
+      return;
+    }
+    take(await response.json());
+    setStatus("Loaded.");
+  }
+
+  async function save() {
+    setError("");
+    const response = await fetch("/api/metadata", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path, ...fields, extra }),
+    });
+    if (!response.ok) {
+      setError(await readError(response));
+      return;
+    }
+    take(await response.json());
+    setStatus("Saved.");
+  }
+
+  const rows: Array<[string, string]> = [
+    ["title", "Title"],
+    ["author", "Author"],
+    ["license", "License"],
+    ["tags", "Tags"],
+    ["trigger", "Trigger phrase"],
+    ["usage_hint", "Usage hint"],
+  ];
+  return (
+    <main>
+      <section>
+        <h2>Metadata</h2>
+        <div className="field">
+          <label>
+            File
+            <input value={path} onChange={(event) => setPath(event.target.value)} />
+          </label>
+          <BrowseButton select="file" onPick={(picked) => { setPath(picked); void load(picked); }} />
+          <button type="button" onClick={() => void load()}>Load</button>
+        </div>
+        {rows.map(([key, label]) => (
+          <div key={key} className="field">
+            <label>
+              {label}
+              <input value={fields[key] || ""} onChange={(event) => setFields({ ...fields, [key]: event.target.value })} />
+            </label>
+          </div>
+        ))}
+        <div className="field">
+          <label>
+            Description
+            <textarea value={fields.description || ""} onChange={(event) => setFields({ ...fields, description: event.target.value })} />
+          </label>
+        </div>
+        <div className="field">
+          <p className="status">Thumbnail</p>
+          {fields.thumbnail.startsWith("data:image") ? <img src={fields.thumbnail} alt="" /> : <p className="help">(no thumbnail)</p>}
+          <BrowseButton select="file" onPick={(picked) => setFields({ ...fields, thumbnail: picked })} />
+          <button type="button" onClick={() => setFields({ ...fields, thumbnail: "" })}>Clear</button>
+        </div>
+        <p className="help">Other keys in the file are kept.</p>
+        <button type="button" className="start" onClick={() => void save()}>Save</button>
+        {status ? <p className="status">{status}</p> : null}
         {error ? <p className="error">{error}</p> : null}
       </section>
     </main>

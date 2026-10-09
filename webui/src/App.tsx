@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { components } from "./api";
-import { BrowseButton, browserNotify, NotifyButton, Phase2 } from "./extra";
+import { BrowseButton, browserNotify, NotifyButton, Phase2, sampleContext } from "./extra";
 import { fieldVisible } from "./visibility";
 
 const FAMILIES: { id: string; name: string }[] = [
@@ -118,7 +118,9 @@ export function App() {
   const [width, setWidth] = useState("768");
   const [height, setHeight] = useState("768");
   const [tab, setTab] = useState("Training");
-  const tabs = ["Training", "Start", "Captions", "Image Prep", "Queue", "History", "Preferences"];
+  const [sampleForm, setSampleForm] = useState<{ fields: Array<Record<string, unknown>>; wording: Record<string, string>; gaps: string[] } | null>(null);
+  const [sampleValues, setSampleValues] = useState<Record<string, unknown>>({});
+  const tabs = ["Training", "Start", "Captions", "Image Prep", "Samples", "Queue", "History", "Profiler", "Extract", "Metadata", "Preferences"];
 
   const fields = (form?.fields ?? []).map(asField);
   const models = (form?.models ?? []).map(asModel);
@@ -153,6 +155,27 @@ export function App() {
           setError(reason instanceof Error ? reason.message : "form request failed");
         }
       });
+    return () => {
+      cancelled = true;
+    };
+  }, [family]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/samples/form?family=${encodeURIComponent(family)}`)
+      .then((response) => response.json())
+      .then((body) => {
+        if (cancelled) {
+          return;
+        }
+        const next: Record<string, unknown> = {};
+        for (const field of body.fields || []) {
+          next[String(field.key)] = field.default;
+        }
+        setSampleForm({ fields: body.fields || [], wording: body.wording || {}, gaps: body.gaps || [] });
+        setSampleValues(next);
+      })
+      .catch(() => undefined);
     return () => {
       cancelled = true;
     };
@@ -268,7 +291,14 @@ export function App() {
     });
   }
 
-  async function queueCurrent(samples: Record<string, unknown>): Promise<string> {
+  function samplePayload(): Record<string, unknown> {
+    if (!sampleForm) {
+      return { samples: { enabled: true, prompts: ["A high quality photo"] } };
+    }
+    return sampleContext(sampleValues);
+  }
+
+  async function queueCurrent(): Promise<string> {
     const hasFolder = fields.some((field) => field.key === "image_folder");
     const folder = String((hasFolder ? values.image_folder : "") || imageFolder || "");
     const response = await fetch("/api/queue", {
@@ -277,7 +307,7 @@ export function App() {
       body: JSON.stringify({
         family,
         values: hasFolder ? { ...values, image_folder: folder } : values,
-        context: { models: modelPaths, image_folder: folder, samples },
+        context: { models: modelPaths, image_folder: folder, ...samplePayload() },
       }),
     });
     if (!response.ok) {
@@ -302,6 +332,7 @@ export function App() {
         context: {
           models: modelPaths,
           image_folder: folder,
+          ...samplePayload(),
         },
       }),
     });
@@ -392,7 +423,7 @@ export function App() {
         </div>
       ) : null}
       {tab !== "Training" ? (
-        <Phase2 tab={tab} imageFolder={imageFolder} setImageFolder={rememberFolder} queueCurrent={queueCurrent} />
+        <Phase2 tab={tab} imageFolder={imageFolder} setImageFolder={rememberFolder} queueCurrent={queueCurrent} sampleForm={sampleForm} sampleValues={sampleValues} setSampleValues={setSampleValues} />
       ) : (
       <main>
         <label>
@@ -544,7 +575,7 @@ export function App() {
             ) : null}
             <div className="controls">
               <button type="button" className="start" onClick={() => start([])}>Start training</button>
-              <button type="button" onClick={() => void queueCurrent({ enabled: true, prompts: ["A high quality photo"] })}>Add to queue</button>
+              <button type="button" onClick={() => void queueCurrent().then((message) => { if (message) setProblems([message]); })}>Add to queue</button>
             </div>
           </>
         ) : null}

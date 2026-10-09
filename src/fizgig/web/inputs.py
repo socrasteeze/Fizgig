@@ -124,7 +124,11 @@ def _extra_folders(desc, values):
 def _samples(context):
     samples = dict(context.get("samples") or {})
     samples.setdefault("enabled", True)
-    samples.setdefault("prompts", ["A high quality photo"])
+    prompts = samples.get("prompts")
+    if isinstance(prompts, str):
+        samples["prompts"] = prompts.splitlines()
+    elif prompts is None:
+        samples["prompts"] = ["A high quality photo"]
     return samples
 
 
@@ -133,6 +137,12 @@ def build(desc, values, context=None):
     context = context or {}
     values = dict(values)
     edit, slider, finetune = _kind(desc, values)
+    samples = _samples(context)
+    if desc.train_preview_checkpoint and samples.get("checkpoint") and "int8" not in samples:
+        from fizgig.web.prefs import roots_from_prefs
+
+        raw = roots_from_prefs().get("inference_int8")
+        samples["int8"] = str(raw or "").strip() in {"1", "True", "true"}
     source = _SLIDER_SOURCE.get(_text(values.get("FAMILY_SLIDER_SOURCE", "pairs")), "pairs")
     compile_blocks = _text(values.get("COMPILE_BLOCKS", "Auto")) or "Auto"
     if compile_blocks.lower() in {"auto", "on", "off"}:
@@ -166,7 +176,7 @@ def build(desc, values, context=None):
         "captioner": _text(context.get("captioner", "")),
         "caption_trigger": _text(context.get("caption_trigger", "")),
         "caption_overrides": context.get("caption_overrides") or {},
-        "samples": _samples(context),
+        "samples": samples,
         "samples_dir": samples_dir,
         "edit_caption": _text(values.get("FAMILY_EDIT_CAPTION", "")),
         "FAMILY_OPTIONS": _family_options(desc, values, context.get("option_values")),

@@ -320,6 +320,23 @@ def upload(dest: str, files, archive, overwrite: bool) -> dict:
     return {"written": written, "folder": str(folder)}
 
 
+def resolve_file(text: str, suffix: str, roots: list[Path] | None = None) -> Path:
+    """An existing file inside ``roots`` (all roots when omitted).
+
+    ``suffix`` is required when it is not empty (``.safetensors``, ``.html``).
+    """
+    raw = (text or "").strip()
+    if not raw or _dotdot(raw):
+        raise JobError(403, {"detail": "path is outside the configured roots"})
+    path = Path(raw)
+    if suffix and path.suffix.lower() != suffix.lower():
+        raise JobError(422, {"problems": [f"not a {suffix} file"]})
+    roots = all_roots() if roots is None else roots
+    if not path.is_file() or _has_link(path, roots) or not _under(path, roots):
+        raise JobError(403, {"detail": "path is outside the configured roots"})
+    return path.resolve()
+
+
 def lora_file(text: str) -> Path:
     raw = (text or "").strip()
     if not raw or _dotdot(raw):

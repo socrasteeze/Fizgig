@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -635,6 +635,69 @@ def prep_form():
 def prep_job(body: PrepIn):
     from fizgig.web.image_prep import launch
     return _call(launch, body.model_dump())
+
+
+@app.get("/api/samples/form")
+def samples_form(family: str):
+    from fizgig.families.registry import get as get_family
+    from fizgig.web.samples import form as samples_form_for
+
+    desc = get_family(family)
+    if desc is None:
+        raise HTTPException(status_code=404, detail="unknown family")
+    return samples_form_for(desc)
+
+
+@app.get("/api/profile/form")
+def profile_form(family: str = ""):
+    from fizgig.web.profile import form as profile_form_for
+    return _call(profile_form_for, family)
+
+
+@app.post("/api/profile/jobs", response_model=JobOut, responses={409: {"model": ConflictOut}, 422: {"model": ProblemsOut}})
+def profile_job(body: dict = Body(...)):
+    from fizgig.web.profile import launch
+    return _call(launch, body)
+
+
+@app.get("/api/profiles")
+def profile_reports():
+    from fizgig.web.profile import reports
+    return reports()
+
+
+@app.get("/api/profiles/file")
+def profile_report(path: str):
+    from fizgig.web.profile import report_file
+
+    found = _call(report_file, path)
+    if isinstance(found, JSONResponse):
+        return found
+    return FileResponse(found, media_type="text/html")
+
+
+@app.get("/api/extract/form")
+def extract_form(family: str = ""):
+    from fizgig.web.extract import form as extract_form_for
+    return _call(extract_form_for, family)
+
+
+@app.post("/api/extract/jobs", response_model=JobOut, responses={409: {"model": ConflictOut}, 422: {"model": ProblemsOut}})
+def extract_job(body: dict = Body(...)):
+    from fizgig.web.extract import launch
+    return _call(launch, body)
+
+
+@app.get("/api/metadata")
+def metadata_read(path: str):
+    from fizgig.web.metadata import read
+    return _call(read, path)
+
+
+@app.put("/api/metadata")
+def metadata_write(body: dict = Body(...)):
+    from fizgig.web.metadata import save
+    return _call(save, body)
 
 
 _dist = _REPO / "webui" / "dist"

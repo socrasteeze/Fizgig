@@ -54,6 +54,12 @@ def run_folder(folder: Path) -> None:
             _run_caption(folder, job)
         elif kind == "prep":
             _run_prep(folder, job)
+        elif kind == "profile":
+            from fizgig.web.profile import command
+            _run_tool(folder, job, command(job))
+        elif kind == "extract":
+            from fizgig.web.extract import command
+            _run_tool(folder, job, command(job))
         else:
             _run(folder, job)
     finally:
@@ -242,6 +248,57 @@ def _run_caption(folder: Path, job: dict) -> None:
     if (folder / "STOP").is_file() or (folder / "caption_stop").is_file():
         _finish(folder, job, "stopped", code)
     elif saw_done and code == 0:
+        _finish(folder, job, "done", 0)
+    else:
+        _finish(folder, job, "failed", code)
+
+
+def _tool_step(line: str):
+    text = line.strip()
+    if text.startswith("PROGRESS:"):
+        parts = text.split()
+        if len(parts) >= 3:
+            try:
+                return int(parts[1]), int(parts[2])
+            except ValueError:
+                return None
+    import re
+    matched = re.search(r"(\d+)\s*/\s*(\d+)\s*$", text)
+    if matched:
+        return int(matched.group(1)), int(matched.group(2))
+    return None
+
+
+def _run_tool(folder: Path, job: dict, cmd: list[str]) -> None:
+    """Run a profiler or extract command. Stdout is the job log."""
+    if not _begin(folder, job):
+        return
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    src = str(_REPO / "src")
+    previous = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = src + (os.pathsep + previous if previous else "")
+    log_path = folder / "log.txt"
+    proc = _popen(cmd, env, subprocess.DEVNULL)
+    assert proc.stdout is not None
+    with log_path.open("a", encoding="utf-8", errors="replace") as log:
+        for line in proc.stdout:
+            log.write(line if line.endswith("\n") else line + "\n")
+            log.flush()
+            step = _tool_step(line)
+            if step is not None:
+                job["step"], job["total"] = step
+                if not save(folder, job):
+                    proc.kill()
+                    break
+            if (folder / "STOP").is_file():
+                proc.kill()
+                break
+    code = proc.wait()
+    if (folder / "STOP").is_file():
+        _finish(folder, job, "stopped", code)
+    elif code == 0:
         _finish(folder, job, "done", 0)
     else:
         _finish(folder, job, "failed", code)

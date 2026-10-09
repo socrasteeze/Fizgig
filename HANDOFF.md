@@ -1,39 +1,40 @@
 # HANDOFF
 
-**Updated:** 2026-10-09 · **Branch:** master · **HEAD:** f635346 · **Tree:** dirty (Phase 2 uncommitted)
+**Updated:** 2026-10-09 · **Branch:** master · **HEAD:** 753b289 · **Tree:** dirty (Phase 3a uncommitted)
 
 ## State
-Phase 2 is uncommitted on f635346. The page can queue a training run, browse and upload a dataset, edit prefs, caption, and prep images. A stand-in trainer, a fake caption server, and a stubbed face detector cover the checks. A real GPU run and phone access through `tailscale serve` are still manual (`docs/WEBUI_PHASE2.md`).
-The next step is Phase 3a: Profiler, Extract, Metadata, Samples settings.
+Phase 3a is uncommitted on 753b289. The page has Samples, a weights Profiler, Extract, and Metadata. Checks use fake scripts. A real profile, extract, and metadata edit are still manual (`docs/WEBUI_PHASE3.md`).
+The next step is Phase 3b: the engine host and the interactive workbench.
 
 ## Done this session
-- Queue, history, prefs, folder browser, upload, Start folder, captions, and image prep. API in `docs/WEBUI_PHASE2.md`.
-- New modules under `src/fizgig/web/`: `queue.py`, `prefs.py`, `fs.py`, `start.py`, `captions.py`, `image_prep.py`. Routes in `app.py`. Caption and prep run through the existing runner and GPU lock.
-- Page tabs in `webui/src/extra.tsx`, wired from `webui/src/App.tsx`. In-page notices stay. Browser notifications ask only from a button.
-- `python-multipart==0.0.20` in `requirements-web.txt` (upload). No other new dependency.
-- Default suite: 34 tests, 33 passed, 1 skipped. Three runs, same counts (77.785s, 77.641s, 79.969s). Golden: 1 passed. `npm --prefix webui run build` passed. `checks\check_appearance.py` passed.
+- Samples form, wired into job create and the queue. Golden also compares one preset per family with non-default samples.
+- Profiler and Extract jobs on the detached runner, through `profile_lora.py` and `extract_lora.py`. Reports are listed from `profiles_dir`.
+- Metadata read/save inside the roots: atomic replace, a `.bak`, tensor bytes unchanged.
+- API in `docs/WEBUI_PHASE3.md`. No new dependency.
+- Default suite: 41 tests, 39 passed, 2 skipped. Three runs (143.985s, 145.006s, 144.241s). Golden: 2 passed (8.458s). `npm --prefix webui run build` passed. `checks\check_appearance.py` passed.
 
 ## Open
-1. Phase 3a: Profiler, Extract, Metadata, Samples settings.
-2. Review the dialogs (Queue, Gallery, Browse, preset windows) at 100%, 125%, and 150%; none were opened.
-3. At 150% the fixed 1580x1124 window truncates tab labels in both appearances. This predates the appearance work (`lora_trainer_gui.py:1327`).
-4. A real GPU run from the page, phone access through `tailscale serve`, a real caption model, and a real face detector.
+1. Phase 3b: engine host, then Repair, RefMod, Explorer, and Royale.
+2. Quick and Thorough profiling, and Open in Repair Studio, wait on that host.
+3. Review the dialogs (Queue, Gallery, Browse, preset windows) at 100%, 125%, and 150%; none were opened.
+4. At 150% the fixed 1580x1124 window truncates tab labels in both appearances. This predates the appearance work (`lora_trainer_gui.py:1327`).
+5. A real GPU run from the page, phone access through `tailscale serve`, a real caption model, a real face detector, a real weights profile, a real extract, and a metadata edit on a real file.
 
 ## Decisions
-- Fork-only, nothing offered upstream (user, 2026-10-08). New files only, no imports of `lora_trainer_gui.py`, GUI logic mirrored and pinned by a hash test rather than moved.
-- The queue advances only after a training job this process watched finishes cleanly. Failure, stop, and pause hold it. A server restart keeps the list and does not start it.
-- Desktop `presets/training_queue.json` is imported read-only. The mapping follows `_apply_queue_item`.
-- Prefs secrets (`runpod_api_key`, and keys ending in `_key`, `_token`, or `_secret`) are never sent and never overwritten by a web save.
-- Caption and prep are jobs on the same lock as training. `FIZGIG_WEB_FAKE_CAPTION` and `FIZGIG_WEB_FAKE_FACE=1` stand in for the checks. Translation, Whisper, the Look filter, and Gizmo stay on the desktop.
-- No login (user): the server listens on 127.0.0.1 only. Tailscale Serve is the only way in.
-- Low disk and a resume already at max epochs are warnings. The page sends the codes back in `confirm` to start anyway.
+- Fork-only, nothing offered upstream (user, 2026-10-08). New files only, no imports of `lora_trainer_gui.py`. GUI logic is mirrored and pinned.
+- Profiler runs `profile_lora.py` (weights only). Quick and Thorough need the workbench engine, so they return 422. The form still lists them and defaults to weights.
+- Extract runs `extract_lora.py`. Output name, preset or Custom blocks, rank, and the `_2` collision suffix follow the desktop. The file lands in the LoRA output folder.
+- Metadata copies the tensor bytes and rewrites the header. It also writes `<file>.bak`, which the desktop save does not.
+- Samples use the dict `launch.plan` already accepts. When Klein's checkpoint tick is on and `int8` is omitted, it is filled from the `inference_int8` preference.
+- The queue advances only after a training job this process watched finishes cleanly. Profile and extract do not advance it.
+- Preference values for API access are never sent and never overwritten by a web save.
+- No login (user): the server listens on loopback only. Tailscale Serve is the only way in.
 
 ## Traps
-- `origin` is upstream: fetch only, push disabled. Push only to fork, on master, when asked, via the clean workflow. `AGENTS.md`, the agent notes file, and `.git/hooks/pre-push` exist only in this checkout.
-- The golden test fills the edit Originals folder and the slider -1 end folder before it compares commands. Do not change `launch.py` or the GUI to hide a difference (`docs/WEBUI_PHASE1.md`).
+- `origin` is upstream: fetch only, push disabled. Push only to fork, on master, when asked, via the clean workflow. This checkout's venv, prefs, and output LoRAs are real. Tests use `FIZGIG_NO_PERSIST` and an isolated prefs file. Don't run `update_fizgig.bat`.
+- Do not import `families/train.py` (that import loads torch). The Extract form calls `load_driver()` for the block map, which imports that family's driver and does not load a model.
+- The golden test fills the edit Originals folder and the slider -1 end folder before it compares commands. Do not change `launch.py` or the GUI to hide a difference.
 - Never post on upstream issues or PRs, and never open one. If a sync brings in `src/fizgig/web` (#165 is open), stop and ask the user whether to switch to it.
-- This checkout's venv, prefs and output LoRAs are real. Test launches use `FIZGIG_NO_PERSIST` and an isolated prefs file. `--launch` may create a CUDA context. Don't run `update_fizgig.bat`.
-- Do not import `families/train.py` from the web server (that import loads torch). The Host check rejects a test client's default host, so tests use 127.0.0.1. `FIZGIG_WEB_FAKE_TRAINER` replaces plan stages after `plan()` succeeds. Do not set it in a real launch.
 - `plan()` does not point `--dit` at a fine-tune checkpoint. A fine-tune resume from the page is not the desktop's continuation.
 - Deleting a job record removes only the job folder. It must not delete the output directory or the dataset.
 

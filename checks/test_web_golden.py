@@ -225,7 +225,24 @@ class WebGoldenTests(unittest.TestCase):
             return "FAMILY_SLIDER_DIR", self._slider_minus
         return None
 
-    def _compare(self, desc, name, preset):
+    def _set_nondefault_samples(self):
+        """Prompts, resolution, frequency, and seed away from the family's defaults."""
+        gui = self.gui
+        box = gui.sample_prompt_text
+        box.delete("1.0", "end")
+        box.insert("1.0", "a red chair in an empty room\na blue cup on a table")
+        gui.sample_enabled_var.set(True)
+        gui.sample_width_var.set("1280")
+        gui.sample_height_var.set("640")
+        gui.sample_every_n_epochs_var.set("3")
+        gui.sample_seed_var.set("4242")
+        gui.sample_at_first_var.set(False)
+        gui.sample_steps_var.set("33")
+        gui.sample_cfg_scale_var.set("2.5")
+        if getattr(gui, "sample_negative_var", None) is not None:
+            gui.sample_negative_var.set("blurry, watermark")
+
+    def _compare(self, desc, name, preset, override_samples=False):
         from fizgig.families import launch
         from fizgig.web.form_spec import gui_preset, web_values
         from fizgig.web.inputs import build
@@ -256,6 +273,8 @@ class WebGoldenTests(unittest.TestCase):
         gui.settings["LORA_OUTPUT_DIR"] = str(output)
         gui._generic_samples_ui(desc)
         self._sync_settings(desc)
+        if override_samples:
+            self._set_nondefault_samples()
         if "FAMILY_TURBO_STRENGTH" in gui.entries:
             gui.settings["FAMILY_TURBO_STRENGTH"] = gui.entries["FAMILY_TURBO_STRENGTH"].get()
 
@@ -339,6 +358,19 @@ class WebGoldenTests(unittest.TestCase):
                 diff = self._compare(desc, name, preset)
                 if diff:
                     mismatches.append(diff)
+        self.assertFalse(mismatches, "\n\n".join(mismatches))
+
+    def test_preset_with_sample_overrides_matches_desktop(self):
+        from fizgig.families.registry import FAMILIES
+
+        mismatches = []
+        for desc in FAMILIES.values():
+            if not desc.presets:
+                continue
+            name, preset = desc.presets[0]
+            diff = self._compare(desc, name + " samples", preset, override_samples=True)
+            if diff:
+                mismatches.append(diff)
         self.assertFalse(mismatches, "\n\n".join(mismatches))
 
 
