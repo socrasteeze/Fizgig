@@ -126,6 +126,53 @@ BORDER_COLOR = COLORS["border"]
 ACTIVE_ENTRY_BG = "white"  # Background color for active entry field
 ACTIVE_ENTRY_FG = "black"  # Text color for active entry field
 
+# Saved appearance ids. Empty or unknown resolves to the current dark clam look.
+# compact-clam is the same palette with tighter shared ttk padding.
+APPEARANCE_DARK_CLAM = "dark-clam"
+APPEARANCE_COMPACT_CLAM = "compact-clam"
+APPEARANCE_CHOICES = (
+    (APPEARANCE_DARK_CLAM, "Dark (current)"),
+    (APPEARANCE_COMPACT_CLAM, "Compact"),
+)
+# Padding the 13 main tabs inherit through ttk. Button and tab padding on
+# dark-clam are the values setup_styles already used; the other entries are the
+# spacing pass (controls that previously had none).
+APPEARANCE_SPACING = {
+    APPEARANCE_DARK_CLAM: {
+        "button": (16, 8),
+        "tab": (12, 6),
+        "tabmargin": (2, 4, 2, 0),
+        "check": (8, 4),
+        "entry": (6, 4),
+        "labelframe": (12, 8),
+        "scrollbar": 12,
+        "rowheight": 24,
+    },
+    APPEARANCE_COMPACT_CLAM: {
+        "button": (8, 3),
+        "tab": (8, 3),
+        "tabmargin": (0, 1, 0, 0),
+        "check": (2, 1),
+        "entry": (2, 1),
+        "labelframe": (4, 2),
+        "scrollbar": 8,
+        "rowheight": 20,
+    },
+}
+
+
+def resolve_appearance(stored) -> str:
+    """Stored preference in, appearance id out. Missing and unknown both mean dark-clam."""
+    value = str(stored if stored is not None else "").strip()
+    if value in APPEARANCE_SPACING:
+        return value
+    return APPEARANCE_DARK_CLAM
+
+
+def appearance_spacing(stored) -> dict:
+    """Spacing tuple table for the resolved appearance."""
+    return APPEARANCE_SPACING[resolve_appearance(stored)]
+
 
 class _GUIWriter:
     """Redirect stdout/stderr to the GUI log buffer when running under pythonw."""
@@ -717,8 +764,20 @@ CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
 # Directory for output LoRAs
 OUTPUT_LORAS_DIR = os.path.join(os.path.dirname(__file__), "output_loras")
 
+def _configured_path(env_name, default):
+    """Honour an isolated path from the environment, otherwise the repo default.
+
+    A launch check sets FIZGIG_PREFS_FILE / FIZGIG_LAST_USED_FILE so it can read
+    a temporary preference file without touching the ones in this checkout.
+    """
+    raw = os.environ.get(env_name, "").strip().strip('"')
+    return raw if raw else default
+
+
 # File for storing last-used folder paths
-LAST_USED_FILE = os.path.join(os.path.dirname(__file__), ".last_used.json")
+LAST_USED_FILE = _configured_path(
+    "FIZGIG_LAST_USED_FILE",
+    os.path.join(os.path.dirname(__file__), ".last_used.json"))
 
 
 def load_last_used():
@@ -756,6 +815,8 @@ def save_last_used(data):
     Atomic (tmp + os.replace): this file is rewritten on every traced-var edit, and its
     reader falls back to defaults on a JSONDecodeError — so a crash mid-write used to
     silently blank the remembered paths, and the next auto-save persisted the blanks."""
+    if _persist_disabled():
+        return
     try:
         tmp = LAST_USED_FILE + ".tmp"
         with open(tmp, 'w', encoding='utf-8') as f:
@@ -769,7 +830,9 @@ def save_last_used(data):
 # Preferences — centralized model and directory paths (Klein 9B only for now)
 # ---------------------------------------------------------------------------
 
-PREFS_FILE = os.path.join(os.path.dirname(__file__), "prefs.json")
+PREFS_FILE = _configured_path(
+    "FIZGIG_PREFS_FILE",
+    os.path.join(os.path.dirname(__file__), "prefs.json"))
 HELP_FILE = os.path.join(os.path.dirname(__file__), "help.json")
 _FIZGIG_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -936,6 +999,9 @@ DEFAULT_PREFS = {
     # then renumbers the chosen card to cuda:0 and nothing downstream - trainer, loader,
     # sampler, cache scripts - has to know a choice was made at all.
     "cuda_device": "",
+    # Appearance id. Empty or unknown resolves to dark-clam (resolve_appearance).
+    # Applied once at startup; saving a different id does not restyle the open window.
+    "appearance": "",
 }
 
 
@@ -1305,6 +1371,9 @@ class LoRATrainerGUI:
 
         # Load user preferences (model paths, output directories)
         self.prefs = load_prefs()
+        # Resolved once. setup_styles reads this and is not called again, so a
+        # save on the Preferences tab cannot restyle the window already open.
+        self.active_appearance = resolve_appearance(self.prefs.get("appearance"))
         # Before ANY CUDA work: _auto_detect_blocks_to_swap and the workbench tools both build a
         # CUDA context, and the visible set is frozen the moment one exists.
         self._cuda_device_env_locked = bool(
@@ -2236,10 +2305,9 @@ class LoRATrainerGUI:
             command=self._toggle_status_bar)
         self._status_toggle_btn.pack(side=tk.RIGHT, padx=(0, 12))
 
-        # The expandable bar (sits above the handle).
-        bar = tk.Frame(container, bg=COLORS["bg_deep"], height=82)
+        # The expandable bar sizes to its controls, including appearance padding and DPI.
+        bar = tk.Frame(container, bg=COLORS["bg_deep"])
         bar.pack(side=tk.BOTTOM, fill=tk.X, before=handle)
-        bar.pack_propagate(False)
         self._status_bar_frame = bar
 
         # --- left: stacked VRAM (top) + RAM (bottom) gradient bars ---
@@ -2256,8 +2324,8 @@ class LoRATrainerGUI:
         # Packed BEFORE the override panel so it owns the corner; the override panel's
         # expand soaks up whatever is left in the middle.
         # fill=Y on both this column and the override panel below is what makes the two
-        # blocks exactly the same height (the bar is a fixed 82 px with pack_propagate off,
-        # so each ends up 82 - 2*pady). Without it each block sizes to its own content and
+        # blocks exactly the same height as the bar grows to fit its content.
+        # Without it each block sizes to its own content and
         # the button sat visibly shorter than the panel beside it.
         qcol = tk.Frame(bar, bg=COLORS["bg_deep"])
         qcol.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 14), pady=10)
@@ -2531,9 +2599,18 @@ class LoRATrainerGUI:
             self.sample_ref_image_var.set(path)
 
     def setup_styles(self):
-        """Set up styles for refined dark theme (Fizgig Visual Style Guide)"""
+        """Set up styles for refined dark theme (Fizgig Visual Style Guide).
+
+        Shared ttk padding comes from the appearance resolved at startup, so
+        every main tab inherits one spacing scale.
+        """
         style = ttk.Style()
         style.theme_use("clam")
+        space = appearance_spacing(getattr(self, "active_appearance", None))
+        button_pad = space["button"]
+        tab_pad = space["tab"]
+        check_pad = space["check"]
+        entry_pad = space["entry"]
 
         # Base styles with new palette
         style.configure(".",
@@ -2583,7 +2660,7 @@ class LoRATrainerGUI:
             borderwidth=1,
             focusthickness=2,
             focuscolor=COLORS["accent"],
-            padding=[16, 8],
+            padding=button_pad,
             font=(FONT_FAMILY, 10, "bold")
         )
         style.map(
@@ -2601,7 +2678,7 @@ class LoRATrainerGUI:
             borderwidth=1,
             focusthickness=2,
             focuscolor=COLORS["accent_hover"],
-            padding=[16, 8],
+            padding=button_pad,
             font=(FONT_FAMILY, 10, "bold")
         )
         style.map(
@@ -2619,7 +2696,7 @@ class LoRATrainerGUI:
             borderwidth=1,
             focusthickness=2,
             focuscolor=COLORS["error"],
-            padding=[16, 8],
+            padding=button_pad,
             font=(FONT_FAMILY, 10, "bold")
         )
         style.map(
@@ -2632,7 +2709,8 @@ class LoRATrainerGUI:
         style.configure("TCheckbutton",
             background=COLORS["bg_deep"],
             foreground=COLORS["text_primary"],
-            font=(FONT_FAMILY, 10)
+            font=(FONT_FAMILY, 10),
+            padding=check_pad,
         )
         style.map("TCheckbutton",
             background=[("active", COLORS["bg_deep"])],
@@ -2641,7 +2719,8 @@ class LoRATrainerGUI:
         style.configure("TRadiobutton",
             background=COLORS["bg_deep"],
             foreground=COLORS["text_primary"],
-            font=(FONT_FAMILY, 10)
+            font=(FONT_FAMILY, 10),
+            padding=check_pad,
         )
         style.map("TRadiobutton",
             background=[("active", COLORS["bg_deep"])],
@@ -2650,7 +2729,8 @@ class LoRATrainerGUI:
         style.configure("Surface.TRadiobutton",
             background=COLORS["bg_surface"],
             foreground=COLORS["text_primary"],
-            font=(FONT_FAMILY, 10)
+            font=(FONT_FAMILY, 10),
+            padding=check_pad,
         )
         style.map("Surface.TRadiobutton",
             background=[("active", COLORS["bg_surface"])],
@@ -2661,7 +2741,8 @@ class LoRATrainerGUI:
         style.configure("Surface.TCheckbutton",
             background=COLORS["bg_surface"],
             foreground=COLORS["text_primary"],
-            font=(FONT_FAMILY, 10)
+            font=(FONT_FAMILY, 10),
+            padding=check_pad,
         )
         style.map("Surface.TCheckbutton",
             background=[("active", COLORS["bg_surface"])],
@@ -2671,12 +2752,13 @@ class LoRATrainerGUI:
         # Notebook (tabs)
         style.configure("TNotebook",
             background=COLORS["bg_deep"],
-            borderwidth=0
+            borderwidth=0,
+            tabmargins=space["tabmargin"],
         )
         style.configure("TNotebook.Tab",
             background=COLORS["bg_surface"],
             foreground=COLORS["text_primary"],
-            padding=[12, 6],
+            padding=tab_pad,
             font=(FONT_FAMILY, 11, "bold")
         )
         style.map("TNotebook.Tab",
@@ -2692,6 +2774,7 @@ class LoRATrainerGUI:
             bordercolor=COLORS["border"],
             insertcolor=COLORS["accent"],
             insertwidth=2,
+            padding=entry_pad,
             font=(FONT_FAMILY, 10)
         )
         style.map("TEntry",
@@ -2711,6 +2794,7 @@ class LoRATrainerGUI:
             arrowcolor=COLORS["text_secondary"],
             insertcolor=COLORS["accent"],
             insertwidth=2,
+            padding=entry_pad,
             font=(FONT_FAMILY, 10)
         )
         style.map("TCombobox",
@@ -2731,7 +2815,7 @@ class LoRATrainerGUI:
             foreground=COLORS["text_primary"],
             bordercolor=COLORS["border"],
             font=(FONT_FAMILY, 10),
-            rowheight=24,
+            rowheight=space["rowheight"],
         )
         style.map("Treeview",
             background=[("selected", COLORS["accent"])],
@@ -2762,7 +2846,7 @@ class LoRATrainerGUI:
                 arrowcolor=COLORS["text_primary"],
                 darkcolor=COLORS["bg_deep"],
                 lightcolor=COLORS["bg_deep"],
-                width=12
+                width=space["scrollbar"],
             )
             style.map(
                 f"{_orient}.TScrollbar",
@@ -2773,7 +2857,8 @@ class LoRATrainerGUI:
         # LabelFrame
         style.configure("TLabelframe",
             background=COLORS["bg_deep"],
-            bordercolor=COLORS["border"]
+            bordercolor=COLORS["border"],
+            padding=space["labelframe"],
         )
         style.configure("TLabelframe.Label",
             background=COLORS["bg_deep"],
@@ -16841,6 +16926,16 @@ class LoRATrainerGUI:
                             f"Qwen3-VL captioner the Captions tab uses and the small helper models.",
             optional_label=d.fetch_optional_label or None)
 
+    def _on_appearance_choice(self, _event=None):
+        """Save the appearance id. Does not restyle the open window."""
+        label = self._appearance_choice.get()
+        picked = next((appearance_id for appearance_id, text in APPEARANCE_CHOICES if text == label), None)
+        if picked is None:
+            return
+        if self.prefs_vars["appearance"].get() == picked:
+            return
+        self.prefs_vars["appearance"].set(picked)
+
     def create_prefs_tab(self):
         """Create the Preferences tab (Start-tab styled)."""
         scrollable_frame, _ = self.create_scrollable_frame(self.prefs_tab)
@@ -16854,6 +16949,31 @@ class LoRATrainerGUI:
             "Centralised paths + inference performance knobs. Changes here propagate to every tab automatically "
             "and persist to prefs.json.",
         )
+
+        look = self._start_section_card(
+            outer, "Appearance",
+            "Shared control spacing. Saved here and applied the next time Fizgig starts. "
+            "This window keeps the spacing it opened with.",
+        )
+        look.columnconfigure(1, weight=1)
+        tk.Label(look, text="Appearance:", font=(FONT_FAMILY, 10),
+                 fg=COLORS["text_secondary"], bg=COLORS["bg_surface"]).grid(
+            row=0, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        current_label = dict(APPEARANCE_CHOICES).get(
+            self.active_appearance, dict(APPEARANCE_CHOICES)[APPEARANCE_DARK_CLAM])
+        self._appearance_choice = tk.StringVar(value=current_label)
+        picker = ttk.Combobox(
+            look, textvariable=self._appearance_choice,
+            values=[text for _appearance_id, text in APPEARANCE_CHOICES],
+            width=28, state="readonly")
+        picker.grid(row=0, column=1, sticky=tk.W, pady=4)
+        picker.bind("<<ComboboxSelected>>", self._on_appearance_choice)
+        tk.Label(
+            look,
+            text="Dark is the current layout. Compact uses the same colors with tighter controls.",
+            font=(FONT_FAMILY, 9), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
+            wraplength=720, justify=tk.LEFT,
+        ).grid(row=1, column=1, sticky=tk.W, pady=(0, 4))
 
         # One collapsible model-path section per family, built from its description (a family with a required path
         # still blank starts open, a configured one closed; the header badge says which).
@@ -17614,8 +17734,9 @@ class LoRATrainerGUI:
     def _reset_prefs(self):
         if messagebox.askyesno("Reset Preferences", "Restore all paths to defaults?"):
             for key, default in DEFAULT_PREFS.items():
-                if key in self.prefs_vars:
-                    self.prefs_vars[key].set(default)
+                if key == "appearance" or key not in self.prefs_vars:
+                    continue
+                self.prefs_vars[key].set(default)
 
     def _open_prefs_file(self):
         if os.path.exists(PREFS_FILE):
@@ -30740,6 +30861,35 @@ def main(root=None, splash=None):
     if splash is not None:
         splash.status("Building the interface…")
     gui = LoRATrainerGUI(root)
+    if os.environ.get("FIZGIG_STRUCTURAL_DUMP") == "1":
+        # Launch check: print the built notebook and the appearance applied at
+        # startup, then leave. No mainloop, no update check, no training.
+        try:
+            root.update_idletasks()
+        except Exception:
+            pass
+        labels = []
+        try:
+            for tab_id in gui.notebook.tabs():
+                labels.append(gui.notebook.tab(tab_id, "text"))
+        except Exception as exc:
+            print(f"DUMP_ERROR: {exc}", flush=True)
+        print(f"APPEARANCE: {gui.active_appearance}", flush=True)
+        try:
+            print(f"THEME: {ttk.Style(root).theme_use()}", flush=True)
+            print(f"BUTTON_PADDING: {ttk.Style(root).lookup('TButton', 'padding')}", flush=True)
+            print(f"TAB_PADDING: {ttk.Style(root).lookup('TNotebook.Tab', 'padding')}", flush=True)
+        except Exception as exc:
+            print(f"DUMP_STYLE_ERROR: {exc}", flush=True)
+        for label in labels:
+            print(f"TAB: {label}", flush=True)
+        if splash is not None:
+            try:
+                splash.close()
+            except Exception:
+                pass
+        root.destroy()
+        return
     root._fizgig_splash = None
     root.deiconify()
     try:
