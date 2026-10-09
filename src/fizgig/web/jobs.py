@@ -421,7 +421,15 @@ def _write_plan_files(planned, output: Path) -> None:
         dest.write_text(text, encoding="utf-8")
 
 
+def _engine_blocks() -> None:
+    """A loaded workbench engine holds the GPU lock. The user unloads it first."""
+    from fizgig.web.engine_host import engine_loaded
+    if engine_loaded():
+        raise JobError(409, {"detail": "An engine is loaded. Unload it before starting a job."})
+
+
 def start(family: str, values: dict, context: dict, confirm: list[str], existing: dict | None = None) -> dict:
+    _engine_blocks()
     desc = get_family(family)
     if desc is None:
         raise JobError(404, {"detail": "unknown family"})
@@ -460,6 +468,7 @@ def start(family: str, values: dict, context: dict, confirm: list[str], existing
     stop_file = folder / "STOP"
     if stop_file.is_file():
         stop_file.unlink()
+    _engine_blocks()
     if _busy():
         raise JobError(409, {"detail": "a run is already active"})
     if held():
@@ -502,7 +511,8 @@ def _train_only(job: dict) -> None:
 
 
 def start_task(kind: str, family: str, values: dict, output_dir: str, before_spawn) -> dict:
-    """A caption or prep job. Same folder, lock, and runner as a training job."""
+    """A caption, prep, profile or extract job. Same folder, lock, and runner as a training job."""
+    _engine_blocks()
     if _busy():
         raise JobError(409, {"detail": "a run is already active"})
     if held():
@@ -529,6 +539,7 @@ def start_task(kind: str, family: str, values: dict, output_dir: str, before_spa
         "output_dir": output_dir,
         "exit_code": None,
     }
+    _engine_blocks()
     if _busy():
         raise JobError(409, {"detail": "a run is already active"})
     if held():

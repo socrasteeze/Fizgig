@@ -2,7 +2,8 @@
 
 The hash is of the function source from ``ast.get_source_segment``, with line endings
 normalised to ``\\n``. A mismatch means the desktop function changed: update the mirror
-(``form_spec.py``, ``inputs.py``, ``jobs.py``, or ``system.py``), then replace the hash.
+(``form_spec.py``, ``inputs.py``, ``jobs.py``, ``repair.py``, ``profile.py``, or
+``system.py``), then replace the hash.
 """
 from __future__ import annotations
 
@@ -60,6 +61,23 @@ FUNCTIONS = (
     "create_metadata_tab",
     "_load_metadata_file",
     "_save_metadata_file",
+    "_schedule_preview",
+    "_run_preview_async",
+    "_repair_preview_worker",
+    "_repair_show_early",
+    "_save_repaired_lora_action",
+    "_save_repair_preset",
+    "_load_repair_preset",
+    "_reset_repair_sliders",
+    "_repair_preset_dir",
+    "_repair_category_for_block",
+    "_repair_builtin_state",
+    "_profiler_open_in_repair",
+    "_workbench_preview_model",
+    "_repair_engine_plan_family",
+    "_get_inference_blocks_to_swap",
+    "_get_inference_int8",
+    "_auto_detect_blocks_to_swap",
 )
 
 
@@ -126,4 +144,21 @@ PINNED = {
     "create_metadata_tab": "986a236073266d740b1cb01ae3a93d2a059385576295d28b1384ac939b1ca7fd",
     "_load_metadata_file": "ef7409dd2065469b18bd3a6250df301f0f5250773a0b8314bd256162c9ae81eb",
     "_save_metadata_file": "2eefa68350836ad4c9f0670b52504190bd163692f5937f81814debd68e62e0ac",
+    "_schedule_preview": "f2e3abbe761d6e882d5402bcd2d46bd2a2a2aad92492b5562a33a3d0c24b41bf",
+    "_run_preview_async": "b8969b4843d128936cee031557f1cdeb03524001433e0fe2c353786c65295eb8",
+    "_repair_preview_worker": "72f15bbf00591a77f2af19880ad00f918f789455d005ba463bb9dd385eeac845",
+    "_repair_show_early": "3ef0c7a2d0dbb83bf5170cd7ebef35f739cc42a64602fbc03b8e2c5eeca26793",
+    "_save_repaired_lora_action": "b0eddd3a2de673d360704054a2fb4042b4149f688375193d88d0da6781f29eb4",
+    "_save_repair_preset": "7d2a26e595021062ca79a4f8078645e40c142f102397a38a46292033bd08be46",
+    "_load_repair_preset": "889503bbfd19a19b0ff6728a85f0c7c194c319038f33df379facd06ad0a34493",
+    "_reset_repair_sliders": "188902e92dd9f29f03101f4829623ae352e1ed73589046e9cf181457ce3fe85d",
+    "_repair_preset_dir": "7aa2b81d715ecf382bed0647ac12e8f8419a23635373940c68749ba0a4f4a326",
+    "_repair_category_for_block": "588b1a485b03c9006ec5e03e2ac7d795a9d14c7074f3fb7dc1e00cc33691a1d4",
+    "_repair_builtin_state": "03386ba4e96206da3b6b9d9ecf46cfe904f2f65923ec3a51865a15f5b44508dd",
+    "_profiler_open_in_repair": "c84d62269aed89f45608b30442beb54b4fea0b2a0d73268f5ff55cb3ec36e4e2",
+    "_workbench_preview_model": "bd1ab9bfd19ea365f8d7c9890e9eb0fc1015d20d13fd9167aea4a7883780b267",
+    "_repair_engine_plan_family": "823d7ab98c4eb06337135052e1306ba8f01ba7279dc428d5dddfeac9f13cce7f",
+    "_get_inference_blocks_to_swap": "dfdd560e16069a0c7ba6d66b667951620a72272ace50bb216cd5437dd21201ea",
+    "_get_inference_int8": "5366d3fb78d63a9740643a16736e9614288e994a8cdfb98fea831e4d42036286",
+    "_auto_detect_blocks_to_swap": "240af8e2653415512494c19ed227ae23f4a2d03eba014893cfc59000687e0402",
 }

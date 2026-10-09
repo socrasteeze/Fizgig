@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { components } from "./api";
 import { BrowseButton, browserNotify, NotifyButton, Phase2, sampleContext } from "./extra";
+import { RepairPanel } from "./repair";
 import { fieldVisible } from "./visibility";
 
 const FAMILIES: { id: string; name: string }[] = [
@@ -120,7 +121,7 @@ export function App() {
   const [tab, setTab] = useState("Training");
   const [sampleForm, setSampleForm] = useState<{ fields: Array<Record<string, unknown>>; wording: Record<string, string>; gaps: string[] } | null>(null);
   const [sampleValues, setSampleValues] = useState<Record<string, unknown>>({});
-  const tabs = ["Training", "Start", "Captions", "Image Prep", "Samples", "Queue", "History", "Profiler", "Extract", "Metadata", "Preferences"];
+  const tabs = ["Training", "Start", "Captions", "Image Prep", "Samples", "Queue", "History", "Profiler", "Repair Studio", "Extract", "Metadata", "Preferences"];
 
   const fields = (form?.fields ?? []).map(asField);
   const models = (form?.models ?? []).map(asModel);
@@ -422,8 +423,10 @@ export function App() {
           ))}
         </div>
       ) : null}
-      {tab !== "Training" ? (
-        <Phase2 tab={tab} imageFolder={imageFolder} setImageFolder={rememberFolder} queueCurrent={queueCurrent} sampleForm={sampleForm} sampleValues={sampleValues} setSampleValues={setSampleValues} />
+      {tab === "Repair Studio" ? (
+        <RepairPanel />
+      ) : tab !== "Training" ? (
+        <Phase2 tab={tab} imageFolder={imageFolder} setImageFolder={rememberFolder} queueCurrent={queueCurrent} sampleForm={sampleForm} sampleValues={sampleValues} setSampleValues={setSampleValues} onTab={setTab} />
       ) : (
       <main>
         <label>

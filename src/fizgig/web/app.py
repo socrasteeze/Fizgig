@@ -11,6 +11,7 @@ import asyncio
 import dataclasses
 import json
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -26,7 +27,15 @@ _REPO = Path(__file__).resolve().parents[3]
 _FAMILIES = Path(__file__).resolve().parents[1] / "families"
 _ADVANCED: list | None = None
 
-app = FastAPI(title="Fizgig")
+
+@asynccontextmanager
+async def _lifespan(_app):
+    yield
+    from fizgig.web.engine_host import shutdown
+    shutdown()
+
+
+app = FastAPI(title="Fizgig", lifespan=_lifespan)
 
 
 def _allowed_names() -> set[str]:
@@ -445,12 +454,18 @@ def _event_round(seen_status, seen_samples, first):
                 body = {"id": job["id"], "name": sample["name"], "url": sample["url"]}
                 lines.append(f"event: sample\ndata: {json.dumps(body)}\n\n")
     lines.append(f"event: system\ndata: {json.dumps(stats())}\n\n")
+    try:
+        from fizgig.web.engine_host import drain
+        for event in drain():
+            lines.append(f"event: engine\ndata: {json.dumps(event)}\n\n")
+    except Exception:
+        pass
     return lines
 
 
 @app.get("/api/events")
 async def events(request: Request, once: int = 0):
-    """Server-sent events: job, progress, sample, system, notice.
+    """Server-sent events: job, progress, sample, system, notice, engine.
 
     ``once=1`` sends a single round and closes. The page leaves it off and keeps the stream open.
     """
@@ -698,6 +713,106 @@ def metadata_read(path: str):
 def metadata_write(body: dict = Body(...)):
     from fizgig.web.metadata import save
     return _call(save, body)
+
+
+@app.post("/api/profile/engine", responses={409: {"model": ConflictOut}, 422: {"model": ProblemsOut}})
+def profile_engine(body: dict = Body(...)):
+    from fizgig.web.profile import start_engine
+    return _call(start_engine, body)
+
+
+@app.get("/api/profile/engine")
+def profile_engine_status():
+    from fizgig.web.profile import engine_view
+    return engine_view()
+
+
+@app.post("/api/profile/repair", responses={422: {"model": ProblemsOut}})
+def profile_open_repair():
+    from fizgig.web.profile import open_repair
+    return _call(open_repair)
+
+
+@app.get("/api/repair/form")
+def repair_form(family: str = ""):
+    from fizgig.web.repair import form as repair_form_for
+    return _call(repair_form_for, family)
+
+
+@app.post("/api/repair/load", responses={409: {"model": ConflictOut}, 422: {"model": ProblemsOut}})
+def repair_load(body: dict = Body(...)):
+    from fizgig.web.repair import load as repair_load_for
+    return _call(repair_load_for, body)
+
+
+@app.post("/api/repair/render", responses={422: {"model": ProblemsOut}})
+def repair_render(body: dict = Body(...)):
+    from fizgig.web.repair import render as repair_render_for
+    return _call(repair_render_for, body)
+
+
+@app.post("/api/repair/unload")
+def repair_unload():
+    from fizgig.web.repair import unload as repair_unload_for
+    return _call(repair_unload_for)
+
+
+@app.get("/api/repair/status")
+def repair_status():
+    from fizgig.web.repair import status as repair_status_for
+    return repair_status_for()
+
+
+@app.get("/api/repair/presets")
+def repair_presets(family: str):
+    from fizgig.web.repair import presets as repair_presets_for
+    return _call(repair_presets_for, family)
+
+
+@app.put("/api/repair/presets", responses={409: {"model": ConflictOut}, 422: {"model": ProblemsOut}})
+def repair_save_preset(body: dict = Body(...)):
+    from fizgig.web.repair import save_preset
+    return _call(save_preset, body)
+
+
+@app.get("/api/repair/presets/file", responses={404: {"model": ConflictOut}})
+def repair_read_preset(family: str, name: str):
+    from fizgig.web.repair import read_preset
+    return _call(read_preset, family, name)
+
+
+@app.post("/api/repair/bake", responses={422: {"model": ProblemsOut}})
+def repair_bake(body: dict = Body(...)):
+    from fizgig.web.repair import bake as repair_bake_for
+    return _call(repair_bake_for, body)
+
+
+@app.post("/api/repair/metrics", responses={422: {"model": ProblemsOut}})
+def repair_metrics(body: dict = Body(...)):
+    from fizgig.web.repair import metrics as repair_metrics_for
+    return _call(repair_metrics_for, body)
+
+
+@app.get("/api/engine/status")
+def engine_status():
+    from fizgig.web.repair import status as repair_status_for
+    return repair_status_for()
+
+
+@app.post("/api/engine/unload")
+def engine_unload():
+    from fizgig.web.repair import unload as repair_unload_for
+    return _call(repair_unload_for)
+
+
+@app.get("/api/engine/file")
+def engine_media(path: str):
+    from fizgig.web.fs import engine_file
+
+    found = _call(engine_file, path)
+    if isinstance(found, JSONResponse):
+        return found
+    return FileResponse(found)
 
 
 _dist = _REPO / "webui" / "dist"

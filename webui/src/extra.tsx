@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 interface Notice {
   kind: string;
@@ -169,6 +169,7 @@ export function Phase2({
   sampleForm,
   sampleValues,
   setSampleValues,
+  onTab,
 }: {
   tab: string;
   imageFolder: string;
@@ -177,6 +178,7 @@ export function Phase2({
   sampleForm: SampleForm | null;
   sampleValues: Record<string, unknown>;
   setSampleValues: (values: Record<string, unknown>) => void;
+  onTab: (name: string) => void;
 }) {
   if (tab === "Start") {
     return <StartPanel imageFolder={imageFolder} setImageFolder={setImageFolder} />;
@@ -191,7 +193,7 @@ export function Phase2({
     return <SamplesPanel form={sampleForm} values={sampleValues} setValues={setSampleValues} />;
   }
   if (tab === "Profiler") {
-    return <ProfilerPanel />;
+    return <ProfilerPanel onRepair={() => onTab("Repair Studio")} />;
   }
   if (tab === "Extract") {
     return <ExtractPanel />;
@@ -801,13 +803,24 @@ function SamplesPanel({
   );
 }
 
-function ProfilerPanel() {
+function ProfilerPanel({ onRepair }: { onRepair: () => void }) {
   const [form, setForm] = useState<Record<string, unknown> | null>(null);
   const [family, setFamily] = useState("");
   const [lora, setLora] = useState("");
-  const [mode, setMode] = useState("weights");
+  const [mode, setMode] = useState("quick");
+  const [prompt, setPrompt] = useState("");
+  const [classPrompt, setClassPrompt] = useState("");
+  const [size, setSize] = useState("768");
   const [reports, setReports] = useState<Array<{ name: string; path: string; url: string }>>([]);
+  const [ready, setReady] = useState(false);
   const [error, setError] = useState("");
+  const poll = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    if (poll.current != null) {
+      window.clearInterval(poll.current);
+    }
+  }, []);
 
   function load(next: string) {
     fetch(`/api/profile/form?family=${encodeURIComponent(next)}`)
@@ -815,7 +828,8 @@ function ProfilerPanel() {
       .then((body) => {
         setForm(body);
         setFamily(String(body.family || ""));
-        setMode(String(body.defaults?.mode || "weights"));
+        setMode(String(body.defaults?.mode || "quick"));
+        setSize(String(body.defaults?.size || "768"));
       })
       .catch(() => setError("profiler form failed"));
   }
@@ -840,14 +854,58 @@ function ProfilerPanel() {
 
   async function run() {
     setError("");
-    const response = await fetch("/api/profile/jobs", {
+    setReady(false);
+    if (mode === "weights") {
+      const response = await fetch("/api/profile/jobs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ family, lora, mode }),
+      });
+      if (!response.ok) {
+        setError(await readError(response));
+      }
+      return;
+    }
+    const response = await fetch("/api/profile/engine", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ family, lora, mode }),
+      body: JSON.stringify({ family, lora, mode, prompt, class_prompt: classPrompt, size }),
     });
     if (!response.ok) {
       setError(await readError(response));
+      return;
     }
+    const started = await response.json();
+    if (poll.current != null) {
+      window.clearInterval(poll.current);
+    }
+    poll.current = window.setInterval(async () => {
+      const status = await fetch("/api/profile/engine");
+      if (!status.ok) {
+        return;
+      }
+      const body = await status.json();
+      if (body.gen !== started.gen) {
+        return;
+      }
+      if (body.status === "done") {
+        if (poll.current != null) {
+          window.clearInterval(poll.current);
+        }
+        setReady(true);
+      }
+    }, 500);
+  }
+
+  async function openRepair() {
+    setError("");
+    const response = await fetch("/api/profile/repair", { method: "POST" });
+    if (!response.ok) {
+      setError(await readError(response));
+      return;
+    }
+    sessionStorage.setItem("fizgig.repair.handoff", JSON.stringify(await response.json()));
+    onRepair();
   }
 
   const families = (form?.families as Array<{ key: string; name: string }> | undefined) || [];
@@ -856,7 +914,7 @@ function ProfilerPanel() {
     <main>
       <section>
         <h2>Profiler</h2>
-        <p className="help">Weights only runs here. Quick and Thorough need the engine host.</p>
+        <p className="help">Weights reads the file. Quick and Thorough render on the engine.</p>
         <div className="field">
           <label>
             Family
@@ -880,7 +938,28 @@ function ProfilerPanel() {
             </select>
           </label>
         </div>
+        <div className="field">
+          <label>
+            Prompt
+            <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} />
+          </label>
+        </div>
+        <div className="field">
+          <label>
+            Bleed-check prompt
+            <input value={classPrompt} onChange={(event) => setClassPrompt(event.target.value)} />
+          </label>
+        </div>
+        <div className="field">
+          <label>
+            Size
+            <select value={size} onChange={(event) => setSize(event.target.value)}>
+              {((form?.sizes as string[] | undefined) || []).map((item) => <option key={item} value={item}>{item}</option>)}
+            </select>
+          </label>
+        </div>
         <button type="button" className="start" onClick={() => void run()}>Profile LoRA</button>
+        <button type="button" disabled={!ready} onClick={() => void openRepair()}>Open in Repair Studio</button>
         {error ? <p className="error">{error}</p> : null}
       </section>
       <section>

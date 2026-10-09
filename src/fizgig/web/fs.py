@@ -111,6 +111,8 @@ def all_roots() -> list[Path]:
     for part in os.environ.get("FIZGIG_WEB_ROOTS", "").split(";"):
         _add(found, part.strip())
     _add(found, _start_folder())
+    from fizgig.web.jobs import jobs_root
+    _add(found, jobs_root() / "engine")
     return found
 
 
@@ -333,6 +335,26 @@ def resolve_file(text: str, suffix: str, roots: list[Path] | None = None) -> Pat
         raise JobError(422, {"problems": [f"not a {suffix} file"]})
     roots = all_roots() if roots is None else roots
     if not path.is_file() or _has_link(path, roots) or not _under(path, roots):
+        raise JobError(403, {"detail": "path is outside the configured roots"})
+    return path.resolve()
+
+
+_ENGINE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".mp4", ".webm"}
+
+
+def engine_file(text: str) -> Path:
+    """A preview written by the engine host, inside the jobs root's engine folder."""
+    from fizgig.web.jobs import jobs_root
+
+    root = jobs_root() / "engine"
+    raw = (text or "").strip()
+    if not raw or _dotdot(raw):
+        raise JobError(403, {"detail": "path is outside the configured roots"})
+    path = Path(raw)
+    if path.suffix.lower() not in _ENGINE_SUFFIXES:
+        raise JobError(404, {"detail": "no such file"})
+    roots = [root]
+    if not root.is_dir() or not path.is_file() or _has_link(path, roots) or not _under(path, roots):
         raise JobError(403, {"detail": "path is outside the configured roots"})
     return path.resolve()
 

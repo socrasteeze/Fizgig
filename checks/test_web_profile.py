@@ -81,8 +81,8 @@ class WebProfileTests(unittest.TestCase):
     def test_weights_command_and_report(self):
         form = self.client.get("/api/profile/form", params={"family": "klein"})
         self.assertEqual(form.status_code, 200, form.text)
-        self.assertEqual(form.json()["defaults"]["mode"], "weights")
-        self.assertIn("Quick and Thorough renders", form.json()["gaps"])
+        self.assertEqual(form.json()["defaults"]["mode"], "quick")
+        self.assertIn("Likeness and bleed from subject photos", form.json()["gaps"])
 
         refused = self.client.post("/api/profile/jobs", json={"family": "klein", "lora": str(self.lora), "mode": "quick"})
         self.assertEqual(refused.status_code, 422, refused.text)
@@ -129,6 +129,87 @@ class WebProfileTests(unittest.TestCase):
         stray.write_text("nope", encoding="utf-8")
         denied = self.client.get("/api/profiles/file", params={"path": str(stray)})
         self.assertEqual(denied.status_code, 403, denied.text)
+
+
+class WebProfileEngineTests(unittest.TestCase):
+    """Quick and Thorough on the fake engine, and the Repair Studio handoff."""
+
+    def setUp(self):
+        from fizgig.web.engine_host import shutdown
+        shutdown()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.output = self.root / "output"
+        self.profiles = self.root / "profiles"
+        self.output.mkdir()
+        self.profiles.mkdir()
+        (self.root / "prefs.json").write_text(json.dumps({
+            "lora_output_dir": str(self.output),
+            "profiles_dir": str(self.profiles),
+        }), encoding="utf-8")
+        self.lora = self.output / "Demo.safetensors"
+        self.lora.write_bytes(b"not a model")
+        self._env = {
+            key: os.environ.get(key) for key in (
+                "FIZGIG_WEB_JOBS", "FIZGIG_PREFS_FILE", "FIZGIG_NO_PERSIST",
+                "FIZGIG_WEB_FAKE_ENGINE", "FIZGIG_WEB_FAKE_STEP", "FIZGIG_WEB_ENGINE_IDLE",
+                "FIZGIG_WEB_ROOTS",
+            )
+        }
+        os.environ["FIZGIG_WEB_JOBS"] = str(self.root / "jobs")
+        os.environ["FIZGIG_PREFS_FILE"] = str(self.root / "prefs.json")
+        os.environ["FIZGIG_NO_PERSIST"] = "1"
+        os.environ["FIZGIG_WEB_FAKE_ENGINE"] = "1"
+        os.environ["FIZGIG_WEB_FAKE_STEP"] = "0.01"
+        os.environ["FIZGIG_WEB_ENGINE_IDLE"] = "600"
+        os.environ["FIZGIG_WEB_ROOTS"] = str(self.output)
+        self._client = TestClient(app, base_url="http://127.0.0.1")
+        self.client = self._client.__enter__()
+
+    def tearDown(self):
+        from fizgig.web.engine_host import shutdown
+        shutdown()
+        self._client.__exit__(None, None, None)
+        for key, value in self._env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        self._tmp.cleanup()
+
+    def _run(self, mode):
+        started = self.client.post("/api/profile/engine", json={
+            "family": "klein", "lora": str(self.lora), "mode": mode,
+            "prompt": "a person", "class_prompt": "a face", "size": "512",
+        })
+        self.assertEqual(started.status_code, 200, started.text)
+        end = time.time() + 8
+        last = None
+        while time.time() < end:
+            last = self.client.get("/api/profile/engine").json()
+            if last.get("status") == "done":
+                return last
+            time.sleep(0.02)
+        self.fail(f"timed out; last={last!r}")
+
+    def test_quick_and_thorough_and_repair_handoff(self):
+        quick = self._run("quick")
+        self.assertEqual(quick["seeds"], [1234])
+        self.assertFalse(quick["per_block"])
+        self.assertTrue(Path(quick["report"]).is_file())
+        handoff = self.client.post("/api/profile/repair")
+        self.assertEqual(handoff.status_code, 200, handoff.text)
+        body = handoff.json()
+        self.assertEqual(body["lora"], str(self.lora.resolve()))
+        self.assertEqual(body["prompt"], "a person")
+        self.assertEqual(body["seed"], 1234)
+        self.assertEqual(body["size"], 512)
+        self.assertIn("little effect", body["message"])
+        self.assertTrue(any(row["enabled"] is False for row in body["blocks"].values()))
+
+        thorough = self._run("thorough")
+        self.assertEqual(thorough["seeds"], [1234, 5678])
+        self.assertTrue(thorough["per_block"])
 
 
 if __name__ == "__main__":

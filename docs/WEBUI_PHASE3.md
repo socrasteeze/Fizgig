@@ -72,3 +72,98 @@ Review fix: a read parses the 8-byte length and the JSON header only, and a save
 - Edit a real file's metadata, confirm the tensors still load, and confirm the `.bak` is the previous file.
 - Start a training run with non-default sample settings and compare one preview with the desktop.
 - Phone access through `tailscale serve` is still the phase 1 check.
+
+## 3b-i
+
+Phase 3b-i is the engine host, Repair Studio, and the Profiler's Quick and Thorough modes. RefMod Studio, LoRA the Explorer and LoRA Royale are not in this phase. The host accepts those engine names so they can register later.
+
+### Protocol
+
+The server starts one child, `python -m fizgig.web.engine_worker`. They speak one JSON object per line. Requests go to the worker's stdin. Events and replies come back on stdout.
+
+Requests:
+
+| op | fields |
+|---|---|
+| load | `engine`, `family`, `args` |
+| render | `gen`, `params` |
+| cancel | `gen` |
+| unload | |
+| status | |
+
+`engine` is `repair`, `profiler`, `refmod`, `explorer` or `royale`. Each request has an `id`. The matching reply has the same `id` and `ok`.
+
+Events, which the page receives as SSE `engine`:
+
+| event | when |
+|---|---|
+| loading | a load has started |
+| frame | one step, with `gen`, `step`, `total`, and a `file` when the step produced an image |
+| done | the render finished: `baseline`, `image`, `clip`, and for a profile a `profile` object |
+| cancelled | this `gen` was dropped |
+| error | the render failed, or the worker stopped |
+| unloaded | the engine is gone and the GPU lock is released |
+
+A render with a higher `gen` cancels the one in flight (`_run_preview_async`, `_repair_render_gen`). A frame or a final image whose `gen` is no longer current is not delivered (`_repair_show_early`).
+
+Images go in `<jobs root>/engine/<session>/` and are served at `GET /api/engine/file?path=`, inside that folder only. The same `..` and link rules as the folder browser apply.
+
+The worker holds the GPU lock from a successful load until unload. `POST` of a load while a training or caption job holds the lock returns 409: "A training or caption job is using the GPU. Wait for it to finish before loading an engine." Starting a GPU job while an engine is loaded returns 409: "An engine is loaded. Unload it before starting a job."
+
+The engine unloads after `FIZGIG_WEB_ENGINE_IDLE` seconds with no load, render or cancel (default 600), on `POST /api/engine/unload`, and when the server shuts down. If the worker dies, the next request starts another and the page gets an `error` event with `restarted: true`.
+
+`FIZGIG_WEB_FAKE_ENGINE=1` selects a fake engine. It writes tiny PNGs, emits a frame per step, and sleeps `FIZGIG_WEB_FAKE_STEP` seconds per step. It does not import a model.
+
+### Repair Studio
+
+`GET /api/repair/form?family=` is the tab: families with `repair` in the workbench, the driver's block groups, resolution, DiT choice (`fast` is the preview checkpoint or speed LoRA, `base` is the training model), and the preset list.
+
+`POST /api/repair/load` loads that family's workbench engine. The plan follows `_workbench_preview_model` and `_repair_engine_plan_family`: DiT, VAE, text encoder, speed LoRA, the INT8 preference, and the inference block-swap preference. A video family also passes the audio VAE and the prompt-cache folder.
+
+`POST /api/repair/render` sends a `SliderState` and a `gen`. The page waits 400 ms after a slider edit and 100 ms after a forced edit (`_schedule_preview`) before it sends. The host keeps only the newest `gen`. A video family can set `early_step` so the pass image streams back (`_repair_show_early`). The clip, when ffmpeg is on `PATH`, is an mp4 from the engine's frames and is played in a `<video>` element.
+
+`PUT /api/repair/presets` writes `presets/repair_studio/<family>/` (the family's `shares_prefs_with`, else its key). The file is blocks plus `family`, the same shape `_save_repair_preset` writes. `GET /api/repair/presets/file` applies blocks only (`_load_repair_preset`). Built-ins follow `_repair_builtin_state`, including Klein's category presets.
+
+`POST /api/repair/bake` calls `save_repaired_lora(primary, state, out, donor_path)`. `donor_path` is set only when a donor block is enabled, which is the desktop's file bake. The output name is `<primary>_repaired.safetensors`, or `<primary>_with_<donor>.safetensors` when a donor block is on. An existing file gets `_2`, `_3`, …
+
+`POST /api/repair/metrics` runs `repair_studio.metrics.compare` on the baseline and repaired PNGs.
+
+### Profiler
+
+The form defaults to Quick, as the desktop does. Weights is still `POST /api/profile/jobs` and the weights CLI. Quick or Thorough on that route is 422.
+
+`POST /api/profile/engine` loads the profiler engine and renders. Quick uses seed 1234. Thorough uses 1234 and 5678 and the per-block pass (`_run_profiler_family`). The report is the same `<stem>_<suffix>_profile.html` under `profiles_dir`.
+
+`POST /api/profile/repair` is Open in Repair Studio (`_profiler_open_in_repair`): the LoRA, prompt, seed, size, and the suggested sliders. The page opens Repair Studio with that state.
+
+### Mirror pins
+
+`checks/test_web_mirrors.py` also hashes `_schedule_preview`, `_run_preview_async`, `_repair_preview_worker`, `_repair_show_early`, `_save_repaired_lora_action`, `_save_repair_preset`, `_load_repair_preset`, `_reset_repair_sliders`, `_repair_preset_dir`, `_repair_category_for_block`, `_repair_builtin_state`, `_profiler_open_in_repair`, `_workbench_preview_model`, `_repair_engine_plan_family`, `_get_inference_blocks_to_swap`, `_get_inference_int8`, and `_auto_detect_blocks_to_swap`.
+
+### Tests and build
+
+`.\venv\Scripts\python.exe -m unittest discover -s checks -p "test_*.py"`
+
+51 tests, 49 passed, 2 skipped, 0 failed. Three runs in a row, same counts each time (188.344s, 188.381s, 184.070s). The two skipped tests are the golden tests. The new tests use the fake engine: the protocol round trip, newest-gen cancellation, idle unload, a worker crash and restart, the GPU lock both ways (409), the Repair preset save and load in `SliderState` form, the bake call's arguments, and Quick, Thorough and the Repair handoff.
+
+`FIZGIG_GOLDEN=1` and `python -m unittest checks.test_web_golden -v`
+
+2 tests, passed (8.805s).
+
+`npm --prefix webui run build` passed. `checks\check_appearance.py` passed.
+
+### Gaps
+
+- RefMod Studio, LoRA the Explorer and LoRA Royale are not built. `register_engine` is how they attach.
+- Likeness and bleed scores need the desktop's face embedder. Quick and Thorough on the page measure the picture change only.
+- The H3 ref2va checkpoint picker, the render library, and no-LoRA clips stay on the desktop.
+- The page bakes with `save_repaired_lora`. A described family on the desktop bakes with the live engine's `save_repaired` when that method exists.
+- Without ffmpeg, a video render keeps the middle frame and does not produce an mp4.
+- A real engine load and a slider render on the GPU were not run from this page.
+
+### Still manual (3b-i)
+
+- Load a real family on the page and render. Compare the first frame's latency with the desktop on the same GPU.
+- Move a slider and confirm the in-flight render restarts.
+- Run Quick on a real LoRA, open Repair Studio, and save a baked file.
+- Play a video family's clip in the page's player.
