@@ -302,12 +302,14 @@ class QueueItem(BaseModel):
 
 class QueueOut(BaseModel):
     items: list[QueueItem]
+    errors: dict[int, str] = Field(default_factory=dict)
 
 
 class QueueImport(BaseModel):
     imported: int
     skipped: int
     items: list[QueueItem]
+    errors: dict[int, str] = Field(default_factory=dict)
 
 
 class OrderIn(BaseModel):

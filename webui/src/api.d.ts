@@ -1934,6 +1934,10 @@ export interface components {
             skipped: number;
             /** Items */
             items: components["schemas"]["QueueItem"][];
+            /** Errors */
+            errors?: {
+                [key: string]: string;
+            };
         };
         /** QueueItem */
         QueueItem: {
@@ -1969,6 +1973,10 @@ export interface components {
         QueueOut: {
             /** Items */
             items: components["schemas"]["QueueItem"][];
+            /** Errors */
+            errors?: {
+                [key: string]: string;
+            };
         };
         /** SampleItem */
         SampleItem: {

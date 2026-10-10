@@ -19,6 +19,7 @@ import sys
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
@@ -27,7 +28,7 @@ from fizgig.families.launch import plan, problems
 from fizgig.families.registry import get as get_family
 from fizgig.gpu_lock import held
 from fizgig.training.progress import TrainingProgressTracker
-from fizgig.web.inputs import build
+from fizgig.web.inputs import _filled_models, _prefs, build
 from fizgig.web.procs import creationflags, hidden_console
 
 _REPO = Path(__file__).resolve().parents[3]
@@ -514,13 +515,29 @@ def _write_plan_files(planned, output: Path) -> None:
         dest.write_text(text, encoding="utf-8")
 
 
-def _confine_paths(values: dict, context: dict) -> None:
+@contextmanager
+def _named(field: str):
+    """A confinement refusal from inside the block names the client field it came from."""
+    try:
+        yield
+    except JobError as exc:
+        if exc.status == 403 and "field" not in (exc.body or {}):
+            raise JobError(403, {**(exc.body or {}), "field": field}) from exc
+        raise
+
+
+def _same_place(text: str, other: str) -> bool:
+    return os.path.normcase(os.path.abspath(text)) == os.path.normcase(os.path.abspath(other))
+
+
+def _confine_paths(values: dict, context: dict, desc) -> None:
     """Resolve client paths inside the configured roots before a plan is built.
 
     A path the run needs is refused when it is missing or outside the roots. A path the run may not
     need (a model, the captioner, a preview reference) is refused when it is outside the roots, with no
-    stat, and a missing one inside the roots is left for the family's own checks to report. Preferences
-    fill is not here: inputs.build takes the blank model paths from Preferences after this step.
+    stat, and a missing one inside the roots is left for the family's own checks to report. A model the
+    client sends with the exact Preference value the server would fill is treated as blank, so the trusted
+    fill is used and a Preference whose file moved does not block the launch. Every refusal names its field.
     """
     from fizgig.web import fs
 
@@ -541,63 +558,87 @@ def _confine_paths(values: dict, context: dict) -> None:
 
     output_text = str(values.get("LORA_OUTPUT_DIR") or "").strip()
     if output_text:
-        resolved = new_dir(output_text, parent_roots)
+        with _named("LORA_OUTPUT_DIR"):
+            resolved = new_dir(output_text, parent_roots)
         values["LORA_OUTPUT_DIR"] = resolved
         context["LORA_OUTPUT_DIR"] = resolved
     folder = str(values.get("image_folder") or context.get("image_folder") or "").strip()
     if folder:
-        resolved = existing_dir(folder)
+        with _named("image_folder"):
+            resolved = existing_dir(folder)
         values["image_folder"] = resolved
         context["image_folder"] = resolved
     resume = str(values.get("RESUME_TRAINING") or "").strip()
     if resume:
-        values["RESUME_TRAINING"] = new_dir(resume, roots)
+        with _named("RESUME_TRAINING"):
+            values["RESUME_TRAINING"] = new_dir(resume, roots)
     for key in ("FAMILY_EDIT_DIR", "FAMILY_SLIDER_DIR", "FAMILY_FT_REG_DIR"):
         text = str(values.get(key) or "").strip()
         if text:
-            values[key] = existing_dir(text)
+            with _named(key):
+                values[key] = existing_dir(text)
     lora = str(values.get("CONTEXT_LORA_PATH") or "").strip()
     if lora:
-        values["CONTEXT_LORA_PATH"] = existing_file(lora, ".safetensors")
+        with _named("CONTEXT_LORA_PATH"):
+            values["CONTEXT_LORA_PATH"] = existing_file(lora, ".safetensors")
     cache = str(context.get("cache_root") or "").strip()
     if cache:
-        context["cache_root"] = new_dir(cache, roots)
+        with _named("cache_root"):
+            context["cache_root"] = new_dir(cache, roots)
     samples_dir = str(context.get("samples_dir") or "").strip()
     if samples_dir:
-        context["samples_dir"] = new_dir(samples_dir, roots)
+        with _named("samples_dir"):
+            context["samples_dir"] = new_dir(samples_dir, roots)
     samples = context.get("samples")
     if isinstance(samples, dict):
         ref = str(samples.get("reference") or "").strip()
         if ref:
             samples = dict(samples)
-            samples["reference"] = existing_file(ref)
+            with _named("samples.reference"):
+                samples["reference"] = existing_file(ref)
             context["samples"] = samples
     models = context.get("models")
     if isinstance(models, dict):
-        context["models"] = {key: fs.optional_path(str(value or ""), roots) for key, value in models.items()}
+        # The Preference the server fills for each key, read the way build() reads it.
+        filled = _filled_models(desc, {}, _prefs())
+        cleaned = {}
+        for key, value in models.items():
+            text = str(value or "").strip()
+            trusted = filled.get(key, "")
+            if text and trusted and _same_place(text, trusted):
+                text = ""
+            with _named(key):
+                cleaned[key] = fs.optional_path(text, roots)
+        context["models"] = cleaned
     captioner = str(context.get("captioner") or "").strip()
     if captioner:
-        context["captioner"] = fs.optional_path(captioner, roots)
+        with _named("captioner"):
+            context["captioner"] = fs.optional_path(captioner, roots)
     checkpoint = context.get("ft_resume")
     if isinstance(checkpoint, dict) and str(checkpoint.get("checkpoint") or "").strip():
         checkpoint = dict(checkpoint)
-        checkpoint["checkpoint"] = str(fs.resolve_file(str(checkpoint["checkpoint"]).strip(), "", parent_roots))
+        with _named("ft_resume.checkpoint"):
+            checkpoint["checkpoint"] = str(fs.resolve_file(str(checkpoint["checkpoint"]).strip(), "", parent_roots))
         context["ft_resume"] = checkpoint
     thumbnail = str(values.get("METADATA_THUMBNAIL") or "").strip()
     if thumbnail:
-        values["METADATA_THUMBNAIL"] = existing_file(thumbnail)
+        with _named("METADATA_THUMBNAIL"):
+            values["METADATA_THUMBNAIL"] = existing_file(thumbnail)
     ref = str(values.get("FAMILY_EDIT_REF") or "").strip()
     if ref:
-        values["FAMILY_EDIT_REF"] = fs.optional_path(ref, roots)
+        with _named("FAMILY_EDIT_REF"):
+            values["FAMILY_EDIT_REF"] = fs.optional_path(ref, roots)
     if str(values.get("FAMILY_MULTICONCEPT") or "").strip().lower() in {"1", "true", "yes", "on"}:
         raw = values.get("MINIMAX_CONCEPT_DIRS", values.get("extra_folders", ""))
-        if isinstance(raw, (list, tuple)):
-            values["MINIMAX_CONCEPT_DIRS"] = [existing_dir(str(item).strip()) for item in raw if str(item or "").strip()]
-        elif str(raw or "").strip():
-            values["MINIMAX_CONCEPT_DIRS"] = existing_dir(str(raw).strip())
+        with _named("MINIMAX_CONCEPT_DIRS"):
+            if isinstance(raw, (list, tuple)):
+                values["MINIMAX_CONCEPT_DIRS"] = [existing_dir(str(item).strip()) for item in raw if str(item or "").strip()]
+            elif str(raw or "").strip():
+                values["MINIMAX_CONCEPT_DIRS"] = existing_dir(str(raw).strip())
     config = str(context.get("DATASET_CONFIG") or values.get("DATASET_CONFIG") or "").strip()
     if config:
-        resolved = str(fs.resolve_unmade(config, roots))
+        with _named("DATASET_CONFIG"):
+            resolved = str(fs.resolve_unmade(config, roots))
         context["DATASET_CONFIG"] = resolved
         if str(values.get("DATASET_CONFIG") or "").strip():
             values["DATASET_CONFIG"] = resolved
@@ -633,7 +674,7 @@ def start(
         values["LORA_OUTPUT_DIR"] = output_text
         if not str(context.get("DATASET_CONFIG") or values.get("DATASET_CONFIG") or "").strip():
             context["DATASET_CONFIG"] = str(Path(output_text) / "dataset.toml")
-    _confine_paths(values, context)
+    _confine_paths(values, context, desc)
     inputs = build(desc, values, context)
     found = problems(desc, inputs)
     if found:

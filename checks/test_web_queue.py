@@ -5,6 +5,7 @@ Nothing here loads a model or touches CUDA.
     python -m unittest checks.test_web_queue -v
 """
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -39,6 +40,9 @@ def _reset_queue() -> None:
     queue._READY.clear()
     queue._HOLD.clear()
     queue._DEVICE.clear()
+    queue._ERRORS.clear()
+    queue._ATTEMPTS.clear()
+    queue._TRACED.clear()
 
 
 class WebQueueTests(unittest.TestCase):
@@ -361,6 +365,89 @@ class WebQueueTests(unittest.TestCase):
         )
         queue.observe(jobs.list_jobs())
         self._wait(lambda: self.client.get("/api/queue").json()["items"] == [], timeout=15)
+
+    def test_repeated_launch_error_holds_the_device_and_is_listed(self):
+        def record(job_id, status, device):
+            folder = self.root / "jobs" / job_id
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "job.json").write_text(json.dumps({
+                "id": job_id,
+                "kind": "train",
+                "family": "sdxl",
+                "status": status,
+                "device": device,
+                "pid": 0,
+                "values": {"LORA_NAME": "Old"},
+                "created": "2020-01-01T00:00:00Z",
+                "output_dir": str(self.output),
+            }), encoding="utf-8")
+
+        body = self._body(self.output, "Locked")
+        body["device"] = 0
+        self.assertEqual(self.client.post("/api/queue", json=body).status_code, 200)
+        record("slow-disk", "running", 0)
+        queue.observe(jobs.list_jobs())
+        record("slow-disk", "done", 0)
+
+        with patch("fizgig.web.jobs.start", side_effect=OSError("dataset.toml is locked")):
+            with self.assertLogs("fizgig.web.queue", level="WARNING") as logs:
+                for _ in range(3):
+                    queue.observe(jobs.list_jobs())
+        errors = [record for record in logs.records if record.levelno == logging.ERROR]
+        self.assertEqual(len(errors), 1)
+        self.assertIsNotNone(errors[0].exc_info)
+        self.assertIn(0, queue._HOLD)
+        self.assertNotIn("slow-disk", queue._READY)
+
+        listed = self.client.get("/api/queue").json()
+        self.assertEqual([item["label"] for item in listed["items"]], ["Locked"])
+        self.assertIn("OSError", listed["errors"]["0"])
+
+        with patch("fizgig.web.jobs.start") as start:
+            queue.observe(jobs.list_jobs())
+        start.assert_not_called()
+
+        added = self.client.post("/api/queue", json=self._body(self.output2, "Other"))
+        self.assertEqual(added.status_code, 200, added.text)
+        self.assertEqual(self.client.get("/api/queue").json()["errors"], {})
+        self.assertNotIn(0, queue._HOLD)
+
+    def test_refused_launch_holds_the_device_and_names_the_field(self):
+        def record(job_id, status, device):
+            folder = self.root / "jobs" / job_id
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "job.json").write_text(json.dumps({
+                "id": job_id,
+                "kind": "train",
+                "family": "sdxl",
+                "status": status,
+                "device": device,
+                "pid": 0,
+                "values": {"LORA_NAME": "Old"},
+                "created": "2020-01-01T00:00:00Z",
+                "output_dir": str(self.output),
+            }), encoding="utf-8")
+
+        body = self._body(self.output, "Refused")
+        body["device"] = 0
+        self.assertEqual(self.client.post("/api/queue", json=body).status_code, 200)
+        record("slow-disk", "running", 0)
+        queue.observe(jobs.list_jobs())
+        record("slow-disk", "done", 0)
+
+        refusal = jobs.JobError(403, {"detail": "path is outside the configured roots", "field": "image_folder"})
+        with patch("fizgig.web.jobs.start", side_effect=refusal) as start:
+            queue.observe(jobs.list_jobs())
+        start.assert_called_once()
+        self.assertIn(0, queue._HOLD)
+        listed = self.client.get("/api/queue").json()
+        self.assertEqual(list(listed["errors"]), ["0"])
+        self.assertIn("path is outside the configured roots (image_folder)", listed["errors"]["0"])
+
+        added = self.client.post("/api/queue", json=self._body(self.output2, "Other"))
+        self.assertEqual(added.status_code, 200, added.text)
+        self.assertEqual(self.client.get("/api/queue").json()["errors"], {})
+        self.assertNotIn(0, queue._HOLD)
 
     def test_queue_write_retries_permission_error(self):
         real = os.replace

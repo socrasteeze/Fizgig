@@ -22,6 +22,7 @@ sys.path.insert(0, str(_REPO / "checks"))
 
 from fastapi.testclient import TestClient
 
+from fizgig.families.registry import get as get_family
 from fizgig.gpu_lock import GpuLock, held
 from fizgig.web import jobs, queue
 from fizgig.web.app import app
@@ -533,7 +534,7 @@ class WebJobTests(unittest.TestCase):
         for values, context in cases:
             with self.subTest(values=values, context=context):
                 with self.assertRaises(jobs.JobError) as caught:
-                    jobs._confine_paths(dict(values), dict(context))
+                    jobs._confine_paths(dict(values), dict(context), get_family("sdxl"))
                 self.assertEqual(caught.exception.status, 403)
 
     def test_missing_model_path_does_not_block_the_run(self):
@@ -543,7 +544,7 @@ class WebJobTests(unittest.TestCase):
                 "sdxl_checkpoint": str(self.checkpoint),
             },
         }
-        jobs._confine_paths({}, context)
+        jobs._confine_paths({}, context, get_family("sdxl"))
         self.assertEqual(context["models"]["speed_lora"], str(self.root / "moved" / "speed.safetensors"))
         self.assertEqual(context["models"]["sdxl_checkpoint"], str(self.checkpoint.resolve()))
 

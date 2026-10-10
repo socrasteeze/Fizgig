@@ -8,6 +8,7 @@ Items live in ``<jobs root>/queue.json``. Import maps a desktop
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -23,6 +24,12 @@ _ACTIVE_SEEN: set[str] = set()
 _READY: set[str] = set()
 _HOLD: set[int] = set()
 _DEVICE: dict[str, int] = {}
+# A device held after failed launches, and why. A poll-loop launch that keeps raising is retried this many times.
+_ERRORS: dict[int, str] = {}
+_ATTEMPTS: dict[str, int] = {}
+_TRACED: set[str] = set()
+_MAX_ATTEMPTS = 3
+_LOG = logging.getLogger(__name__)
 
 # LoRATrainerGUI._canon_arch / _ARCH_ALIASES. Old Base Model labels.
 _ARCH_ALIASES = {
@@ -108,7 +115,9 @@ def _public(item: dict) -> dict:
 
 
 def list_items() -> dict:
-    return {"items": [_public(item) for item in _read()]}
+    with _LOCK:
+        errors = {device: message for device, message in _ERRORS.items() if device in _HOLD}
+    return {"items": [_public(item) for item in _read()], "errors": errors}
 
 
 def _folder_of(values: dict, context: dict) -> str:
@@ -140,6 +149,7 @@ def add(family: str, values: dict, context: dict, device: int = 0) -> dict:
         items.append(item)
         _write(items)
         _HOLD.clear()
+        _ERRORS.clear()
     return _public(item)
 
 
@@ -151,6 +161,7 @@ def reorder(ids: list[str]) -> dict:
             raise JobError(422, {"problems": ["the order must list every queued item once"]})
         _write([by_id[item_id] for item_id in ids])
         _HOLD.clear()
+        _ERRORS.clear()
     return list_items()
 
 
@@ -162,6 +173,7 @@ def remove(item_id: str) -> dict:
             raise JobError(404, {"detail": "no such queue item"})
         _write(kept)
         _HOLD.clear()
+        _ERRORS.clear()
     return list_items()
 
 
@@ -256,6 +268,7 @@ def import_desktop() -> dict:
         items.extend(imported)
         _write(items)
         _HOLD.clear()
+        _ERRORS.clear()
     body = list_items()
     body["imported"] = len(imported)
     body["skipped"] = skipped
@@ -272,6 +285,34 @@ def arm(job_id: str) -> None:
 def _drop_ready(ids: list[str]) -> None:
     for job_id in ids:
         _READY.discard(job_id)
+
+
+def _launch_failed(head: dict, exc: Exception) -> bool:
+    """Count one unexpected failure of a poll-loop launch. True when the device is now held.
+
+    The traceback is logged once per item. The attempt that reaches the limit holds the device and
+    records why, and the item stays queued until a queue change or a manual Start clears the hold.
+    """
+    item_id = str(head.get("id") or "")
+    device = _device_index(head.get("device"))
+    with _LOCK:
+        count = _ATTEMPTS.get(item_id, 0) + 1
+        _ATTEMPTS[item_id] = count
+        if item_id not in _TRACED:
+            _TRACED.add(item_id)
+            _LOG.error("queued run %s failed to launch on GPU %d", item_id, device, exc_info=exc)
+        else:
+            _LOG.warning("queued run %s failed to launch again (attempt %d of %d): %s",
+                         item_id, count, _MAX_ATTEMPTS, exc)
+        if count < _MAX_ATTEMPTS:
+            return False
+        _ATTEMPTS.pop(item_id, None)
+        _HOLD.add(device)
+        _ERRORS[device] = (
+            f"The queued run failed to launch {count} times ({type(exc).__name__}: {exc}). "
+            "Start it from the queue, or change the queue, to try again."
+        )
+    return True
 
 
 def observe(rows: list[dict]) -> None:
@@ -339,9 +380,11 @@ def observe(rows: list[dict]) -> None:
     for head, ids in launches:
         try:
             outcome = _launch(head)
-        except Exception:
+        except Exception as exc:
             # An unexpected failure (a locked dataset.toml, a failed job.json write) keeps the mark, so the
-            # next poll retries. The other devices in this batch still launch.
+            # next poll retries. After a few tries the device is held instead. The other devices still launch.
+            if _launch_failed(head, exc):
+                continue
             outcome = None
         if outcome is None:
             with _LOCK:
@@ -360,7 +403,25 @@ def advance(confirm: list[str] | None = None, device: int | None = None) -> dict
         if head is None:
             raise JobError(404, {"detail": "the queue is empty"})
         _HOLD.discard(_device_index(head.get("device")))
+        _ERRORS.pop(_device_index(head.get("device")), None)
     return _launch(head, confirm or [], manual=True)
+
+
+def _refusal_text(exc: JobError) -> str:
+    """Why a launch was refused: the body's problems, warnings or detail, with the field it names."""
+    body = exc.body or {}
+    listed = body.get("problems") or body.get("warnings")
+    if isinstance(listed, list) and listed:
+        text = "; ".join(str(item) for item in listed)
+    else:
+        text = str(body.get("detail") or "").strip() or f"the launch was refused ({exc.status})"
+    field = str(body.get("field") or "").strip()
+    if field:
+        text = f"{text} ({field})"
+    return (
+        f"The queued run was refused: {text}. "
+        "Start it from the queue, or change the queue, to try again."
+    )
 
 
 def _launch(head: dict, confirm: list[str] | None = None, manual: bool = False) -> dict:
@@ -383,6 +444,7 @@ def _launch(head: dict, confirm: list[str] | None = None, manual: bool = False) 
         if not retry:
             with _LOCK:
                 _HOLD.add(device)
+                _ERRORS[device] = _refusal_text(exc)
         if manual:
             raise
         return {}
@@ -390,4 +452,6 @@ def _launch(head: dict, confirm: list[str] | None = None, manual: bool = False) 
         items = [item for item in _read() if item.get("id") != head.get("id")]
         _write(items)
         _HOLD.discard(device)
+        _ERRORS.pop(device, None)
+        _ATTEMPTS.pop(str(head.get("id") or ""), None)
     return created

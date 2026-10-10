@@ -22,6 +22,9 @@ from fastapi.testclient import TestClient
 from fizgig.web.app import app
 from fizgig.web.procs import creationflags
 
+sys.path.insert(0, str(_REPO / "checks"))
+import runner_guard  # noqa: E402
+
 _PNG = (
     b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
     b"\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDAT"
@@ -206,6 +209,7 @@ class WebFsTests(unittest.TestCase):
 
     def tearDown(self):
         self._client.__exit__(None, None, None)
+        runner_guard.end_runs(Path(os.environ["FIZGIG_WEB_JOBS"]))
         for key, value in self._env.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -493,6 +497,61 @@ class WebFsTests(unittest.TestCase):
                 with self.assertRaises(JobError) as caught:
                     fs.optional_path(raw, roots)
                 self.assertEqual(caught.exception.status, 403)
+
+    def _optional_model(self):
+        from fizgig.families.registry import FAMILIES
+
+        for name, desc in FAMILIES.items():
+            for item in desc.model_files:
+                if not item.required:
+                    return name, item.pref_key
+        self.fail("no family has an optional model file")
+
+    def _page_models(self) -> dict:
+        """The model values the Training tab reads from /api/prefs and sends back as context.models."""
+        body = self.client.get("/api/prefs").json()
+        models = {}
+        for section in body.get("families", []):
+            for item in section.get("files", []):
+                if item.get("value"):
+                    models[item["key"]] = item["value"]
+        return models
+
+    def _prefs_with_model(self, key: str, value: str) -> None:
+        (self.root / "prefs.json").write_text(
+            json.dumps({"lora_output_dir": str(self.output), key: value}),
+            encoding="utf-8",
+        )
+
+    def test_preference_model_outside_roots_does_not_block_the_launch(self):
+        family, key = self._optional_model()
+        gone = self.root / "elsewhere" / "fake-model-gone.safetensors"
+        self._prefs_with_model(key, str(gone))
+        models = self._page_models()
+        self.assertEqual(models.get(key), str(gone))
+        response = self.client.post(
+            "/api/jobs",
+            json={"family": family, "values": {}, "context": {"models": models}},
+        )
+        # The request gets past confinement and stops at the family's own checks (no images here).
+        self.assertIn(response.status_code, {409, 422}, response.text)
+
+    def test_client_model_that_differs_from_preference_is_refused_and_named(self):
+        family, key = self._optional_model()
+        self._prefs_with_model(key, str(self.root / "elsewhere" / "fake-model-pref.safetensors"))
+        present = self.outside / "probe-model-present.safetensors"
+        present.write_bytes(b"not a model")
+        missing = self.outside / "probe-model-missing.safetensors"
+        for raw in (present, missing):
+            models = self._page_models()
+            models[key] = str(raw)
+            with self.subTest(raw=raw.name), _NoStatFor("probe-model-"):
+                response = self.client.post(
+                    "/api/jobs",
+                    json={"family": family, "values": {}, "context": {"models": models}},
+                )
+            self.assertEqual(response.status_code, 403, response.text)
+            self.assertEqual(response.json().get("field"), key)
 
     def test_missing_path_inside_the_roots_is_returned_as_typed(self):
         from fizgig.web import fs

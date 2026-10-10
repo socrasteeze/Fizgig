@@ -577,12 +577,16 @@ function PrepPanel({ folder }: { folder: string }) {
 function QueuePanel({ queueCurrent }: { queueCurrent: () => Promise<string> }) {
   const [items, setItems] = useState<Array<{ id: string; family: string; label: string; device?: number }>>([]);
   const [devices, setDevices] = useState<number[]>([0]);
+  const [errors, setErrors] = useState<Record<string, string>>({});
   const [error, setError] = useState("");
 
   function reload() {
     fetch("/api/queue")
       .then((response) => response.json())
-      .then((body) => setItems(body.items))
+      .then((body) => {
+        setItems(body.items);
+        setErrors(body.errors || {});
+      })
       .catch(() => setError("queue failed"));
     fetch("/api/devices")
       .then((response) => response.json())
@@ -606,7 +610,9 @@ function QueuePanel({ queueCurrent }: { queueCurrent: () => Promise<string> }) {
       setError(await readError(response));
       return;
     }
-    setItems((await response.json()).items);
+    const body = await response.json();
+    setItems(body.items);
+    setErrors(body.errors || {});
   }
 
   function move(device: number, index: number, delta: number) {
@@ -650,6 +656,7 @@ function QueuePanel({ queueCurrent }: { queueCurrent: () => Promise<string> }) {
             }
             const body = await response.json();
             setItems(body.items);
+            setErrors(body.errors || {});
             setError(`Imported ${body.imported}, skipped ${body.skipped}.`);
           })}>Import desktop queue</button>
         </div>
@@ -671,6 +678,7 @@ function QueuePanel({ queueCurrent }: { queueCurrent: () => Promise<string> }) {
                   reload();
                 })}>Start next</button>
               </div>
+              {errors[String(gpu)] ? <p className="error">{errors[String(gpu)]}</p> : null}
               {group.map((item, index) => (
                 <div key={item.id} className="controls">
                   <span>{index + 1}. {item.label} · {item.family}</span>

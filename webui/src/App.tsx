@@ -53,6 +53,18 @@ interface Notice {
   message: string;
 }
 
+// A refused request's text: its problems, else its detail with the client field the server names.
+async function refusalText(response: Response, fallback: string): Promise<string> {
+  const body = (await response.json().catch(() => ({}))) as { detail?: string; field?: string; problems?: string[] };
+  if (body.problems?.length) {
+    return body.problems.join("\n");
+  }
+  if (body.detail) {
+    return body.field ? `${body.detail} (${body.field})` : body.detail;
+  }
+  return fallback;
+}
+
 function asField(raw: { [key: string]: unknown }): Field {
   return {
     key: String(raw.key ?? ""),
@@ -533,8 +545,7 @@ export function App() {
       }),
     });
     if (!response.ok) {
-      const body = await response.json().catch(() => ({})) as { detail?: string; problems?: string[] };
-      return body.problems?.join("\n") || body.detail || `queue failed (${response.status})`;
+      return refusalText(response, `queue failed (${response.status})`);
     }
     return "";
   }
@@ -575,7 +586,7 @@ export function App() {
       return;
     }
     if (!response.ok) {
-      setProblems([`start failed (${response.status})`]);
+      setProblems([await refusalText(response, `start failed (${response.status})`)]);
       return;
     }
     const created = (await response.json()) as Job;
