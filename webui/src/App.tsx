@@ -762,7 +762,7 @@ export function App() {
               <section key={group.section}>
                 <h2>{group.section}</h2>
                 {group.fields.map((field) => (
-                  <div key={field.key} className="field">
+                  <div key={field.key} className={field.kind === "folder" || field.kind === "path" ? "field path" : "field"}>
                     {field.kind === "bool" ? (
                       <label>
                         <input
@@ -792,19 +792,19 @@ export function App() {
                             }}
                           />
                         )}
-                        {field.kind === "folder" || field.kind === "path" ? (
-                          <BrowseButton
-                            select={field.kind === "path" ? "file" : "folder"}
-                            onPick={(path) => {
-                              setValue(field.key, path);
-                              if (field.key === "image_folder") {
-                                rememberFolder(path);
-                              }
-                            }}
-                          />
-                        ) : null}
                       </label>
                     )}
+                    {field.kind === "folder" || field.kind === "path" ? (
+                      <BrowseButton
+                        select={field.kind === "path" ? "file" : "folder"}
+                        onPick={(path) => {
+                          setValue(field.key, path);
+                          if (field.key === "image_folder") {
+                            rememberFolder(path);
+                          }
+                        }}
+                      />
+                    ) : null}
                     {field.help ? <p className="help">{field.help}</p> : null}
                   </div>
                 ))}
@@ -813,7 +813,7 @@ export function App() {
             {!fields.some((field) => field.key === "image_folder") ? (
               <section>
                 <h2>Dataset</h2>
-                <div className="field">
+                <div className="field path">
                   <label>
                     Training image folder
                     <input value={imageFolder} onChange={(event) => setImageFolder(event.target.value)} onBlur={() => rememberFolder(imageFolder)} />
@@ -826,7 +826,7 @@ export function App() {
               <section>
                 <h2>Model files</h2>
                 {models.map((model) => (
-                  <div key={model.key} className="field">
+                  <div key={model.key} className="field path">
                     <label>
                       {model.label}{model.required ? "" : " (optional)"}
                       <input
@@ -903,7 +903,7 @@ export function App() {
                   <img key={sample.name} src={sample.url} alt={sample.name} loading="lazy" />
                 ))}
               </div>
-              <div className="field">
+              <div className="field sample-bar">
                 <label>
                   <input
                     type="checkbox"
