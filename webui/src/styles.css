@@ -1,18 +1,23 @@
-/* Desktop palette: the COLORS dict in lora_trainer_gui.py. */
+/* Slate console from the UI skill: code dark, one run-green accent. */
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap");
+
 :root {
-  --bg: #1e2530;
-  --surface: #252d38;
-  --hover: #2a3542;
-  --header: #1a2028;
-  --text: #f0f4f8;
-  --secondary: #8a9bae;
-  --explain: #c3cdd9;
-  --muted: #5a6b7e;
-  --accent: #3b82f6;
-  --border: #3a4555;
-  --success: #10b981;
+  --bg: #0f172a;
+  --surface: #1b2336;
+  --hover: #272f42;
+  --header: #0f172a;
+  --text: #f8fafc;
+  --secondary: #94a3b8;
+  --explain: #cbd5e1;
+  --muted: #94a3b8;
+  --accent: #22c55e;
+  --on-accent: #0f172a;
+  --border: #334155;
+  --success: #22c55e;
   --warning: #f59e0b;
   --error: #ef4444;
+  --sans: "IBM Plex Sans", "Helvetica Neue", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, monospace;
 }
 
 * {
@@ -23,9 +28,10 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font-family: "Segoe UI", sans-serif;
+  font-family: var(--sans);
   font-size: 15px;
-  line-height: 1.45;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
 }
 
 .top {
@@ -46,8 +52,9 @@ body {
 h1 {
   margin: 0 0 6px;
   font-size: 20px;
-  font-weight: 650;
-  letter-spacing: -0.02em;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  text-wrap: balance;
 }
 
 .jobs, .chips, .controls {
@@ -79,6 +86,7 @@ h1 {
 .bar-fill {
   position: absolute;
   inset: 1px auto 1px 0;
+  background: var(--accent);
 }
 
 .bar span, .progress {
@@ -88,8 +96,9 @@ h1 {
 .bar span {
   display: block;
   padding: 2px 10px;
+  font-family: var(--mono);
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 500;
   white-space: nowrap;
 }
 
@@ -165,6 +174,15 @@ button {
   cursor: pointer;
   white-space: nowrap;
   min-height: 34px;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+
+button:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+button:active:not(:disabled) {
+  transform: scale(0.98);
 }
 
 button:disabled {
@@ -172,14 +190,30 @@ button:disabled {
   cursor: default;
 }
 
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
+
 .chip {
-  border-radius: 999px;
+  border-radius: 6px;
   flex: 0 0 auto;
 }
 
 .chip.on, .start {
   background: var(--accent);
   border-color: var(--accent);
+  color: var(--on-accent);
+}
+
+.chip.on:hover:not(:disabled),
+.start:hover:not(:disabled) {
+  background: #4ade80;
+  border-color: #4ade80;
 }
 
 .status, .help {
@@ -214,7 +248,9 @@ section, .advanced {
 h2, summary {
   margin: 0 0 8px;
   font-size: 15px;
-  font-weight: 650;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
 }
 
 .field {
@@ -224,6 +260,11 @@ h2, summary {
 
 .field input, .field select {
   width: 100%;
+}
+
+.field input {
+  font-family: var(--mono);
+  font-size: 13px;
 }
 
 .field.path {
@@ -278,6 +319,9 @@ h2, summary {
   padding: 10px;
   white-space: pre-wrap;
   word-break: break-word;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .gallery {
@@ -399,6 +443,21 @@ textarea {
 
 .controls button {
   flex: 0 0 auto;
+}
+
+html {
+  scroll-padding-top: 64px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 @media (max-width: 900px) {

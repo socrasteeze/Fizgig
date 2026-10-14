@@ -149,14 +149,14 @@ function gb(bytes: number): string {
   return (bytes / 1073741824).toFixed(1);
 }
 
-function Bar({ label, pair, from, to }: { label: string; pair?: Memory | null; from: string; to: string }) {
+function Bar({ label, pair }: { label: string; pair?: Memory | null }) {
   if (!pair?.total) {
     return <div className="bar"><span>{label} unavailable</span></div>;
   }
   const frac = Math.max(0, Math.min(1, pair.used / pair.total));
   return (
     <div className="bar">
-      <div className="bar-fill" style={{ width: `${frac * 100}%`, background: `linear-gradient(90deg, ${from}, ${to})` }} />
+      <div className="bar-fill" style={{ width: `${frac * 100}%` }} />
       <span>{label} {gb(pair.used)} / {gb(pair.total)} GB</span>
     </div>
   );
@@ -683,8 +683,8 @@ export function App() {
           </div>
         </div>
         <div className="bars">
-          <Bar label="VRAM" pair={system.vram} from="#3FB950" to="#E5534B" />
-          <Bar label="RAM" pair={system.ram} from="#3B82F6" to="#EAC54F" />
+          <Bar label="VRAM" pair={system.vram} />
+          <Bar label="RAM" pair={system.ram} />
           <NotifyButton />
         </div>
       </header>
