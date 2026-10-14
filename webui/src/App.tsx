@@ -664,7 +664,7 @@ export function App() {
   const fraction = job && job.total > 0 ? Math.max(0, Math.min(1, job.step / job.total)) : 0;
 
   return (
-    <>
+    <div className="shell">
       <header className="top">
         <div className="top-title">
           <h1>Fizgig</h1>
@@ -693,6 +693,7 @@ export function App() {
           <button key={name} type="button" className={tab === name ? "chip on" : "chip"} onClick={() => setTab(name)}>{name}</button>
         ))}
       </nav>
+      <div className="stage">
       {notices.length > 0 ? (
         <div className="notices">
           {notices.map((notice, index) => (
@@ -718,6 +719,7 @@ export function App() {
         <Phase2 tab={tab} imageFolder={imageFolder} setImageFolder={rememberFolder} queueCurrent={queueCurrent} sampleForm={sampleForm} sampleValues={sampleValues} setSampleValues={setSampleValues} onTab={setTab} />
       ) : (
       <main>
+        <div className="picks">
         <label>
           Family
           <select value={family} onChange={(event) => setFamily(event.target.value)}>
@@ -734,6 +736,7 @@ export function App() {
             ))}
           </select>
         </label>
+        </div>
         {error ? <p className="error">{error}</p> : null}
         {form ? (
           <>
@@ -940,6 +943,7 @@ export function App() {
         </section>
       </main>
       )}
-    </>
+      </div>
+    </div>
   );
 }

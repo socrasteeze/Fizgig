@@ -24,22 +24,43 @@
   box-sizing: border-box;
 }
 
+html,
+body,
+#root {
+  height: 100%;
+}
+
 body {
   margin: 0;
+  overflow: hidden;
   background: var(--bg);
   color: var(--text);
   font-family: var(--sans);
-  font-size: 15px;
-  line-height: 1.5;
+  font-size: 14px;
+  line-height: 1.4;
   font-variant-numeric: tabular-nums;
 }
 
+.shell {
+  height: 100dvh;
+  display: grid;
+  grid-template-columns: 188px minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.stage {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
 .top {
+  grid-column: 1 / -1;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 12px 20px;
+  gap: 12px;
+  padding: 8px 12px;
   background: var(--header);
   border-bottom: 1px solid var(--border);
 }
@@ -47,11 +68,14 @@ body {
 .top-title {
   min-width: 0;
   flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 h1 {
-  margin: 0 0 6px;
-  font-size: 20px;
+  margin: 0;
+  font-size: 16px;
   font-weight: 600;
   letter-spacing: -0.03em;
   text-wrap: balance;
@@ -70,14 +94,18 @@ h1 {
 }
 
 .bars {
-  width: min(320px, 36vw);
+  width: auto;
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .bar {
   position: relative;
-  height: 22px;
-  margin-bottom: 6px;
+  width: 168px;
+  height: 18px;
+  margin: 0;
   background: var(--bg);
   overflow: hidden;
   border-radius: 4px;
@@ -106,7 +134,7 @@ h1 {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  padding: 10px 20px 0;
+  padding: 8px 12px 0;
 }
 
 .notice {
@@ -118,20 +146,26 @@ h1 {
 }
 
 main {
-  max-width: 1180px;
-  margin: 0 auto;
-  padding: 20px 20px 48px;
+  max-width: none;
+  margin: 0;
+  padding: 10px 12px 16px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
-  gap: 12px 16px;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
+  gap: 8px 12px;
   align-items: start;
+}
+
+.picks {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 88px;
+  gap: 8px;
 }
 
 main > .monitor {
   grid-column: 2;
   grid-row: 1 / span 40;
   position: sticky;
-  top: 12px;
+  top: 8px;
 }
 
 main > :not(.monitor) {
@@ -242,7 +276,24 @@ section, .advanced {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 14px 16px;
+  padding: 8px 10px 10px;
+}
+
+section:not(.monitor) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  column-gap: 12px;
+  row-gap: 0;
+  align-items: start;
+}
+
+section:not(.monitor) > :not(.field),
+section:not(.monitor) > .field.path,
+section:not(.monitor) > .field:has(textarea),
+section:not(.monitor) > .field:has(button),
+section:not(.monitor) > .field:has(video),
+section:not(.monitor) > .field:has(img) {
+  grid-column: 1 / -1;
 }
 
 h2, summary {
@@ -254,7 +305,7 @@ h2, summary {
 }
 
 .field {
-  margin: 10px 0;
+  margin: 6px 0;
   min-width: 0;
 }
 
@@ -313,22 +364,24 @@ h2, summary {
 }
 
 .log {
-  max-height: 280px;
+  max-height: 132px;
   overflow: auto;
   background: var(--bg);
-  padding: 10px;
+  padding: 8px;
   white-space: pre-wrap;
   word-break: break-word;
   font-family: var(--mono);
   font-size: 12px;
-  line-height: 1.45;
+  line-height: 1.4;
 }
 
 .gallery {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-  gap: 8px;
-  margin-top: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+  gap: 6px;
+  margin-top: 8px;
+  max-height: 148px;
+  overflow: auto;
 }
 
 .gallery img {
@@ -346,16 +399,25 @@ h2, summary {
 
 .tabs {
   display: flex;
+  flex-direction: column;
+  align-items: stretch;
   flex-wrap: nowrap;
-  gap: 8px;
-  padding: 10px 20px;
-  overflow-x: auto;
+  gap: 2px;
+  padding: 8px;
+  overflow: auto;
   scrollbar-width: none;
-  position: sticky;
-  top: 0;
+  position: static;
   z-index: 5;
   background: var(--header);
-  border-bottom: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  border-bottom: 0;
+}
+
+.tabs button {
+  width: 100%;
+  min-height: 28px;
+  padding: 4px 8px;
+  text-align: left;
 }
 
 .listing {
@@ -460,13 +522,45 @@ html {
   }
 }
 
-@media (max-width: 900px) {
+@media (max-width: 800px) {
+  body {
+    overflow: auto;
+  }
+
+  .shell {
+    height: auto;
+    min-height: 100dvh;
+    display: block;
+  }
+
+  .stage {
+    overflow: visible;
+  }
+
   .top {
     flex-wrap: wrap;
   }
 
   .bars {
     width: 100%;
+  }
+
+  .bar {
+    flex: 1;
+    width: auto;
+  }
+
+  .tabs {
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+  }
+
+  .tabs button {
+    width: auto;
   }
 
   main {
@@ -477,6 +571,10 @@ html {
     grid-column: 1;
     grid-row: auto;
     position: static;
+  }
+
+  section:not(.monitor) {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
