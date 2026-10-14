@@ -2,17 +2,17 @@
 @import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap");
 
 :root {
-  --bg: #0f172a;
-  --surface: #1b2336;
-  --hover: #272f42;
-  --header: #0f172a;
+  --bg: #05070b;
+  --surface: #0c1017;
+  --hover: #161c27;
+  --header: #030508;
   --text: #f8fafc;
-  --secondary: #94a3b8;
-  --explain: #cbd5e1;
-  --muted: #94a3b8;
+  --secondary: #9aa6b8;
+  --explain: #c5d0de;
+  --muted: #8b98ab;
   --accent: #22c55e;
-  --on-accent: #0f172a;
-  --border: #334155;
+  --on-accent: #04140c;
+  --border: #1e2736;
   --success: #22c55e;
   --warning: #f59e0b;
   --error: #ef4444;
