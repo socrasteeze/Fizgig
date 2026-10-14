@@ -29,6 +29,21 @@
   <img src="https://img.shields.io/badge/models-Klein%209B%20%2B%20Krea%202%20%2B%20MiniMax%20H3%20%2B%20Qwen%20Image%202.1%20%2B%20Z--Image%20Turbo%20%2B%20SDXL%20%2B%20Anima-blue?style=for-the-badge" alt="Klein 9B + Krea 2 + MiniMax H3 + Qwen Image 2.1 + Z-Image Turbo + SDXL + Anima">
 </p>
 
+<p align="center">
+  <img src="assets/webui/training.png" alt="Fizgig WebUI training page, with the recipe and the live monitor" width="920"><br>
+  <sub>WebUI — training, with the live monitor pinned beside the recipe</sub>
+</p>
+
+<p align="center">
+  <img src="assets/webui/repair.png" alt="Fizgig WebUI Repair Studio" width="920"><br>
+  <sub>Repair Studio</sub>
+</p>
+
+<p align="center">
+  <img src="assets/webui/history.png" alt="Fizgig WebUI job history" width="920"><br>
+  <sub>Job history</sub>
+</p>
+
 > ### 📰 Latest news
 > - **Fizgig 7.1 — Z-Image Turbo, with its own training adapter.** LoRA and LoKR training, sliders, full fine-tuning and every workbench tab. Fizgig's training adapter keeps Turbo's 8-step look while your LoRA learns: better likeness, image quality and detail than the adapter most people use. LoRAs from 12 GB cards, fine-tunes from 16 GB. [Release notes](docs/RELEASE_NOTES_v7.1.0.md)
 > - **Fizgig 7.0 — Anima and SDXL arrive, fine-tuning for every model, and the driver system is complete - meaning the community can now add models to Fizgig (Docs included).** Anima and SDXL join with LoRA and LoKR training, sliders, fine-tuning and the full workbench. Every model fine-tunes on a 16 GB card (Anima and SDXL from 8 GB), and bigger cards train the whole model at once. [Release notes](docs/RELEASE_NOTES_v7.0.0.md) · [Add your own model](docs/drivers/README.md)
