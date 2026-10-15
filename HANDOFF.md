@@ -1,6 +1,6 @@
 # HANDOFF
 
-**Updated:** 2026-10-14 · **Branch:** master · **Upstream:** v8.0.7 (504ea916) merged · **Not pushed**
+**Updated:** 2026-10-14 · **Branch:** master · **Upstream:** v8.0.7 (504ea916) merged · **Pushed:** fork/master
 
 ## State
 The fork runs upstream's Fizgig 8 web app (`src/fizgig/web/`, stdlib `http.server` + vanilla JS). The fork's own FastAPI + React web UI, the desktop GUI and their checks are gone. On top of upstream the fork carries twelve small fixes and a `checks/` suite (upstream ships no tests). 98 tests pass. The first v8 start has run here: `prefs.json`, `.last_used.json`, `models/`, `presets/` and `cache/` now live in `user_data/`.
@@ -11,11 +11,11 @@ The fork runs upstream's Fizgig 8 web app (`src/fizgig/web/`, stdlib `http.serve
 - Fixes, one commit each: run notifications (Notify me), low-disk and resume-at-max-epochs warnings, no save over an unreadable `prefs.json`, caption jobs that can't run end with `DONE`, Studio Save refuses a swapped LoRA, Studio unloaded after its worker stops, Start waits for the Profiler, one Start at a time, a Fizgig restarted banner with Reload, Studio unload after 10 minutes unused, queue saves retried on Windows, a 16 MB cap on JSON bodies and caption files limited to caption extensions (`.txt .caption .cap .tags .tag .text`).
 
 ## Open
-1. Push to fork when asked.
-2. The venv lacks `pywebview` and `soundfile` (new in upstream's `requirements.txt`). The browser launcher works without them. The app window (`Launch Fizgig.bat`) needs `pywebview`.
-3. Local leftovers, all untracked: `webui/` (86 MB of `node_modules` and `dist`), `prefs.json.pre-v8.bak` (in `.git/info/exclude`) and `WEBUI_ADOPTION_AUDIT.md`.
-4. The audit's slate theme (Tier 2 #11) was not done.
-5. A training start while Studio is still loading leaves Studio on "loading". This is upstream behavior and not fixed.
+1. The venv lacks `pywebview` and `soundfile` (new in upstream's `requirements.txt`). The browser launcher works without them. The app window (`Launch Fizgig.bat`) needs `pywebview`.
+2. Local leftovers, all untracked: `webui/` (86 MB of `node_modules` and `dist`), `prefs.json.pre-v8.bak` (in `.git/info/exclude`) and `WEBUI_ADOPTION_AUDIT.md`.
+3. The audit's slate theme (Tier 2 #11) was not done.
+4. A training start while Studio is still loading leaves Studio on "loading". This is upstream behavior and not fixed.
+5. One full checks run errored twice (not saved, not reproduced in 55 runs since). If it recurs, keep the output.
 
 ## Decisions
 - Upstream's app replaces the fork's. Keep fork patches to upstream files minimal so syncs merge cleanly.
