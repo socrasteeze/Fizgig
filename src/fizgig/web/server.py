@@ -1138,6 +1138,39 @@ def _folder_problem(e, out_dir) -> str:
             f"(Output), or set the default in Preferences > LoRA output.")
 
 
+DISK_WARN_GB = 15                 # the desktop's: less free than this where the LoRAs go, and Start asks first
+
+
+def _start_warnings(out_dir, resume, max_epochs) -> list:
+    """What the desktop asked before a run (launch.py leaves both to its caller): little free space where the LoRAs
+    are saved, and a resume whose state is already at Max Train Epochs. [{code, message}]; Start anyway sends the
+    codes back in `confirm`."""
+    out = []
+    probe = str(out_dir or "")
+    while probe and not os.path.isdir(probe) and os.path.dirname(probe) != probe:
+        probe = os.path.dirname(probe)            # a run's folder is made at Start: its nearest existing parent
+    try:
+        free = shutil.disk_usage(probe).free / 1024 ** 3
+    except (OSError, ValueError):
+        free = None
+    if free is not None and free < DISK_WARN_GB:
+        out.append({"code": "low_disk", "message": (
+            f"Only {free:.1f} GB free where the LoRAs are saved ({probe}). A run writes a checkpoint every few epochs, "
+            "resumable states and previews; running out part-way through loses the run. Free some space, or lower "
+            "Save Every N Epochs.")})
+    m = re.search(r"-(\d{6})-state$", os.path.basename(str(resume or "").rstrip("/\\")))
+    try:
+        epochs = int(str(max_epochs).strip())
+    except ValueError:
+        epochs = 0
+    if m and epochs and int(m.group(1)) >= epochs:
+        out.append({"code": "resume_epochs", "message": (
+            f"That state is already at epoch {int(m.group(1))}, and Max Train Epochs is {epochs}: resuming trains "
+            f"nothing, it only writes the final LoRA. To train further, raise Max Train Epochs above "
+            f"{int(m.group(1))} first.")})
+    return out
+
+
 def _unclaim(prev, result=None):
     """A Start that didn't launch gives its claim back (a paused run stays resumable). Returns `result`."""
     with _lock:
@@ -1146,7 +1179,7 @@ def _unclaim(prev, result=None):
     return result
 
 
-def _start(family_key, values, image_folder, resume="", ft_continue=None, note=""):
+def _start(family_key, values, image_folder, resume="", ft_continue=None, note="", confirm=()):
     from fizgig.web import tools
     if tools.holding_gpu():                     # as Studio, Royale and RefMod: the run would run out of VRAM
         return {"error": "The Profiler is rendering on the GPU - wait for it, or Stop it, then start the run."}
@@ -1169,6 +1202,10 @@ def _start(family_key, values, image_folder, resume="", ft_continue=None, note="
     if plan.problems:
         return _unclaim(prev, {"problems": plan.problems})
     out_dir = inputs["LORA_OUTPUT_DIR"]
+    warnings = [w for w in _start_warnings(out_dir, resume or (values or {}).get("RESUME_TRAINING"),
+                                           inputs.get("MAX_TRAIN_EPOCHS")) if w["code"] not in confirm]
+    if warnings:
+        return _unclaim(prev, {"warnings": warnings})
     # as the desktop's Start clears them; a resume's pause record is used up once its run launches
     for stale in (".pause_requested", ".sample_override.json", ".sample_now", ".save_now") + (
             (PAUSED_FILE,) if resume or ft_continue else ()):
@@ -1223,7 +1260,8 @@ def _queue_starter(item):
         return True, ""
     if r.get("error") and ("Captions are" in r["error"] or "Profiler is" in r["error"]):
         return False, "wait: " + r["error"]
-    return False, r.get("error") or "; ".join(r.get("problems") or ["it couldn't start"])
+    return False, r.get("error") or "; ".join(r.get("problems") or [w["message"] for w in r.get("warnings") or []]
+                                              or ["it couldn't start"])
 
 
 def _popen(cmd):
@@ -2890,7 +2928,8 @@ class Handler(BaseHTTPRequestHandler):
                                                                          for s in plan.stages],
                                   "dataset_toml": plan.dataset_toml})
             if path == "/api/start":
-                return self.json(_start(b.get("family", ""), b.get("values") or {}, b.get("image_folder") or ""))
+                return self.json(_start(b.get("family", ""), b.get("values") or {}, b.get("image_folder") or "",
+                                        confirm=b.get("confirm") or ()))
             if path == "/api/resume":                    # as the desktop's Resume Training
                 with _lock:
                     last = {k: _run.get(k) for k in ("state", "family", "values", "image_folder", "resume",
@@ -2916,12 +2955,12 @@ class Handler(BaseHTTPRequestHandler):
                     return self.json(_start(last["family"], v, last["image_folder"],
                                             ft_continue={"continue": cont, "rotations": left},
                                             note=f"=== Resuming the fine-tune from {os.path.basename(last['resume'])}: "
-                                                 f"{left} rotation(s) left ==="))
+                                                 f"{left} rotation(s) left ===", confirm=b.get("confirm") or ()))
                 if not os.path.isdir(last["resume"]):
                     return self.json({"error": "The paused run's saved state isn't there any more: "
                                                + last["resume"]}, 400)
                 return self.json(_start(last["family"], last["values"], last["image_folder"], resume=last["resume"],
-                                        note=f"=== Resuming from {last['resume']} ==="))
+                                        note=f"=== Resuming from {last['resume']} ===", confirm=b.get("confirm") or ()))
             if path == "/api/run/slider_prompts":    # a prompt slider's new ends, taken at its next epoch boundary
                 with _lock:
                     running = _run["proc"] is not None and _run["proc"].poll() is None

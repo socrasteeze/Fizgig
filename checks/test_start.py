@@ -27,6 +27,11 @@ class StartBase(unittest.TestCase):
         p = patch.object(server, "_run_stages", lambda stages, out_dir: None)
         p.start()
         self.addCleanup(p.stop)
+        # and this machine's free space doesn't decide: plenty, unless a test says otherwise
+        room = SimpleNamespace(total=0, used=0, free=500 * 1024 ** 3)
+        p = patch.object(server.shutil, "disk_usage", lambda path: room)
+        p.start()
+        self.addCleanup(p.stop)
 
     def tearDown(self):
         with server._lock:
@@ -92,6 +97,65 @@ class Profiler(StartBase):
         self.assertEqual(server._run["state"], "idle")
         self.assertFalse(started)
         self.assertTrue(why.startswith("wait:"), why)
+
+
+class Warnings(StartBase):
+    """The desktop's two questions before a run: little free disk, and a resume already at Max Train Epochs."""
+
+    def _start(self, free_gb=500, resume="", epochs="10", confirm=()):
+        usage = SimpleNamespace(total=0, used=0, free=int(free_gb * 1024 ** 3))
+        _d, inputs, plan = _fake_plan()
+        inputs["MAX_TRAIN_EPOCHS"] = epochs
+        with patch.object(server.shutil, "disk_usage", lambda p: usage), \
+                patch.object(server, "_plan", lambda *a, **k: (None, inputs, plan)):
+            return server._start("klein", {}, "", resume=resume, confirm=confirm)
+
+    def test_plenty_of_room(self):
+        self.assertTrue(self._start().get("ok"))
+
+    def test_low_disk_asks(self):
+        r = self._start(free_gb=3)
+        self.assertEqual([w["code"] for w in r["warnings"]], ["low_disk"])
+        self.assertIn("3.0 GB", r["warnings"][0]["message"])
+        self.assertEqual(server._run["state"], "idle")
+        self.assertTrue(self._start(free_gb=3, confirm=["low_disk"]).get("ok"))
+
+    def test_resume_at_max_epochs_asks(self):
+        state = os.path.join(isolate.ROOT, "out", "fake_lora-000010-state")
+        with server._lock:
+            server._run.update(state="paused", resume=state)
+        r = self._start(resume=state, epochs="10")
+        self.assertEqual([w["code"] for w in r["warnings"]], ["resume_epochs"])
+        self.assertEqual(server._run["state"], "paused")
+        self.assertTrue(self._start(resume=state, epochs="10", confirm=["resume_epochs"]).get("ok"))
+
+    def test_resume_with_epochs_left(self):
+        state = os.path.join(isolate.ROOT, "out", "fake_lora-000004-state")
+        self.assertTrue(self._start(resume=state, epochs="10").get("ok"))
+
+    def test_queue_holds_with_the_warning(self):
+        usage = SimpleNamespace(total=0, used=0, free=1024 ** 3)
+        with patch.object(server.shutil, "disk_usage", lambda p: usage), \
+                patch.object(server, "_plan", lambda *a, **k: _fake_plan()):
+            started, why = server._queue_starter({"family": "klein", "values": {}, "image_folder": ""})
+        self.assertFalse(started)
+        self.assertIn("GB free", why)
+        self.assertFalse(why.startswith("wait:"))
+
+
+class WarningRoutes(unittest.TestCase):
+    def test_start_route_passes_confirm(self):
+        from webserve import Served
+        s = Served()
+        seen = []
+        try:
+            with patch.object(server, "_start", lambda *a, **k: seen.append(k.get("confirm")) or {"ok": True}):
+                status, _d = s.json("POST", "/api/start", {"family": "klein", "values": {}, "image_folder": "",
+                                                           "confirm": ["low_disk"]})
+        finally:
+            s.close()
+        self.assertEqual(status, 200)
+        self.assertEqual(seen, [["low_disk"]])
 
 
 if __name__ == "__main__":

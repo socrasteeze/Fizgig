@@ -932,9 +932,18 @@ async function check() {
   } catch (e) { showProblems([e.message]); }
 }
 
+// what the desktop asked before a run (little free disk, a resume already at Max Train Epochs): Start anyway sends the
+// same request again with those answered
+async function startAnyway(path, body, r) {
+  if (!r.warnings || !r.warnings.length) return r;
+  if (!confirm(r.warnings.map((w) => w.message).join("\n\n") + "\n\nStart anyway?")) return {};
+  return api(path, {...body, confirm: r.warnings.map((w) => w.code)});
+}
+
 async function start(path) {
   try {
-    const r = await api(path, path === "/api/start" ? runBody() : {});
+    const body = path === "/api/start" ? runBody() : {};
+    const r = await startAnyway(path, body, await api(path, body));
     showProblems(r.problems || (r.error ? [r.error] : []));    // stays up: the run line below refreshes itself
     pollRun();
   } catch (e) { showProblems([e.message]); }
@@ -952,7 +961,10 @@ async function resumeClick() {
   const say = diff.map((k) => `${SIZE_KEYS[k]} ${was[k] || "?"} → ${S.values[k]}`).join(", ");
   const go = (body) => async () => {
     box.style.display = "none";
-    try { const x = await api("/api/resume", body); showProblems(x.problems || (x.error ? [x.error] : [])); }
+    try {
+      const x = await startAnyway("/api/resume", body, await api("/api/resume", body));
+      showProblems(x.problems || (x.error ? [x.error] : []));
+    }
     catch (e) { showProblems([e.message]); }
     pollRun();
   };
