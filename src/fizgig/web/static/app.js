@@ -981,8 +981,23 @@ async function resumeClick() {
 const RUN_LABELS = {idle: "Idle", starting: "Starting", running: "Running", pausing: "Pausing", paused: "Paused",
                     completed: "Finished", failed: "Failed", stopped: "Stopped"};
 
+// a browser notification when a run finishes, fails or pauses (once Notify me is allowed): a run takes hours, and
+// this tab is usually behind another window
+function runNotify(was, r) {
+  if (!["starting", "running", "pausing"].includes(was) || !["completed", "failed", "paused"].includes(r.state)) return;
+  if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+  try { new Notification("Fizgig", {body: `${RUN_LABELS[r.state]}: ${r.lora || "the run"}`, icon: "/icon.png"}); }
+  catch (e) { /* a phone's browser shows them only through a service worker */ }
+}
+function notifyButton() {
+  $("btnNotify").style.display = typeof Notification !== "undefined" && window.isSecureContext &&
+    Notification.permission === "default" ? "" : "none";
+}
+
 async function pollRun() {
+  const was = S.run && S.run.state;
   try { S.run = await api("/api/run"); } catch (e) { return; }
+  runNotify(was, S.run);
   const ps = S.run.pod_stop || {};
   $("podStopBar").style.display = ps.counting || ps.note ? "" : "none";
   $("podStopKeep").textContent = ps.counting ? "Keep the pod running" : "OK";      // a result note: dismissed
@@ -6456,6 +6471,8 @@ function wire() {
   $("outTo").addEventListener("change", renderOutputs);
   $("btnCheck").addEventListener("click", check);
   $("btnStart").addEventListener("click", () => start("/api/start"));
+  $("btnNotify").addEventListener("click", () => Notification.requestPermission().then(notifyButton));
+  notifyButton();
   $("galleryRun").addEventListener("change", () => { S.galleryRun = $("galleryRun").value; loadGallery(); });
   $("likBtn").addEventListener("click", likenessPicker);
   // Gizmo is a window on the Fizgig computer: offered only to a page open there (not a phone, not a pod)
