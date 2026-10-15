@@ -23,14 +23,16 @@ class Served:
         self.thread.join(5)
 
     def request(self, method, path, body=None, token=True, host=None, headers=None):
-        """(status, headers, body bytes). JSON bodies are sent as JSON; the page's token goes along unless
-        token=False."""
+        """(status, headers, body bytes). A dict body is sent as JSON, bytes as they are (an upload); the page's
+        token goes along unless token=False."""
         c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
         h = {"Host": host or f"127.0.0.1:{self.port}", **(headers or {})}
         if token:
             h["X-Fizgig-Token"] = server.TOKEN
         data = None
-        if body is not None:
+        if isinstance(body, bytes):
+            data = body
+        elif body is not None:
             data = json.dumps(body).encode("utf-8")
             h["Content-Type"] = "application/json"
         try:
