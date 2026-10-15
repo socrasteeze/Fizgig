@@ -2147,6 +2147,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _body(self):
         n = int(self.headers.get("Content-Length") or 0)
+        if not 0 <= n <= 16 << 20:          # a JSON request (uploads stream their own): a huge one, even to the
+            return {}                       # login, is never read into memory; a negative one would read to the end
         try:
             return json.loads(self.rfile.read(n) or b"{}")
         except ValueError:

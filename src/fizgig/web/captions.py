@@ -37,12 +37,16 @@ CUSTOM_TASK = "Custom…"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif"}
 
 
+CAPTION_EXTS = {".txt", ".caption", ".cap", ".tags", ".tag", ".text"}     # what a caption is called: never a script
+
+
 def caption_ext(ext) -> str:
-    """The caption files' extension (Training > Caption Extension): .txt unless a plain one like .caption is set."""
+    """The caption files' extension (Training > Caption Extension): .txt unless a caption one like .caption is set
+    (the caption routes write files with it: a .bat or .py is never one)."""
     ext = str(ext or "").strip()
     if ext and not ext.startswith("."):
         ext = "." + ext
-    return ext if re.fullmatch(r"\.[A-Za-z0-9_]{1,12}", ext) else ".txt"
+    return ext if ext.lower() in CAPTION_EXTS else ".txt"
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".m4a"}
 
 _lock = threading.Lock()
