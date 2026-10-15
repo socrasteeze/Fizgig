@@ -198,6 +198,7 @@ def _run_job(state: CaptionState, job: dict) -> bool:
     total = len(images)
     if not total:
         print("FAIL: no images in list", flush=True)
+        print("DONE", flush=True)            # the job is over: the web UI waits for this line
         return False
 
     if state.backend == "florence":
@@ -210,11 +211,13 @@ def _run_job(state: CaptionState, job: dict) -> bool:
         instruction_file = job.get("instruction_file") or ""
         if not instruction_file:
             print("FAIL: instruction_file required", flush=True)
+            print("DONE", flush=True)
             return False
         with open(instruction_file, encoding="utf-8") as f:
             instruction = f.read().strip()
         if not instruction:
             print("FAIL: empty instruction", flush=True)
+            print("DONE", flush=True)
             return False
         encoder = state.model
 
