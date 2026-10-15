@@ -1147,6 +1147,9 @@ def _unclaim(prev, result=None):
 
 
 def _start(family_key, values, image_folder, resume="", ft_continue=None, note=""):
+    from fizgig.web import tools
+    if tools.holding_gpu():                     # as Studio, Royale and RefMod: the run would run out of VRAM
+        return {"error": "The Profiler is rendering on the GPU - wait for it, or Stop it, then start the run."}
     if studio.holding_gpu():                    # Repair Studio's model leaves the GPU for the run
         append_log("Unloading Repair Studio's model to free the GPU for this run.\n")
         studio.stop_worker()
@@ -1218,7 +1221,7 @@ def _queue_starter(item):
         return False, str(e)
     if r.get("ok"):
         return True, ""
-    if r.get("error") and "Captions are" in r["error"]:
+    if r.get("error") and ("Captions are" in r["error"] or "Profiler is" in r["error"]):
         return False, "wait: " + r["error"]
     return False, r.get("error") or "; ".join(r.get("problems") or ["it couldn't start"])
 

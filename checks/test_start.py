@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import isolate
-from fizgig.web import server
+from fizgig.web import server, tools
 
 
 def _fake_plan(problems=(), out_dir=None):
@@ -78,6 +78,20 @@ class DoubleStart(StartBase):
             r = server._start("klein", {}, "")
         self.assertIn("Captions are being made", r["error"])
         self.assertEqual(server._run["state"], "idle")
+
+
+class Profiler(StartBase):
+    def test_start_waits_for_the_profiler(self):
+        planned = []
+        with patch.object(tools, "holding_gpu", lambda: True), \
+                patch.object(server, "_plan", lambda *a, **k: planned.append(1) or _fake_plan()):
+            r = server._start("klein", {}, "")
+            started, why = server._queue_starter({"family": "klein", "values": {}, "image_folder": ""})
+        self.assertIn("Profiler", r.get("error", ""))
+        self.assertEqual(planned, [])
+        self.assertEqual(server._run["state"], "idle")
+        self.assertFalse(started)
+        self.assertTrue(why.startswith("wait:"), why)
 
 
 if __name__ == "__main__":
