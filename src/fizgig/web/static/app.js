@@ -32,6 +32,12 @@ async function api(path, body) {
   const r = await fetch(path, opt);
   const data = await r.json().catch(() => ({}));
   if (r.status === 401 && data.login) { showLogin(); throw new Error("login"); }
+  // the server restarted (Restart now, an update, a crash): this page holds the old server's token, so every call
+  // is refused until it is loaded again - say so, rather than a page that silently stops updating
+  if (r.status === 403 && data.error === "Reload the page.") {
+    $("restartedBanner").style.display = "";
+    $("restartedReload").onclick = () => location.reload();
+  }
   if (!r.ok && !data.problems) throw new Error(data.error || r.statusText);
   return data;
 }

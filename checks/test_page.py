@@ -33,6 +33,17 @@ class Page(unittest.TestCase):
         self.assertTrue(used)
         self.assertEqual(missing, [])
 
+    def test_restart_banner_matches_the_server(self):
+        # the page shows "Fizgig restarted" on the exact refusal a stale token gets
+        from webserve import Served
+        s = Served()
+        try:
+            status, d = s.json("GET", "/api/run", headers={"X-Fizgig-Token": "fake-old-token"}, token=False)
+        finally:
+            s.close()
+        self.assertEqual(status, 403)
+        self.assertIn(f'data.error === "{d["error"]}"', self.js)
+
 
 if __name__ == "__main__":
     unittest.main()
