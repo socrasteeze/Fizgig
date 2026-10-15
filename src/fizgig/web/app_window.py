@@ -30,17 +30,23 @@ from fizgig import user_data  # noqa: E402
 PREFS_FILE = user_data.PREFS_FILE
 
 
-def _prefs():
+def _prefs(strict=False):
+    """prefs.json, {} without one. Unreadable (a hand edit's typo): {}, or None when strict - a writer then leaves
+    it alone instead of saving over the model paths, the password and the RunPod key in it."""
     try:
         with open(PREFS_FILE, encoding="utf-8") as f:
             return json.load(f)
-    except (OSError, ValueError):
+    except OSError:
         return {}
+    except ValueError:
+        return None if strict else {}
 
 
 def _remember(geom):
     """The window's size and place, written into prefs.json beside what is there (the desktop app may have it open)."""
-    p = _prefs()
+    p = _prefs(strict=True)
+    if p is None:
+        return
     p["app_window"] = geom
     tmp = PREFS_FILE + ".tmp"
     try:
@@ -52,7 +58,9 @@ def _remember(geom):
 
 
 def _remember_last(url):
-    p = _prefs()
+    p = _prefs(strict=True)
+    if p is None:
+        return
     p["app_last_url"] = url
     tmp = PREFS_FILE + ".tmp"
     try:

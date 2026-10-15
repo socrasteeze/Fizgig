@@ -283,9 +283,25 @@ def _session_key() -> str:
         return _SESSION_KEY[0]
 
 
+def _prefs_unreadable() -> str:
+    """Why prefs.json can't be read ("" when it can, or isn't there yet). load_prefs() then gives the defaults, and a
+    save would write them over every model path, the password and the RunPod key: nothing saves over it."""
+    try:
+        with open(PREFS_FILE, encoding="utf-8") as f:
+            json.load(f)
+    except ValueError as e:
+        return f"{PREFS_FILE} can't be read ({e}). Fix or remove it: Fizgig won't save Preferences over it."
+    except OSError:
+        pass
+    return ""
+
+
 def update_prefs(changes: dict):
     """Only the given keys, read fresh and written atomically: the desktop app may be open on the same files."""
     with _lock:
+        why = _prefs_unreadable()
+        if why:
+            raise OSError(why)
         p = load_prefs()
         p.update(changes)
         _write_json(PREFS_FILE, p)
@@ -1940,6 +1956,8 @@ def _start_fetch(family, token="", optional=False):
     with _lock:
         if _fetch["proc"] is not None and _fetch["proc"].poll() is None:
             raise ValueError("A model download is already running.")
+    if _prefs_unreadable():                       # the fetcher writes the paths it downloads into prefs.json
+        raise ValueError(_prefs_unreadable())
     cmd = [sys.executable, "-m", "fizgig.scripts.fetch_models", "--progress", "--family", "tools", "--family", family]
     if optional or not desc.fetch_optional_label:
         cmd.append("--include-optional")          # no optional tick on the family: its whole list, as the desktop
@@ -3627,7 +3645,10 @@ def run_server(host, port=None, password=None, password_arg=False, open_browser=
         if port != want:
             logger.info(f"Port {want} is in use; the web UI takes {port} and keeps it (Preferences > Web UI)")
         if str(load_prefs().get("web_port") or "") != str(port):
-            update_prefs({"web_port": str(port)})
+            try:
+                update_prefs({"web_port": str(port)})
+            except OSError as e:                       # an unreadable prefs.json: kept as it is
+                logger.warning(str(e))
     if history.close_orphans():                        # a run left "running" by a stopped or crashed server
         logger.info("A run from before was still recorded as running: it is recorded as stopped now")
     webqueue.load()                                    # held if it holds anything: a restart never launches a run
@@ -3635,7 +3656,10 @@ def run_server(host, port=None, password=None, password_arg=False, open_browser=
     __import__("fizgig.web.update_check", fromlist=["x"]).start()   # a newer release? (the About button says)
     threading.Thread(target=_poll_stats_loop, daemon=True).start()
     if password and not on_pod() and host not in ("127.0.0.1", "localhost", "::1"):
-        _lan_announce(port)                    # other computers' Pods tabs find this one by themselves
+        try:
+            _lan_announce(port)                # other computers' Pods tabs find this one by themselves
+        except OSError as e:                   # an unreadable prefs.json: no lasting id to announce
+            logger.warning(str(e))
     shown = "localhost" if host in ("127.0.0.1", "::1") else host
     logger.info(f"Fizgig web UI on http://{shown}:{port}/" + (" (password required)" if password else ""))
     if open_browser:                           # Fizgig in browser: the page, once this is listening
