@@ -1,3 +1,5 @@
-from fizgig.web.app import main
+"""Entry point for python -m fizgig.web."""
+from fizgig.web.server import main
 
-main()
+if __name__ == "__main__":
+    main()

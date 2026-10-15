@@ -1,1 +1,4 @@
-"""Localhost web server. Started with ``python -m fizgig.web``."""
+"""Fizgig Web Package."""
+from fizgig.web.server import main
+
+__all__ = ["main"]
