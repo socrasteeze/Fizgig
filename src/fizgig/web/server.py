@@ -1138,6 +1138,14 @@ def _folder_problem(e, out_dir) -> str:
             f"(Output), or set the default in Preferences > LoRA output.")
 
 
+def _unclaim(prev, result=None):
+    """A Start that didn't launch gives its claim back (a paused run stays resumable). Returns `result`."""
+    with _lock:
+        if _run["state"] == "starting":
+            _run["state"] = prev
+    return result
+
+
 def _start(family_key, values, image_folder, resume="", ft_continue=None, note=""):
     if studio.holding_gpu():                    # Repair Studio's model leaves the GPU for the run
         append_log("Unloading Repair Studio's model to free the GPU for this run.\n")
@@ -1145,12 +1153,18 @@ def _start(family_key, values, image_folder, resume="", ft_continue=None, note="
     with _lock:
         if _run["proc"] is not None and _run["proc"].poll() is None or _run["state"] in ("starting", "running"):
             return {"error": "A run is already going. Stop or pause it first."}
+        prev = _run["state"]
+        _run["state"] = "starting"          # claimed in the same hold: a second Start (another tab, the queue) waits
     if captions.status()["state"] in ("loading", "running", "translating"):
-        return {"error": "Captions are being made (Captions tab). Stop that first, then start the run."}
-    captions.unload()                                     # the run gets the GPU memory the caption model held
-    desc, inputs, plan = _plan(family_key, values, image_folder, resume, ft_continue)
+        return _unclaim(prev, {"error": "Captions are being made (Captions tab). Stop that first, then start the run."})
+    try:
+        captions.unload()                                     # the run gets the GPU memory the caption model held
+        desc, inputs, plan = _plan(family_key, values, image_folder, resume, ft_continue)
+    except BaseException:
+        _unclaim(prev)
+        raise
     if plan.problems:
-        return {"problems": plan.problems}
+        return _unclaim(prev, {"problems": plan.problems})
     out_dir = inputs["LORA_OUTPUT_DIR"]
     # as the desktop's Start clears them; a resume's pause record is used up once its run launches
     for stale in (".pause_requested", ".sample_override.json", ".sample_now", ".save_now") + (
@@ -1167,7 +1181,7 @@ def _start(family_key, values, image_folder, resume="", ft_continue=None, note="
             with open(path, "w", encoding="utf-8") as f:
                 f.write(text)
     except OSError as e:
-        return {"error": _folder_problem(e, out_dir)}
+        return _unclaim(prev, {"error": _folder_problem(e, out_dir)})
     for f in (SLIDER_LIVE, SLIDER_LIVE_APPLIED):     # an earlier run's live slider prompts are not this one's (a resume
         try:                                         # has the latest in its own values); cleared before it launches, so
             os.remove(os.path.join(out_dir, f))      # an Apply while it loads waits for its first epoch, not deleted
