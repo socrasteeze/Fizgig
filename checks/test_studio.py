@@ -50,6 +50,54 @@ class StopWorker(unittest.TestCase):
             self.assertEqual((studio._S["state"], studio._S["family"]), ("loading", "klein"))
 
 
+class IdleUnload(unittest.TestCase):
+    """Studio's model leaves the GPU after IDLE_UNLOAD_S with no render, as Unload does - never mid-work."""
+
+    def setUp(self):
+        self.saved = {k: dict(v) for k, v in (("S", studio._S), ("R", studio._R), ("M", studio._M))}
+        self.addCleanup(self._restore)
+        self.unloaded = []
+        p = patch.object(studio, "reset", lambda: self.unloaded.append(1))
+        p.start()
+        self.addCleanup(p.stop)
+        with studio._lock:
+            studio._S.update(state="ready", rendering=False, pending=None, nolora_busy=False, used=1000.0)
+
+    def _restore(self):
+        for d, k in ((studio._S, "S"), (studio._R, "R"), (studio._M, "M")):
+            d.clear()
+            d.update(self.saved[k])
+
+    def test_unused_unloads(self):
+        self.assertTrue(studio.idle_unload(now=1000.0 + studio.IDLE_UNLOAD_S + 1))
+        self.assertEqual(self.unloaded, [1])
+        self.assertIn("unused", studio._S["status"])
+
+    def test_recently_used_stays(self):
+        self.assertFalse(studio.idle_unload(now=1000.0 + studio.IDLE_UNLOAD_S - 1))
+
+    def test_busy_stays(self):
+        late = 1000.0 + studio.IDLE_UNLOAD_S * 10
+        for busy in ({"S": {"rendering": True}}, {"S": {"pending": ({}, None)}}, {"S": {"state": "loading"}},
+                     {"S": {"state": "idle"}}, {"R": {"state": "rendering"}}, {"M": {"state": "rendering"}}):
+            with self.subTest(busy=busy):
+                self._restore()
+                with studio._lock:
+                    studio._S.update(state="ready", rendering=False, pending=None, nolora_busy=False, used=1000.0)
+                    studio._S.update(busy.get("S", {}))
+                    studio._R.update(busy.get("R", {}))
+                    studio._M.update(busy.get("M", {}))
+                self.assertFalse(studio.idle_unload(now=late))
+        self.assertEqual(self.unloaded, [])
+
+    def test_loaded_counts_from_ready(self):
+        with studio._lock:
+            studio._S.update(state="loading", used=1000.0)
+        with patch.object(studio.time, "time", lambda: 5000.0):
+            studio._event({"ev": "loaded", "family": "klein", "primary": "fake.safetensors"})
+        self.assertEqual(studio._S["used"], 5000.0)
+
+
 class SaveBakesStudiosLora(unittest.TestCase):
     """Studio and Royale share one engine: Royale swaps its LoRA in. Save must bake Studio's, or refuse."""
 

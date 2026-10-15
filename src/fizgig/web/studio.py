@@ -145,7 +145,7 @@ def _event(ev):
             if kind == "loaded":
                 _S.update(nolora="", nolora_media="", nolora_gen=0, nolora_busy=False)
                 _S.update(state="ready", family=ev.get("family", ""), primary=ev.get("primary", ""),
-                          donor=ev.get("donor", ""), status="Loaded.", error="")
+                          donor=ev.get("donor", ""), status="Loaded.", error="", used=time.time())
                 _S["profile"] = _profile(ev.get("hash", ""))
             else:
                 _S.update(donor=ev.get("donor", ""), status="Donor loaded. Enable it per block to mix it in."
@@ -282,6 +282,37 @@ def plan(desc, prefs, pref_path, fast=True, samples=None, negative=None):
     return kw, settings, status, problems
 
 
+IDLE_UNLOAD_S = 600                          # Studio's model leaves the card after this long unused, as Unload does
+_idle_watch = []                             # its watcher, started with the first load
+
+
+def idle_unload(now=None) -> bool:
+    """Unload Studio's model once it has sat unused (no render) for IDLE_UNLOAD_S: never while it loads or renders,
+    or while LoRA Royale or RefMod render on its worker. True when it unloaded."""
+    now = time.time() if now is None else now
+    with _lock:
+        idle = (_S["state"] == "ready" and not _S["rendering"] and _S["pending"] is None
+                and not _S.get("nolora_busy") and _R["state"] != "rendering" and _M["state"] != "rendering"
+                and not any(t["state"] == "rendering" for t in _T.values())
+                and now - (_S["used"] or now) > IDLE_UNLOAD_S)
+    if not idle:
+        return False
+    reset()
+    with _lock:
+        _S["status"] = (f"Unloaded after {IDLE_UNLOAD_S // 60} minutes unused, to free the GPU. Press Start to load "
+                        "again.")
+    return True
+
+
+def _idle_loop():
+    while True:
+        time.sleep(30)
+        try:
+            idle_unload()
+        except Exception:
+            pass
+
+
 def load(desc, primary, donor, kw, settings, status, turbo, canvas=None):
     if not primary or not os.path.isfile(primary):
         raise ValueError("Choose a primary LoRA first (that file isn't there).")
@@ -291,6 +322,9 @@ def load(desc, primary, donor, kw, settings, status, turbo, canvas=None):
         other = _S["family"] and _S["family"] != desc.key
         _S.update(state="loading", status="Starting the Studio worker…", error="", progress=None, pending=None,
                   family=desc.key, used=time.time())
+        if not _idle_watch:
+            _idle_watch.append(threading.Thread(target=_idle_loop, daemon=True))
+            _idle_watch[0].start()
 
     def go():                                    # the worker's first start imports torch: not in the request
         try:
