@@ -50,5 +50,42 @@ class StopWorker(unittest.TestCase):
             self.assertEqual((studio._S["state"], studio._S["family"]), ("loading", "klein"))
 
 
+class SaveBakesStudiosLora(unittest.TestCase):
+    """Studio and Royale share one engine: Royale swaps its LoRA in. Save must bake Studio's, or refuse."""
+
+    def setUp(self):
+        self.saved = dict(studio._S)
+        self.addCleanup(lambda: (studio._S.clear(), studio._S.update(self.saved)))
+
+    def test_server_sends_studios_lora(self):
+        sent = []
+        with studio._lock:
+            studio._S.update(state="ready", primary="C:/loras/fake_studio.safetensors")
+        with patch.object(studio, "_send", sent.append):
+            studio.save("C:/out/fake_fixed.safetensors", {}, False)
+        self.assertEqual(sent[0]["primary"], "C:/loras/fake_studio.safetensors")
+
+    def test_server_refuses_when_royale_took_the_worker(self):
+        with studio._lock:
+            studio._S.update(state="idle", primary="")
+        with patch.object(studio, "_send", side_effect=AssertionError("nothing sent")):
+            with self.assertRaises(ValueError):
+                studio.save("C:/out/fake_fixed.safetensors", {}, False)
+
+    def test_worker_refuses_another_lora(self):
+        from fizgig.scripts import studio_worker as w
+        baked = []
+        eng = SimpleNamespace(primary_network=object(), primary_path="C:/loras/fake_royale-000008.safetensors",
+                              save_repaired=lambda out, state, include_donor=False: baked.append(out) or {})
+        with patch.dict(w.S, engine=eng), patch.object(w, "_state", lambda d: d), patch.object(w, "emit"):
+            with self.assertRaises(ValueError):
+                w.cmd_save({"out": "fake_fixed.safetensors", "state": {},
+                            "primary": "C:/loras/fake_studio.safetensors"})
+            self.assertEqual(baked, [])
+            w.cmd_save({"out": "fake_fixed.safetensors", "state": {},
+                        "primary": "C:/loras/fake_royale-000008.safetensors"})
+            self.assertEqual(baked, ["fake_fixed.safetensors"])
+
+
 if __name__ == "__main__":
     unittest.main()

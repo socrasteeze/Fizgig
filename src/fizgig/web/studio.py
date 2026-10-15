@@ -390,8 +390,12 @@ def keep_tweaked():
 
 def save(out, state, include_donor):
     with _lock:
+        if _S["state"] != "ready":               # Royale or RefMod took the worker: its LoRA is on the engine now
+            raise ValueError("Studio's LoRA isn't loaded (LoRA Royale or RefMod used the GPU worker since). Load it "
+                             "again, then Save.")
         _S["saved"] = None
-    _send({"cmd": "save", "out": out, "state": state, "include_donor": bool(include_donor)})
+        primary = _S["primary"]                  # the worker refuses when the engine holds another LoRA by now
+    _send({"cmd": "save", "out": out, "state": state, "include_donor": bool(include_donor), "primary": primary})
 
 
 def reset():

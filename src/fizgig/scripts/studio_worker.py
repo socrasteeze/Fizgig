@@ -869,6 +869,10 @@ def cmd_save(c):
         eng = S["engine"]
         if eng is None or eng.primary_network is None:
             raise ValueError("Load a LoRA first.")
+        norm = lambda p: os.path.normcase(os.path.abspath(p)) if p else ""
+        if "primary" in c and norm(c["primary"]) != norm(eng.primary_path):     # Royale / RefMod swapped it since
+            raise ValueError("Studio's LoRA isn't on the model any more (LoRA Royale or RefMod used it since). "
+                             "Load it again, then Save.")
         summary = eng.save_repaired(c["out"], _state(c["state"]), include_donor=bool(c.get("include_donor")))
     emit(ev="saved", out=c["out"], summary=summary)
 
