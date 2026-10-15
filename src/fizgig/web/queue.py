@@ -27,12 +27,17 @@ _q = {"items": [], "held": False, "reason": "", "waiting": "", "timer": None, "f
 
 def _save():
     tmp = QUEUE_FILE + ".tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(_q["items"], f, default=str)
-        os.replace(tmp, QUEUE_FILE)
-    except OSError:
-        pass
+    for _ in range(25):                       # Windows refuses the replace while something reads the file: try again
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(_q["items"], f, default=str)
+            os.replace(tmp, QUEUE_FILE)
+            return
+        except PermissionError:
+            time.sleep(0.02)
+        except OSError:
+            break
+    print(f"[fizgig] couldn't save the queue to {QUEUE_FILE}: it may come back as it was after a restart", flush=True)
 
 
 def load():

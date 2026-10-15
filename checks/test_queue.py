@@ -121,6 +121,33 @@ class StartNext(QueueBase):
         self.assertTrue(webqueue.status()["held"])
 
 
+class SaveOnWindows(QueueBase):
+    """Windows refuses os.replace while another program (a backup tool, an editor) has the file open."""
+
+    def test_locked_file_saved_once_free(self):
+        real, calls = os.replace, []
+
+        def busy_twice(src, dst):
+            calls.append(dst)
+            if len(calls) <= 2:
+                raise PermissionError(13, "fake: the file is in use")
+            return real(src, dst)
+
+        with patch.object(webqueue.os, "replace", busy_twice):
+            self.add("fake_a")
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(self.on_disk(), ["fake_a"])
+
+    def test_still_locked_gives_up_quietly(self):
+        def always_busy(src, dst):
+            raise PermissionError(13, "fake: the file is in use")
+
+        with patch.object(webqueue.os, "replace", always_busy), patch("builtins.print") as said:
+            self.add("fake_a")                         # no exception: the queue in memory carries on
+        self.assertEqual(self.shown(), ["fake_a"])
+        self.assertIn("couldn't save the queue", said.call_args[0][0])
+
+
 class Routes(QueueBase):
     def test_move_and_remove_routes(self):
         from webserve import Served
