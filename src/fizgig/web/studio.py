@@ -417,6 +417,12 @@ def stop_worker():
     with _lock:                                  # ours to stop: its reader says nothing when it ends
         if _S["proc"] is p:
             _S.update(proc=None, sock=None, port=0)
+            # as reset(): no "ready" with no worker behind it, or the next slider move waits on it for ever (a load
+            # switching models stops the old worker itself, and stays "loading")
+            if _S["state"] == "ready":
+                _S.update(state="idle", primary="", donor="", primary_blocks=[], donor_blocks=[], hash="",
+                          profile=None, rendering=False, pending=None, progress=None, family="",
+                          status="Unloaded: the GPU was wanted elsewhere. Press Start to load again.")
             if _R["state"] == "rendering":
                 _R.update(state="failed", error="Stopped (the GPU was wanted elsewhere).", status="Stopped.")
             for t in _T.values():
