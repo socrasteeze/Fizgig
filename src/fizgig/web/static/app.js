@@ -88,7 +88,8 @@ async function boot() {
     for (const f of S.schema.families) sel.append(el("option", {value: f.key, text: f.gui_label || f.display_name}));
   }
   await chooseFamily(st.family && S.schema.order.includes(st.family) ? st.family : S.schema.order[0]);
-  if (st.tab) showTab(st.tab);
+  showTab("start");                // Fizgig always opens on Start (its News card), never the last tab used
+  newsCard();
   wire();
   $("podsTabBtn").style.display = S.onPod ? "none" : "";      // on a pod there's nothing to connect to
   $("sideDeploy").style.display = S.onPod ? "none" : "";      // ...nor a pod to deploy
@@ -120,7 +121,9 @@ async function chooseFamily(key) {
     }
   }
   if (S.trigger !== undefined) S.values.CAPTION_TRIGGER_WORD = S.trigger;     // the folder's, not the model's
-  S.values.__SAMPLE_LIVE = false;            // a live preview change is for one run, never remembered
+  // on whenever a form loads: a change made here while a run trains goes to its next previews (only a change is
+  // sent, so a run started from the queue keeps its own prompts until you change something)
+  S.values.__SAMPLE_LIVE = true;
   renderAll();
   await refreshState();
   saveState();
@@ -248,7 +251,8 @@ function renderRow(r) {
   // its kind sets its layout (style.css): boxes in the grid, switches as tiles, a choice of pills, files and notes
   // across the card - from the schema's row kind, so every model's form lays out the same way
   const kind = {check: "check", radio: "radio", note: "note", text: "wide", path: "wide", folder: "wide", shown: "wide"}[r.kind] || "field";
-  const wrap = el("div", {class: "form-row kind-" + kind + (r.featured ? " row-featured" : ""), "data-key": r.key});
+  const wrap = el("div", {class: "form-row kind-" + kind + (r.featured ? " row-featured" : "") +
+    (r.boxed ? " row-boxed" : ""), "data-key": r.key});
   if (r.kind === "shown") {                       // a value from elsewhere (the Start tab's folder), read-only here
     wrap.append(el("div", {class: "field-row"}, el("span", {class: "field-label", text: r.label + ":"}),
       el("input", {type: "text", class: "w-path", id: "note_" + r.key, readonly: true, tabindex: -1})));
@@ -402,7 +406,8 @@ function blockPicker(r, wrap) {
 function onValue(r, val) {
   S.values[r.key] = val;
   if (r.key === "__SAMPLE_LIVE" || (S.values.__SAMPLE_LIVE &&
-      ["SAMPLE_PROMPT", "SAMPLE_SEED", "SAMPLE_WIDTH", "SAMPLE_HEIGHT"].includes(r.key))) sampleLiveSoon();
+      ["SAMPLE_PROMPT", "SAMPLE_SEED", "SAMPLE_WIDTH", "SAMPLE_HEIGHT", "SAMPLE_STEPS", "SAMPLE_CFG_SCALE",
+       "FAMILY_TURBO_STRENGTH"].includes(r.key))) sampleLiveSoon();
   if (r.key === "CAPTION_TRIGGER_WORD") { S.trigger = String(val).trim(); $("capTrigger").value = S.trigger; saveTriggerSoon(S.trigger); }
   const extra = r.sets && r.sets[val];            // a kind of training that also sets others (Fine-tune's LR)
   if (extra) { Object.assign(S.values, extra); syncInputs(Object.keys(extra)); }
@@ -463,6 +468,11 @@ async function refreshState() {
     if (box && shown !== undefined && disabled.has(k)) { box.value = shown; box.dataset.shown = "1"; }
     else if (box && box.dataset.shown) { delete box.dataset.shown; syncInputs([k]); }
     const n = $("note_" + k);
+    if (n && k === "__SAMPLE_LIVE") {          // its note follows the run (liveNote), not the form's state
+      S._liveNoteFor = undefined;
+      liveNote(!!(S.run && (S.run.running || S.run.state === "starting")));
+      return;
+    }
     if (n) {
       if (n.tagName === "INPUT") { n.value = S.state.notes[k] || ""; return; }
       if (n.classList.contains("note-lines")) {    // one line each, "Label: text" with the label bold (Subjects card)
@@ -505,7 +515,10 @@ function turboFollow() {
     note(sides.on); note(sides.off);
     Object.assign(want, sides.off);
   }
-  for (const pass of ["turbo", "follow"]) for (const row of rows) {
+  // the later pass wins the boxes they share: normally the preview checkpoint's own values, but a checkpoint that
+  // takes the Turbo LoRA (Kromoss) renders a live Turbo's steps and CFG
+  const order = S.state && S.state.checkpoint_turbo ? ["follow", "turbo"] : ["turbo", "follow"];
+  for (const pass of order) for (const row of rows) {
     if (!row[pass]) continue;
     let live;
     if (pass === "turbo") {
@@ -532,6 +545,10 @@ function turboFollow() {
   Object.assign(S.values, flags);
   syncInputs(moved);
   saveStateSoon();
+  if (S.values.__SAMPLE_LIVE && moved.length) sampleLiveSoon();
+  // what hangs on the moved values (the negative box shows only above CFG 1) is worked out again from them; the next
+  // pass finds nothing to move, so this settles after one round
+  if (moved.length) refreshStateSoon();
 }
 const refreshStateSoon = debounce(refreshState, 250);
 
@@ -699,15 +716,25 @@ function fetchRow(f) {
   const box = el("div", {class: "fetch-row"});
   const opt = f.fetch_optional_label ? el("input", {type: "checkbox"}) : null;
   const token = gated.length ? el("input", {type: "password", class: "w-path", placeholder: "hf_…"}) : null;
+  // a file offered with another build (MOSS-Image Base or Kromoss): a pick, starting on the one its path holds now
+  const picks = files.filter((m) => m.fetch_choice && m.fetch_choice.length === 2 && m.alt_repo && m.alt_path).map((m) => {
+    const sel = el("select", {}, el("option", {value: "main", text: m.fetch_choice[0]}),
+      el("option", {value: "alt", text: m.fetch_choice[1]}));
+    const cur = String(S.prefs[m.pref_key] || "").split(/[\\/]/).pop();
+    sel.value = cur && cur === m.alt_path.split("/").pop() ? "alt" : "main";
+    return {key: m.pref_key, sel, label: m.label};
+  });
   const btn = el("button", {class: "btn btn-accent", text: "⬇ Download models for me", onclick: async () => {
     try {
-      await api("/api/fetch", {family: f.key, token: token ? token.value.trim() : "", optional: opt ? opt.checked : false});
+      await api("/api/fetch", {family: f.key, token: token ? token.value.trim() : "", optional: opt ? opt.checked : false,
+        choices: Object.fromEntries(picks.map((p) => [p.key, p.sel.value]))});
       if (token) token.value = "";
       S.fetchError = null;
       watchFetch();
     } catch (e) { S.fetchError = {family: f.key, text: e.message}; paintFetch(); }
   }});
   const line = el("div", {class: "field-row"}, btn);
+  for (const p of picks) line.append(el("label", {class: "fetch-opt"}, p.label + ": ", p.sel));
   if (opt) line.append(el("label", {class: "fetch-opt"}, opt, " " + f.fetch_optional_label));
   box.append(line);
   if (token) {
@@ -1092,10 +1119,10 @@ async function startAnyway(path, body, r) {
   return api(path, {...body, confirm: r.warnings.map((w) => w.code)});
 }
 
-async function start(path) {
+async function start(path, body) {
   try {
-    const body = path === "/api/start" ? runBody() : {};
-    const r = await startAnyway(path, body, await api(path, body));
+    const sent = path === "/api/start" ? runBody() : (body || {});
+    const r = await startAnyway(path, sent, await api(path, sent));
     showProblems(r.problems || (r.error ? [r.error] : []));    // stays up: the run line below refreshes itself
     pollRun();
   } catch (e) { showProblems([e.message]); }
@@ -1107,14 +1134,20 @@ async function start(path) {
 const SIZE_KEYS = {DATASET_MEGAPIXELS: "Target Megapixels", CLIP_MEGAPIXELS: "Clip Megapixels"};
 async function resumeClick() {
   const r = S.run || {}, was = r.values || {}, box = $("resumeChoice");
+  // the previews as the Samples tab has them now (prompts, seed, size, steps, CFG, Turbo strength, the preview
+  // checkpoint tick) and block swap go with the resume
+  const samples = r.family === S.family ? Object.fromEntries(["SAMPLE_PROMPT", "SAMPLE_SEED", "SAMPLE_WIDTH",
+    "SAMPLE_HEIGHT", "SAMPLE_STEPS", "SAMPLE_CFG_SCALE", "FAMILY_TURBO_STRENGTH", "SAMPLE_CHECKPOINT", "BLOCKS_SWAP"]
+    .filter((k) => k in S.values).map((k) => [k, S.values[k]])) : {};
   const diff = r.family === S.family ? Object.keys(SIZE_KEYS).filter((k) => S.values[k] !== undefined &&
     String(S.values[k]).trim() !== "" && Number(S.values[k]) !== Number(was[k])) : [];
-  if (!diff.length) { box.style.display = "none"; return start("/api/resume"); }
+  if (!diff.length) { box.style.display = "none"; return start("/api/resume", {samples}); }
   const say = diff.map((k) => `${SIZE_KEYS[k]} ${was[k] || "?"} → ${S.values[k]}`).join(", ");
   const go = (body) => async () => {
     box.style.display = "none";
     try {
-      const x = await startAnyway("/api/resume", body, await api("/api/resume", body));
+      const sent = {...body, samples};
+      const x = await startAnyway("/api/resume", sent, await api("/api/resume", sent));
       showProblems(x.problems || (x.error ? [x.error] : []));
     }
     catch (e) { showProblems([e.message]); }
@@ -1155,6 +1188,7 @@ async function pollRun() {
   $("podStopKeep").textContent = ps.counting ? "Keep the pod running" : "OK";      // a result note: dismissed
   $("podStopText").textContent = ps.counting ? `Stopping this pod in ${ps.left} s so it stops billing.` : ps.note || "";
   const r = S.run, live = r.running || r.state === "starting";
+  liveNote(live);
   const label = RUN_LABELS[r.state] || r.state;
   $("runStatus").textContent = r.lora ? `${label}: ${r.lora}${r.stage ? " · " + r.stage : ""}` : label;
   $("runBadge").textContent = label;
@@ -1404,6 +1438,7 @@ async function loadGallery() {
   let g = await get(want);
   let run = want;
   if (!g.items.length && g.runs.length && !g.runs.includes(want)) { run = g.runs[0]; g = await get(run); }
+  previewMode(g.preview_mode);
   const sel = $("galleryRun");
   sel.innerHTML = "";
   // "this run" while it trains; once it has ended it is the last run
@@ -1677,6 +1712,38 @@ async function loadCheckpoints() {
     others ? el("a", {href: "#", class: "inline-link", text: S.ckptAll ? `Only ${run}'s` :
       `Show the ${others} from other runs in this folder`,
       onclick: (e) => { e.preventDefault(); S.ckptAll = !S.ckptAll; loadCheckpoints(); }}) : document.createTextNode(""));
+}
+
+// the Previews so far card: what this run's previews render with (recorded by the trainer when the run started)
+function previewMode(m) {
+  const box = $("galleryMode");
+  if (!box) return;
+  box.className = "preview-mode" + (m && m.turbo ? " turbo" : "");
+  if (!m) { box.style.display = "none"; return; }
+  const how = `${m.steps} steps, CFG ${Number(m.cfg).toFixed(1).replace(/\.0$/, "")}`;
+  box.textContent = m.turbo
+    ? `⚡ Turbo LoRA in use: ${m.turbo} at strength ${m.strength}, ${how}. For full-quality previews, set Turbo ` +
+      "LoRA strength to 0 above (Steps and CFG go back with it); tick Change the previews of the run going now " +
+      "for it to apply from this run's next preview."
+    : `Previews render on ${m.model || "the model being trained"}: ${how}, no Turbo LoRA.`;
+  box.style.display = "";
+}
+
+// ---- Start tab: the News card (fizgig/web/news.py, newest first) ----------------------------------------------
+function newsCard() {
+  const host = $("newsCard");
+  const items = (S.schema.news || []).slice(0, 3);
+  host.style.display = items.length ? "" : "none";
+  const body = $("newsBody");
+  body.innerHTML = "";
+  for (const it of items) {
+    const item = el("div", {class: "news-item"},
+      el("div", {class: "news-head"}, el("b", {text: it.title}), el("span", {class: "field-hint", text: " · " + it.date})));
+    for (const para of String(it.body || "").split("\n\n")) item.append(el("p", {class: "news-text", text: para}));
+    if (it.links && it.links.length) item.append(el("div", {class: "news-links"}, ...it.links.map((l) =>
+      el("a", {class: "inline-link", target: "_blank", rel: "noopener", href: l.href, text: l.text + " →"}))));
+    body.append(item);
+  }
 }
 
 // ---- Start tab: your training data (the folders in the training data folder) ---------------------------------
@@ -2951,18 +3018,30 @@ async function runLossTick(training) {
   host.replaceChildren(lossGraph(d));
 }
 
-// the Samples tab's "Change the previews of the run going now": its prompts, seed and size go to the run as the
+// the Samples tab's "Change the previews of the run going now": its prompts, seed, size, steps, CFG and Turbo
+// strength go to the run as the
 // trainer's sample override while ticked (sent again on every change), and come off when it's unticked
 const sampleLiveSoon = debounce(async () => {
   const v = S.values, note = $("note___SAMPLE_LIVE");
   try {
     const r = await api("/api/run/sample_override", {on: !!v.__SAMPLE_LIVE, prompts: v.SAMPLE_PROMPT || "",
-      seed: v.SAMPLE_SEED, width: v.SAMPLE_WIDTH, height: v.SAMPLE_HEIGHT});
+      seed: v.SAMPLE_SEED, width: v.SAMPLE_WIDTH, height: v.SAMPLE_HEIGHT, steps: v.SAMPLE_STEPS,
+      cfg: v.SAMPLE_CFG_SCALE, turbo: v.FAMILY_TURBO_STRENGTH});
     if (note) note.textContent = r.on ? "Sent: the run's next previews use these." : "The run is back on its own prompts.";
   } catch (e) {
-    if (note) note.textContent = e.message;
+    if (note) note.textContent = S.run && (S.run.running || S.run.state === "starting") ? e.message : liveIdleText();
   }
 }, 700);
+
+// the tick's note follows the run: what a change would do now, never an old message from before the run started
+const liveIdleText = () => "On: a change here goes to a run while it trains, from its next preview.";
+function liveNote(live) {
+  const note = $("note___SAMPLE_LIVE");
+  if (!note || S._liveNoteFor === live) return;
+  S._liveNoteFor = live;
+  note.textContent = !S.values.__SAMPLE_LIVE ? "" : live ?
+    "On: a change here goes to the run training now, from its next preview." : liveIdleText();
+}
 
 // a run's model, training folder and settings into the form (Start again, a queued run's Edit)
 async function loadIntoForm(s) {

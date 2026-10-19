@@ -14,7 +14,7 @@ _COMFY = "Comfy-Org/MOSS-Image"
 _GUIDE = f"{_REPO} USERGUIDE.md"
 _REPORT = f"{_REPO} paper/MOSS_Image_Technical_Report.pdf"
 _PIPE = f"{_CARD} pipeline_moss_image.py"
-_TURBO = "lodestones/MOSS-Image-SFT-8-steps-dmd"
+_TURBO = "lodestones/Kromoss"         # its 8-step DMD LoRA, distilled from Base: previews on Base or Kromoss
 _MODULES = ("proj.q", "proj.k", "proj.v", "proj.o", "proj.ffn_up_gate", "proj.ffn_down")   # model.py _Block Linears
 # USERGUIDE.md Prompt Guidelines: "we recommend the following effective negative tags"
 _NEGATIVE = "worst quality, bad anatomy, watermark, jpeg artifact"
@@ -57,13 +57,9 @@ MOSS_IMAGE = FamilyDescription(
                   # verified 17 Oct 2026: tensor for tensor the official transformer/ shards, q / k / v fused into
                   # proj.qkv = [q; k; v]; the loader splits it back
                   hint="MOSS-Image Base - ComfyUI's single file. The official diffusers shards "
-                       "(OpenMOSS-Team/MOSS-Image-Base transformer/) and the int8_convrot file load too. So does "
-                       "Kromoss, lodestones' sharper fine-tune of Base, in its place.",
-                  # Kromoss: a full fine-tune of Base at 1024 px (same architecture, files and recipe); checked 19 Oct
-                  # 2026 on a 5090 as the Base DiT - int8 auto, 9.4 GB peak at 1 MP, trains, saves and previews
-                  alt_repo="lodestones/Kromoss", alt_path="diffusion_models/kromoss_bf16.safetensors",
-                  alt_label="Download Kromoss",
-                  alt_note="Kromoss ~10.2 GB - lodestones' fine-tune of Base for sharper pictures, trains the same way"),
+                       "(OpenMOSS-Team/MOSS-Image-Base transformer/) and the int8_convrot file load too. (Kromoss is "
+                       "not recommended to train on: in our test a LoRA on it began to overbake after about 750 "
+                       "steps.)"),
         ModelFile("moss_image_vae", "FLUX.2 autoencoder (small decoder)", True, _COMFY,
                   "vae/flux2-vae_small.safetensors", 0.25,
                   "The FLUX.2 autoencoder with BFL's small decoder, the decoder MOSS-Image ships with.",
@@ -76,12 +72,13 @@ MOSS_IMAGE = FamilyDescription(
                   hint="FLUX.2's encoder with the small decoder MOSS-Image was released with. Flux 3's or Klein's "
                        "full autoencoder also works (same latents), but the small decoder avoids spots in the "
                        "pictures."),
-        ModelFile("moss_image_turbo_lora", "Turbo LoRA (optional)", False, _TURBO, "lora.safetensors", 1.19,
+        ModelFile("moss_image_turbo_lora", "Turbo LoRA (optional)", False, _TURBO, "8-steps-dmd-lora.safetensors", 1.19,
                   "Optional speed LoRA for previews; leave empty to preview at full quality.", role="speed_lora",
                   bulk_fetch=False,           # its own Download link only: soft on Base today (Peter, 18 Oct 2026)
-                  hint="Optional. A turbo / DMD LoRA for fast previews - lodestones' 8-step DMD distillation of "
-                       "MOSS-Image SFT today (work in progress; soft on Base). Leave it empty for full-quality "
-                       "previews. With one set, choose its steps and CFG on the Samples tab; the workbench follows."),
+                  hint="Optional. lodestones' 8-step Turbo LoRA from Kromoss, distilled from MOSS-Image Base: fast "
+                       "previews on Base or Kromoss (previews on the SFT checkpoint never take a Turbo LoRA). Leave it "
+                       "empty for full-quality previews. With one set, set its strength, steps and CFG on the Samples "
+                       "tab; the workbench follows."),
         ModelFile("moss_image_text_encoder", "Qwen3.5-9B text encoder", True, "Comfy-Org/Qwen3.5",
                   "text_encoders/qwen3.5_9b_bf16.safetensors", 19.31,
                   "Used for caching only, then unloaded. Loads text-only (about 15 GB), or 8-bit (about 9 GB) on "
@@ -94,15 +91,20 @@ MOSS_IMAGE = FamilyDescription(
         # MOSS-Image SFT (OpenMOSS's aesthetics-tuned checkpoint, same architecture; @Murf-Code, PR #195): Repair
         # Studio and LoRA Royale render on it once set, and training samples do (the Samples tab tick, on by
         # default - a Base LoRA carries over to the SFT only partly). Never trained: Fizgig trains on the Base
-        ModelFile("moss_image_sft_dit", "MOSS-Image SFT DiT (previews)", True, _COMFY,
+        ModelFile("moss_image_sft_dit", "Preview model (SFT or Kromoss)", True, _COMFY,
                   "diffusion_models/moss_image_sft_int8_convrot.safetensors", 5.41, role="preview_dit",
-                  hint="OpenMOSS's everyday checkpoint: training samples, Repair Studio and LoRA Royale render on "
-                       "it (untick it on the Samples tab for samples on the Base), showing the LoRA where most "
-                       "people use it. Never trained. ComfyUI's int8 ConvRot file is decoded at load; the bf16 SFT "
-                       "file works as well.",
+                  hint="The model training samples, Repair Studio and LoRA Royale render your LoRA on (untick it on "
+                       "the Samples tab for samples on the Base): MOSS-Image SFT, OpenMOSS's everyday model, or "
+                       "lodestones' Kromoss, a sharper fine-tune of Base made for generating, on which the Turbo "
+                       "LoRA works too. Never trained. The int8 ConvRot files are decoded at load; the bf16 files "
+                       "work as well.",
                   download_note="~5.4 GB (int8 ConvRot) - Apache-2.0",
-                  alt_repo=_COMFY, alt_path="diffusion_models/moss_image_sft_bf16.safetensors",
-                  alt_label="bf16 file", alt_note="~10.2 GB"),
+                  # Kromoss (lodestones/Kromoss): a full fine-tune of Base, presented as a drop-in for SFT. As a
+                  # training base it overbaked sooner than Base in Peter's test (19 Oct 2026), so it's offered here,
+                  # for previews, and not on the Base row
+                  alt_repo="lodestones/Kromoss", alt_path="diffusion_models/kromoss_int8_convrot.safetensors",
+                  alt_label="Download Kromoss", fetch_choice=("MOSS-Image SFT", "Kromoss"), alt_size_gb=5.41,
+                  alt_note="Kromoss ~5.4 GB (int8 ConvRot) - sharper, and takes the Turbo LoRA for fast previews"),
     ),
     text_encoder_label="Qwen3.5-9B",
     vae_label="FLUX.2 autoencoder",
@@ -196,24 +198,25 @@ MOSS_IMAGE = FamilyDescription(
         SpeedLoRA(
             name="MOSS-Image Turbo LoRA",
             repo=_TURBO,
-            file="lora.safetensors",
-            pairs_with="MOSS-Image SFT",
-            strength=1.0,             # lodestones' card: lora.safetensors at 1.0 (lora_latest at 0.7)
-            settings=SamplingSettings("Turbo 8-step", steps=8, cfg=1.0, sampler="euler", scheduler="simple",
+            file="8-steps-dmd-lora.safetensors",
+            pairs_with="MOSS-Image Base",
+            strength=1.0,             # the Kromoss card: strength 1
+            # 12 steps, not the card's 8: previews looked much better at 12 (Peter, 19 Oct 2026)
+            settings=SamplingSettings("Turbo 12-step", steps=12, cfg=1.0, sampler="euler", scheduler="simple",
                                       options=(("shift", 5.0), ("uncond_skip", ()), ("sampler", "euler")),
-                                      note="8 steps, no CFG, the reference's shift-5 grid.",
+                                      note="12 steps, no CFG, the reference's shift-5 grid.",
                                       source=f"https://huggingface.co/{_TURBO} (load in ComfyUI's LoRA loader)"),
             load_unmerged=True,       # an fp32 rank-128 adapter: its delta is below bf16's rounding step
             pref_key="moss_image_turbo_lora",
-            community_settings=(("12-16 steps for stronger prompt adherence; strength 0.8 at 16 steps",
-                                 "r/StableDiffusion 'MOSS-Image INT8 ComfyUI' thread; dskjal's ComfyUI guide"),),
-            caveats=("Distilled from MOSS-Image SFT, and soft on Base (Peter's comparison, 18 Oct 2026).",),
+            # replaced lodestones' SFT 8-step DMD (lodestones/MOSS-Image-SFT-8-steps-dmd) 19 Oct 2026: distilled from
+            # SFT and soft on Base, while Fizgig's Turbo previews only ever run on the training model (Base / Kromoss)
+            caveats=("Distilled from MOSS-Image Base (Kromoss card: Base 27.19 -> 27.53 CLIP with it, Kromoss 27.82).",),
             source=f"https://huggingface.co/{_TURBO}",
         ),
     ),
     preview_speed_lora="MOSS-Image Turbo LoRA",      # used only when its Preferences row is set (empty by default)
     preview_speed_strength=0.0,       # the Samples tab's Turbo LoRA strength starts at 0 (full-quality previews);
-    #                                   raise it with the Steps / CFG boxes set for the turbo (1 at 8 steps, CFG 1)
+    #                                   raise it with the Steps / CFG boxes set for the turbo (1 at 12 steps, CFG 1)
     preview_steps=30,                 # res_multistep 30 at CFG 4: the best of the side-by-side (Peter, 18 Oct)
     preview_cfg=4.0,                  # USERGUIDE.md: 3-6 recommended; 4 won the side-by-side
     preview_negative=_NEGATIVE,
@@ -224,9 +227,15 @@ MOSS_IMAGE = FamilyDescription(
     # training samples on the SFT checkpoint (the driver's park_for_preview / load_preview_checkpoint /
     # unpark_after_preview; @Murf-Code, PR #195): off by default - a LoRA trained on the Base carries over only partly
     train_preview_checkpoint=True,
-    preview_checkpoint_tick="Use the SFT model for samples (set it in Preferences - a Base LoRA carries over "
-                            "only partly)",
+    preview_checkpoint_tick="Use the preview model for samples (SFT or Kromoss, set in Preferences)",
+    # previews on SFT never take the Turbo LoRA (distilled from Base, untested on SFT); on Kromoss they can
+    checkpoint_speed_except=("layers.41.norm2.weight", 3658.7646484375),
     preview_checkpoint_on=True,       # samples on the SFT model by default: where most people use a MOSS LoRA (Peter)
+    # the released Base's last-block norm (measured 19 Oct 2026: Base 3658.7021484375, SFT bf16 and int8 3658.7646484375,
+    # Kromoss 3658.6904296875); any other Base DiT previews on itself
+    standard_base=("layers.41.norm2.weight", 3658.7021484375),
+    value_moves=(("MOSS_LOWNOISE_PCT", "60", "30"),     # 8.7.0 defaulted to 60, 8.7.1 to 30 (saved forms kept 60)
+                 ("SAMPLE_STEPS", "8", "12", "FAMILY_TURBO_STRENGTH")),   # the Turbo's 8 steps became 12 (8.7.4)
     preview_checkpoint_steps_note="Base samples only - the SFT samples use their own 30 steps, CFG 4",
     preview_checkpoint_sampling=SamplingSettings(
         "MOSS-Image SFT", steps=30, cfg=4.0, sampler="res_multistep", scheduler="simple",

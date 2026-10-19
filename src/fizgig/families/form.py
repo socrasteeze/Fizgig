@@ -24,7 +24,7 @@ from fizgig.families import launch
 
 ADAPTIVE_MIN = ("1e-5", "5e-5", "1e-4", "2e-4", "3e-4")
 ADAPTIVE_MAX = ("1e-4", "2e-4", "3e-4", "4e-4")
-MEGAPIXELS = ("0.25", "0.37", "0.5", "0.75", "1.0", "1.5", "2.0", "2.4", "3.0", "4.2")
+MEGAPIXELS = ("0.25", "0.37", "0.5", "0.75", "1.0", "1.05", "1.5", "2.0", "2.4", "3.0", "4.2")
 SWAP = ("Auto (detect from GPU)", "0  (No swap — 16GB fp8 / 24GB bf16)", "4  (Light — 14GB fp8 / 20GB bf16)",
         "8  (Moderate — 12GB fp8 / 16GB bf16)", "12 (Aggressive — 10GB fp8 / 12GB bf16)", "16 (Max — 8GB fp8 / 10GB bf16)",
         "1", "2", "3", "5", "6", "7", "9", "10", "11", "13", "14", "15")        # the desktop's Blocks Swap list
@@ -267,7 +267,7 @@ def form(desc):
              upload=True, start="lora"),
         _row("CONTEXT_LORA_STRENGTH", "Context LoRA strength"),
         None if not pictures else _row("DATASET_MEGAPIXELS", "Target Megapixels", "combo",
-             "Images are resized to this area, any aspect ratio: 0.25 = about 512 x 512, 1.0 = 1024 x 1024, 2.4 = 1536 x "
+             "Images are resized to this area, any aspect ratio: 0.25 = 496 x 496, 1.0 = 992 x 992, 1.05 = 1024 x 1024, 2.4 = 1536 x "
              "1536, 4.2 = 2048 x 2048. 4.2 MP wants 24-32 GB.", MEGAPIXELS),
         _row("CLIP_MEGAPIXELS", "Clip Target Megapixels", "combo",
              "The size your video clips are cached and trained at; photos keep the Target Megapixels. A clip takes "
@@ -544,12 +544,21 @@ def form(desc):
         live, plain = {"SAMPLE_STEPS": str(spd[0])}, {"SAMPLE_STEPS": str(desc.preview_steps)}
         if not desc.samples_cfg_free and sp.settings.cfg != desc.preview_cfg:
             live["SAMPLE_CFG_SCALE"], plain["SAMPLE_CFG_SCALE"] = f"{sp.settings.cfg:g}", f"{desc.preview_cfg:g}"
+        cfg_on = "" if desc.samples_cfg_free else f", CFG {sp.settings.cfg:g}"
+        cfg_off = "" if desc.samples_cfg_free else f", CFG {desc.preview_cfg:g}"
         turbo_rows = [_row(
-            "FAMILY_TURBO_STRENGTH", "Turbo LoRA strength", default=f"{spd[1]:g}",
-            hint=(f"0 = previews on the plain model ({desc.preview_steps} steps). For fast previews set 1 and "
-                  f"{sp.settings.steps} steps (the {sp.name}). Below 1 (around 0.7) with more steps often gives "
-                  "cleaner previews." if not spd[1] else
-                  f"The {sp.name} for previews, default {spd[1]:g} at {spd[0]} steps. 0 = the plain model."),
+            "FAMILY_TURBO_STRENGTH", "Turbo LoRA strength", default=f"{spd[1]:g}", boxed=True,
+            hint=(f"0 = off: full-quality previews ({desc.preview_steps} steps{cfg_off}). 1 = on: the {sp.name} "
+                  f"renders previews in {spd[0]} steps{cfg_on}, much faster but softer, so they undersell your LoRA. "
+                  "Steps and CFG switch with it. Previews only, never the saved LoRA."
+                  + (" It works with Kromoss as the preview model, and on previews of your Base, but not with SFT: "
+                     "with SFT as the preview model this box is greyed out. To use it, set Kromoss as the preview "
+                     "model in Preferences."
+                     if desc.checkpoint_speed_except else
+                     (" It works on previews of the training model only: untick "
+                      f"\"{desc.preview_checkpoint_tick.split(' (')[0]}\" above to use it.")
+                     if desc.train_preview_checkpoint else "")
+                  + (" Default " + f"{spd[1]:g}." if spd[1] else "")),
             turbo={"on": live, "off": plain})]
     if sp is not None and sp.pref_key:
         turbo_rows.append(_row("TURBO_MISSING", "", "note",
@@ -569,10 +578,23 @@ def form(desc):
              "a pose, angle or setting none of your photos show. Early epochs follow it. When the LoRA starts to "
              "overtrain, that's the first thing to fail, as the previews drift back to your photos. The last epoch that "
              "still follows it is a good one to keep.", "note") if pictures else None,
+        # the switches side by side (the grid tiles ticks), then the Turbo box, then the boxes they change
         _row("__SAMPLE_LIVE", "Change the previews of the run going now", "check",
-             "While this is ticked, the run training now makes its next previews from these prompts, seed and size - "
-             "change them whenever you like; new prompts are encoded again at its next preview. Untick to go back to "
-             "the run's own.") if pictures else None,
+             "On by default. While it's ticked, a change you make here (prompts, seed, size, steps, CFG, Turbo "
+             "strength) goes to the run training now, from its next preview; new prompts are encoded again then. "
+             "Untick to put the run back on its own.") if pictures else None,
+        _row("SAMPLE_AT_FIRST", "Preview before training starts", "check"),
+        *([_row("SAMPLE_CHECKPOINT", desc.preview_checkpoint_tick, "check", default=desc.preview_checkpoint_on,
+                **({"follow": {"on": {"SAMPLE_STEPS": str(desc.preview_checkpoint_sampling.steps),
+                                      "SAMPLE_CFG_SCALE": f"{desc.preview_checkpoint_sampling.cfg:g}"},
+                               "off": {"SAMPLE_STEPS": str(desc.preview_steps),
+                                       "SAMPLE_CFG_SCALE": f"{desc.preview_cfg:g}"}}}
+                   if desc.preview_checkpoint_sampling else {}))] if desc.train_preview_checkpoint else []),
+        _row("SAMPLE_STRENGTHS", "Also preview at strength " + ", ".join(f"{x:g}" for x in desc.preview_strengths),
+             "check", "Each preview is rendered again at that strength (same prompt and seed), beside the "
+             "full-strength one: how the LoRA will look or sound the way you'll use it.", default=True)
+        if desc.preview_strengths else None,
+        *turbo_rows,
         _row("SAMPLE_REFERENCE", "Reference", "path",
              f"Optional - fed through {desc.display_name}'s text encoder vision path so previews become visually "
              "aware of it ('prompt from a picture', not a pixel edit). Leave empty for normal previews."
@@ -586,22 +608,10 @@ def form(desc):
         _row("SAMPLE_HEIGHT", "Height", "choice", choices=SIZES, default=str(desc.preview_height)) if pictures else None,
         _row("SAMPLE_STEPS", "Steps", default=str(desc.preview_steps)),
         _row("SAMPLE_SEED", "Seed", hint="0 = random"),
-        *turbo_rows,
         *by_section("samples"),
         _row("SAMPLE_EVERY_N_EPOCHS", "Every N epochs", default=str(getattr(desc, "preview_every", 1) or 1)),
-        _row("SAMPLE_STRENGTHS", "Also preview at strength " + ", ".join(f"{x:g}" for x in desc.preview_strengths),
-             "check", "Each preview is rendered again at that strength (same prompt and seed), beside the "
-             "full-strength one: how the LoRA will look or sound the way you'll use it.", default=True)
-        if desc.preview_strengths else None,
-        _row("SAMPLE_AT_FIRST", "Preview before training starts", "check"),
-        *([_row("SAMPLE_CHECKPOINT", desc.preview_checkpoint_tick, "check", default=desc.preview_checkpoint_on,
-                **({"follow": {"on": {"SAMPLE_STEPS": str(desc.preview_checkpoint_sampling.steps),
-                                      "SAMPLE_CFG_SCALE": f"{desc.preview_checkpoint_sampling.cfg:g}"},
-                               "off": {"SAMPLE_STEPS": str(desc.preview_steps),
-                                       "SAMPLE_CFG_SCALE": f"{desc.preview_cfg:g}"}}}
-                   if desc.preview_checkpoint_sampling else {})),
-           _row("CACHE_SAMPLE_MODEL", "Cache sample model in RAM", "choice", choices=["auto", "on", "off"],
-                default="auto")] if desc.train_preview_checkpoint else []),
+        _row("CACHE_SAMPLE_MODEL", "Cache sample model in RAM", "choice", choices=["auto", "on", "off"],
+             default="auto") if desc.train_preview_checkpoint else None,
     ])
     if not desc.samples_cfg_free:
         add("samples_adv", "Guidance", "samples", [
@@ -709,12 +719,14 @@ def _kind(desc, values):
     return next((k for k, lab in kinds(desc) if lab == label or k == label), "standard")
 
 
-def state(desc, values, image_folder="", captioner="", speed_file=False, checkpoint_file=False):
+def state(desc, values, image_folder="", captioner="", speed_file=False, checkpoint_file=False, base_file="",
+          checkpoint_path=""):
     """What the current values hide, grey out or note (see the module docstring), and force: values the page sets
     (as the desktop unticks what automagic3 owns). captioner: the shared captioner's file when it is set and on disk
     (auto-recaption needs it); speed_file: the preview Turbo LoRA is set and on disk; checkpoint_file: the preview
     checkpoint (Klein's Distilled) is."""
     hidden, disabled, notes, force, actions = set(), set(), {}, {}, {}
+    ck_turbo = False                              # previews on a preview checkpoint that takes the Turbo LoRA
     hidden |= ({"TURBO_MISSING"} if speed_file else
                {"FAMILY_TURBO_STRENGTH", "FAMILY_TURBO_STEPS", "FAMILY_TURBO_PACE"})
     if speed_file and desc.samples_turbo_pace:     # H3 with its Turbo on renders at the Turbo row's steps
@@ -887,19 +899,47 @@ def state(desc, values, image_folder="", captioner="", speed_file=False, checkpo
             notes["_edit_extras_found"] = _extras_found(desc, values, image_folder)
         else:
             hidden |= {"FAMILY_EDIT_EXTRAS_DIR", "_edit_extras_found"}
+    for key, old, new, *when in desc.value_moves:     # a changed default, moved once in a saved form
+        mark = f"_moved_{key}"
+        if not values.get(mark):
+            force[mark] = True
+            try:                                  # a move tied to another setting: only while that one is on (> 0)
+                on = not when or float(str(values.get(when[0]) or 0)) > 0
+            except ValueError:
+                on = False
+            if on and str(values.get(key, "")).strip() == str(old):
+                force[key] = new
+    if desc.train_preview_checkpoint and desc.standard_base:
+        # another Base than the released one (Kromoss, a fine-tune, SFT): previews on it by default, the model the LoRA
+        # will be used on. The tick moves once per Base file, so a choice made after that stays
+        from fizgig.families.base_check import is_standard_base
+        std, mark = is_standard_base(desc, base_file), str(values.get("_SAMPLE_CHECKPOINT_BASE") or "")
+        if std is False:
+            notes["SAMPLE_CHECKPOINT"] = (f"Your Base DiT isn't {desc.display_name}'s own Base, so previews render on it, "
+                                        "the model you'll use the LoRA on. Tick this to preview on the other model instead.")
+            if mark != base_file:
+                force["SAMPLE_CHECKPOINT"], force["_SAMPLE_CHECKPOINT_BASE"] = False, base_file
+        elif std and mark:            # back on the released Base: its default again
+            force["SAMPLE_CHECKPOINT"], force["_SAMPLE_CHECKPOINT_BASE"] = desc.preview_checkpoint_on, ""
     if desc.train_preview_checkpoint and checkpoint_file and values.get("SAMPLE_CHECKPOINT", True):
         # the Distilled: Steps and CFG switch to its own values and stay editable (the tick's follow), as the Turbo
         # LoRA's do; CFG 1 hides the negative (above)
         if desc.preview_checkpoint_sampling is None:
             disabled |= {"SAMPLE_STEPS", "SAMPLE_CFG_SCALE", "SAMPLE_NEGATIVE"}
-        if speed_file and desc.preview_speed() is not None and not desc.samples_turbo_pace:
-            # previews on the checkpoint never take the speed LoRA (it joins previews on the training model)
+        from fizgig.families.base_check import checkpoint_takes_speed
+        if checkpoint_takes_speed(desc, checkpoint_path):
+            ck_turbo = True                       # Kromoss as the preview model: the Turbo LoRA joins it
+        elif speed_file and desc.preview_speed() is not None and not desc.samples_turbo_pace:
+            # previews on this checkpoint never take the speed LoRA (it joins previews on the training model)
             disabled.add("FAMILY_TURBO_STRENGTH")
-            notes["FAMILY_TURBO_STRENGTH"] = (f"The {desc.preview_speed().name} applies to previews on the training "
-                                              f"model: untick \"{desc.preview_checkpoint_tick.split(' (')[0]}\" to use it.")
+            notes["FAMILY_TURBO_STRENGTH"] = (
+                f"Greyed out: the {desc.preview_speed().name} doesn't work with this preview model. Set Kromoss as the "
+                "preview model in Preferences to use it." if desc.checkpoint_speed_except else
+                f"The {desc.preview_speed().name} applies to previews on the training model: untick "
+                f"\"{desc.preview_checkpoint_tick.split(' (')[0]}\" to use it.")
     return {"hidden": sorted(hidden), "disabled": sorted(disabled), "notes": notes, "kind": kind,
             "media": sorted(media), "turbo_file": bool(speed_file), "force": force, "actions": actions,
-            "shown": shown, "checkpoint_file": bool(checkpoint_file), "labels": labels}
+            "shown": shown, "checkpoint_file": bool(checkpoint_file), "labels": labels, "checkpoint_turbo": ck_turbo}
 
 
 def _extras_found(desc, values, image_folder):

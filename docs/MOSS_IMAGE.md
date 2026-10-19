@@ -23,11 +23,11 @@ python -m fizgig.scripts.fetch_models --family moss_image
 | Text encoder | [`qwen3.5_9b_bf16.safetensors`](https://huggingface.co/Comfy-Org/Qwen3.5/blob/main/text_encoders/qwen3.5_9b_bf16.safetensors) from Comfy-Org/Qwen3.5 (not in the Comfy-Org/MOSS-Image repo, which only has quantised ones) | 19.3 GB |
 | Autoencoder | `flux2-vae_small.safetensors` from [Comfy-Org/MOSS-Image](https://huggingface.co/Comfy-Org/MOSS-Image): FLUX.2's encoder with the small decoder MOSS-Image ships with | 0.25 GB |
 
-- **Kromoss:** lodestones' [Kromoss](https://huggingface.co/lodestones/Kromoss) is a full fine-tune of Base at 1024 px, made to fix Base's blurriness. Set it as the Base DiT (Preferences, **Download Kromoss**) and it trains, saves and previews the same way, at the same memory. Its own 8-step Turbo LoRA is for ComfyUI.
+- **Kromoss as the preview model (optional):** lodestones' [Kromoss](https://huggingface.co/lodestones/Kromoss) is a full fine-tune of Base at 1024 px, made to fix Base's blurriness and presented as a drop-in replacement for SFT. Pick it beside **Download models for me** in Preferences (or use **Download Kromoss** on the **Preview model (SFT or Kromoss)** row): your previews then show the LoRA on Kromoss instead of SFT, and the Turbo LoRA works on them. Train on Base, not on Kromoss: in our test a LoRA trained on Kromoss overbaked sooner.
 - **Train on Base, use the LoRA on SFT.** MOSS-Image SFT is OpenMOSS's fine-tuned model for everyday use, and Fizgig previews on it. In our tests so far Base trains more reliably than SFT, so train on Base and use the LoRA on SFT in ComfyUI. If you do train on SFT or a model fine-tuned from it, tick **Train attention only** on the Training tab, because training SFT's feed-forward layers breaks anatomy. It also uses less VRAM, so a fine-tune fits a smaller card; on Base it may cost quality or slow convergence.
 - **Autoencoder:** Flux 3's or Klein 9B's full FLUX.2 autoencoder also works, with the same latents, but the small decoder avoids spots in the pictures.
 - **Text encoder alternatives:** Comfy-Org's `qwen3.5_9b_int8_convrot.safetensors` (9.7 GB) also works. So do the official diffusers folders (OpenMOSS-Team/MOSS-Image-Base `transformer/` and `text_encoder/`): give the path of any shard.
-- **Optional Turbo LoRA:** Preferences has an empty row for a turbo LoRA (today, lodestones' 8-step DMD LoRA, which is softer on Base). Set it, then raise **Turbo LoRA strength** on the Samples tab and set Steps and CFG for it (8 steps, CFG 1).
+- **Optional Turbo LoRA:** the Turbo LoRA row in Preferences downloads lodestones' 8-step LoRA from Kromoss, distilled from MOSS-Image Base. It works with Kromoss as the preview model, and on previews of your Base, but not with SFT: with SFT as the preview model the strength box is greyed out, so set Kromoss as the preview model to use it. Then set **Turbo LoRA strength** to 1: Steps move to 12 and CFG to 1 (12 looked much better than the card's 8).
 
 ## Presets
 
@@ -49,7 +49,7 @@ python -m fizgig.scripts.fetch_models --family moss_image
 ## Memory
 
 - **Training:** Auto trains on an INT8 base, or NF4 on smaller cards, and compiles the blocks for about 25% faster steps on longer runs. bf16 is a manual choice.
-- **Text encoder:** it always runs at full precision. On cards without room for it (about 15 GB), it streams from system memory one layer at a time, still exact, so captions cache on any card.
+- **Text encoder:** it always runs at full precision. On cards without room for it (about 15 GB), it streams from system memory one layer at a time, still exact, so captions cache on any card. On a computer with less than 30 GB of RAM it streams from the file instead, a layer at a time, so it needs about 6 GB of RAM rather than about 20 GB.
 - **12 GB cards:** these train with SFT previews and stay under about 10.5 GB.
 
 ## Fine-tuning
@@ -78,7 +78,8 @@ Fizgig never trains the text encoder or the model's text adapter, as OpenMOSS ad
 
 ## Previews
 
-- **Samples render on the SFT model** by default, so you see your LoRA where you'll use it, though a Base LoRA carries over only partly. Untick the box on the Samples tab to preview on the Base model being trained. Repair Studio, LoRA Royale and the other workbench tabs render on SFT too.
+- **Samples render on the preview model** (SFT by default, or Kromoss) so you see your LoRA where you'll use it. Untick the box on the Samples tab to preview on the Base model being trained. Repair Studio, LoRA Royale and the other workbench tabs render on the preview model too.
+- **With any other Base DiT** (a fine-tune of Base, SFT itself, or Kromoss set by hand), samples render on that model instead, the one you'll use the LoRA on: the preview-model tick turns off by itself once when you set such a Base, and you can tick it back on.
 - **Sampler:** previews render as ComfyUI does with the settings below: res_multistep on the simple schedule (shift 5) for 30 steps at CFG 4, with block 22 left out of the negative branch for the first half of the steps (ComfyUI's SLG switch on). That beat OpenMOSS's own recipe, Euler at 50 steps, CFG 3, in side-by-side tests.
 - **Negative:** the default is `worst quality, bad anatomy, watermark, jpeg artifact`.
 

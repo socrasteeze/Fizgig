@@ -888,6 +888,11 @@ def _plan(family_key, values, image_folder, resume="", ft_continue=None):
 
 
 _SIZE_KEYS = ("DATASET_MEGAPIXELS", "CLIP_MEGAPIXELS")
+# the settings a Resume takes from the form as it is now: the Samples tab's, and block swap (memory only, the
+# results are the same); the run trains on as it was
+_RESUME_SAMPLE_KEYS = ("SAMPLE_PROMPT", "SAMPLE_SEED", "SAMPLE_WIDTH", "SAMPLE_HEIGHT", "SAMPLE_STEPS",
+                       "SAMPLE_CFG_SCALE", "FAMILY_TURBO_STRENGTH", "SAMPLE_CHECKPOINT",   # + previews on the checkpoint
+                       "BLOCKS_SWAP")
 
 
 # a prompt slider's live prompts: the request the web UI writes, and what the trainer took (fizgig.families.train's
@@ -2150,7 +2155,7 @@ def _fetch_status() -> dict:
     return out
 
 
-def _start_fetch(family, token="", optional=False):
+def _start_fetch(family, token="", optional=False, choices=None):
     """The family's model files plus the helper models, into <repo>/models (a pod links that to its volume), paths
     written to Preferences by the fetcher. A token is passed to that one download only, never written to disk."""
     desc = _files_family(family)
@@ -2168,6 +2173,10 @@ def _start_fetch(family, token="", optional=False):
     cmd = [sys.executable, "-m", "fizgig.scripts.fetch_models", "--progress", "--family", "tools", "--family", family]
     if optional or not desc.fetch_optional_label:
         cmd.append("--include-optional")          # no optional tick on the family: its whole list, as the desktop
+    offered = {f.pref_key for f in desc.model_files if f.fetch_choice}
+    for key, pick in (choices or {}).items():   # the card's pick for a file offered with another build
+        if key in offered and pick in ("main", "alt"):
+            cmd += ["--choose", f"{key}={pick}"]
     env = os.environ.copy()
     env.update(PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1", PYTHONPATH=os.path.join(BASE_DIR, "src"))
     if token:
@@ -2912,8 +2921,14 @@ class Handler(BaseHTTPRequestHandler):
             items = [e for e in items if infos[e.name].get("run") == run]
         out = pair_songs([(e.name, e.path, {"time": e.stat().st_mtime, **infos[e.name]}) for e in items[:1500]])
         by_epoch = epoch_prompts(folder, run) if run else {}
+        try:
+            with open(os.path.join(folder, f".previews_{run}.json"), encoding="utf-8") as f:
+                mode = json.load(f) if run else None
+        except (OSError, ValueError):
+            mode = None
         newest = by_epoch[max(by_epoch, key=int)] if by_epoch else None
         return self.json({"items": out[:1000] if run else out[:300], "runs": runs, "epoch_prompts": by_epoch,
+                          "preview_mode": mode if isinstance(mode, dict) else None,
                           "prompts": newest or (run_prompts(os.path.dirname(folder.rstrip("\\/")), run) if run else [])})
 
     def _checkpoints(self, folder):
@@ -3059,10 +3074,13 @@ class Handler(BaseHTTPRequestHandler):
                 ck = desc.preview_checkpoint()
                 ckf = pref_path(prefs, ck[0].pref_key) if ck else ""
                 vals = b.get("values") or {}
+                dit = next((f.pref_key for f in desc.model_files if f.role == "dit"), "")
                 st = form.state(desc, vals, b.get("image_folder") or "",
                                 captioner=cap if cap and os.path.isfile(cap) else "",
                                 speed_file=bool(spf and os.path.isfile(spf)),
-                                checkpoint_file=bool(ckf and os.path.isfile(ckf)))
+                                checkpoint_file=bool(ckf and os.path.isfile(ckf)),
+                                base_file=pref_path(prefs, dit) if dit else "",
+                                checkpoint_path=ckf if ckf and os.path.isfile(ckf) else "")
                 if st["kind"] in ("standard", "finetune"):     # the Subjects card: what each folder trains as
                     mpn = _multi_person_notes(vals, b.get("image_folder") or "",
                                               multi_person=st["kind"] == "standard" and
@@ -3211,6 +3229,10 @@ class Handler(BaseHTTPRequestHandler):
                 for k in _SIZE_KEYS:                     # Resume at the size the form has now: caches again first
                     if str(b.get(k) or "").strip():
                         last["values"][k] = str(b[k]).strip()
+                samples = b.get("samples") if isinstance(b.get("samples"), dict) else {}
+                for k in _RESUME_SAMPLE_KEYS:            # the previews as the Samples tab has them now
+                    if k in samples and samples[k] is not None and str(samples[k]).strip() != "":
+                        last["values"][k] = samples[k]
                 if last["resume_mode"] == "ft":
                     if not os.path.isfile(last["resume"]):
                         return self.json({"error": "The paused fine-tune's checkpoint isn't there any more: "
@@ -3269,8 +3291,15 @@ class Handler(BaseHTTPRequestHandler):
                     except OSError:
                         pass
                     return self.json({"ok": True, "on": False})
-                _write_json(side, {"prompts": prompts, "seed": _seed(b.get("seed"), 1234),
-                                   "width": _seed(b.get("width"), 1024), "height": _seed(b.get("height"), 1024)})
+                live = {"prompts": prompts, "seed": _seed(b.get("seed"), 1234),
+                        "width": _seed(b.get("width"), 1024), "height": _seed(b.get("height"), 1024)}
+                for k in ("steps", "cfg", "turbo"):   # the Samples tab's Steps, CFG and Turbo strength, when given
+                    try:
+                        if str(b.get(k, "")).strip() != "":
+                            live[k] = float(b[k]) if k != "steps" else int(float(b[k]))
+                    except (TypeError, ValueError):
+                        pass
+                _write_json(side, live)
                 return self.json({"ok": True, "on": True})
             if path == "/api/run/now":               # Sample now / Save now: a request the trainer takes after a step
                 what = str(b.get("what") or "")
@@ -3300,7 +3329,8 @@ class Handler(BaseHTTPRequestHandler):
                 append_log("\n⏸ Pause requested: the run stops cleanly at the end of this epoch.\n")
                 return self.json({"ok": True})
             if path == "/api/fetch":
-                _start_fetch(b.get("family", ""), b.get("token", ""), bool(b.get("optional")))
+                _start_fetch(b.get("family", ""), b.get("token", ""), bool(b.get("optional")),
+                             b.get("choices") if isinstance(b.get("choices"), dict) else None)
                 return self.json({"ok": True})
             if path == "/api/fetch/cancel":
                 return self.json({"ok": _cancel_fetch()})

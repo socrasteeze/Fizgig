@@ -42,6 +42,10 @@ class ModelFile:
     alt_path: str = ""
     alt_label: str = ""
     alt_note: str = ""
+    # "Download models for me" offers a pick between this file and its alt (names for the two, e.g. ("MOSS-Image
+    # Base", "Kromoss")); the picked one is fetched and the pref moved to it. alt_size_gb: the alt's size
+    fetch_choice: tuple = ()
+    alt_size_gb: float = 0.0
     gated: bool = False               # the repo needs an accepted licence + a Hugging Face token to download
     # earlier versions of this file (names in models/): a pref still pointing at one is moved to this file by the
     # downloads (fetch_models) and the updater, where any other file there is the user's own choice and kept
@@ -419,6 +423,16 @@ class FamilyDescription:
     # its Samples tab tick: the label, whether it starts ticked (each family's choice is then kept), and the Steps note
     preview_checkpoint_tick: str = "Use Distilled model for samples (4-step, matches ComfyUI)"
     preview_checkpoint_on: bool = True
+    # (tensor name, sum) that identifies the model's own released Base (families/base_check.py): with any other Base
+    # DiT (a fine-tune of it, SFT) the preview-checkpoint tick defaults off - previews render on the model the LoRA
+    # will be used on. () = no check
+    standard_base: tuple = ()
+    # a changed default moved in saved forms: ((key, old value, new value[, only while this key is above 0]), ...).
+    # Each form moves once (a marker is saved with it), so a value chosen after that stays
+    value_moves: tuple = ()
+    # the preview checkpoint that never takes the speed LoRA, as (tensor name, sum); any other preview checkpoint
+    # does (MOSS-Image: SFT doesn't, Kromoss does). () = previews on a checkpoint never take it
+    checkpoint_speed_except: tuple = ()
     preview_checkpoint_steps_note: str = "Base samples only — Distilled is locked at 4 steps"
     # measured training memory for the Auto plan: {precision: (peak GB with no block swap, GB saved per swapped
     # block)}; the peak may instead be ((megapixels, GB), ...) points, interpolated for the run's resolution.

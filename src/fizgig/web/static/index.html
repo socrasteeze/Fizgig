@@ -106,6 +106,10 @@
             <p>Train LoRAs and fine-tunes: pick a model and your training folder, set the previews,
               then start a run and watch it here.</p>
           </div>
+          <div class="section-card news-card" id="newsCard" style="display:none">
+            <div class="card-title">News</div>
+            <div class="card-content" id="newsBody"></div>
+          </div>
           <div class="section-card accent-card">
             <div class="card-title">Model</div>
             <div class="card-desc">What you're training. The Samples, Training and Preferences tabs follow it (Samples and
@@ -465,6 +469,7 @@
                 <div class="lik-run" id="likRun"></div>
                 <canvas id="likChart" height="150"></canvas>
               </div>
+              <div class="preview-mode" id="galleryMode" style="display:none"></div>
               <div class="gallery" id="gallery"></div>
             </div>
           </div>
