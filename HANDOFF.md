@@ -1,9 +1,9 @@
 # HANDOFF
 
-**Updated:** 2026-10-19 · **Branch:** master · **Upstream:** 27a9e380 (after v8.7.0) · **Publication:** local merge only
+**Updated:** 2026-10-19 · **Branch:** master · **Upstream:** 27a9e380 (after v8.7.0) · **Delivery target:** fork/master
 
 ## State
-Merged 253 upstream commits from 504ea916 through 27a9e380 into master, preserving the fork fixes. The published fork remains at 3f43565b until a push is authorized.
+Merged 253 upstream commits from 504ea916 through 27a9e380 into master, preserving the fork fixes. Upstream is contained in HEAD; fork/master is the authorized publication target.
 Source inspection: 252 Python files compile and both JavaScript files parse. Tests and application startup were not run; this merge is not fully qualified.
 
 ## Done this session
@@ -11,6 +11,7 @@ Source inspection: 252 Python files compile and both JavaScript files parse. Tes
 - Resolved `.gitignore` and the server's resume conflicts; resume confirmations remain, and only a successful start releases a paused queue.
 - Restricted `.github/workflows/sync-v8.yml` to the upstream repository; it cannot push a branch in the fork.
 - Removed two incoming trailing-whitespace errors. Preserved the untracked audit document unchanged.
+- Prepared clean delivery with the configured Git identity and `[skip ci]`; local files stay out of the commits.
 
 ## Fork changes on top of upstream
 - `.gitignore`: ignores both `AGENTS.md` and upstream's `.cursor/`.
@@ -19,18 +20,18 @@ Source inspection: 252 Python files compile and both JavaScript files parse. Tes
 
 ## Open
 1. No tests were requested. Run the commands below only after explicit test authorization; the prior 98-test result is historical, not a baseline for this merge.
-2. Push only when authorized. The commit watcher compares the published fork with upstream, so a local merge does not clear its behind count.
-3. The venv still lacks `pywebview` and `soundfile`, confirmed through package metadata. The app window (`Launch Fizgig.bat`) needs `pywebview`. No dependencies were installed.
-4. Preserve the local leftovers: ignored `webui/`, the excluded pre-v8 preferences backup, and untracked `WEBUI_ADOPTION_AUDIT.md`.
-5. The audit's slate theme (Tier 2 #11) remains unfinished.
-6. Previously recorded: training Start while Studio loads can leave Studio on "loading". This was not rechecked during the sync.
-7. A prior full checks run errored twice without retained output. It was not reproduced then and no checks ran now. Keep the output if it recurs.
+2. The venv still lacks `pywebview` and `soundfile`, confirmed through package metadata. The app window (`Launch Fizgig.bat`) needs `pywebview`. No dependencies were installed.
+3. Preserve the local leftovers: ignored `webui/`, the excluded pre-v8 preferences backup, and untracked `WEBUI_ADOPTION_AUDIT.md`.
+4. The audit's slate theme (Tier 2 #11) remains unfinished.
+5. Previously recorded: training Start while Studio loads can leave Studio on "loading". This was not rechecked during the sync.
+6. A prior full checks run errored twice without retained output. It was not reproduced then and no checks ran now. Keep the output if it recurs.
 
 ## Decisions
 - Upstream's app replaces the fork's. Keep fork patches to upstream files minimal so syncs merge cleanly.
 - Never send anything upstream. No autostart of any kind.
 - A queued run does not ask the start warnings. The queue holds with the warning as its reason.
 - Upstream's new pytest checks coexist with the fork's isolated unittest checks. The unittest command does not discover the pytest-only checks.
+- The commit watcher compares the published fork with upstream every five minutes; a local-only merge does not clear its behind count.
 - Remote access: save a `web_password`, start with `--host 127.0.0.1`, then `tailscale serve --bg 8081`. The app window has no `--host`, so with a saved password it listens on `0.0.0.0`.
 
 ## Traps
@@ -46,5 +47,6 @@ Syntax and source inspection ran; tests and runtime checks did not. For an autho
 .\venv\Scripts\python.exe -m pytest checks -q
 git status --short
 git log fork/master..HEAD --oneline --first-parent
+git ls-remote fork refs/heads/master
 git diff --check
 ```
