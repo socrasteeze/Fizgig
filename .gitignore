@@ -1,6 +1,7 @@
 # Internal dev docs
 CLAUDE.md
 AGENTS.md
+.cursor/
 
 # Virtual environment
 venv/
