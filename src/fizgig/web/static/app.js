@@ -248,7 +248,7 @@ function renderRow(r) {
   // its kind sets its layout (style.css): boxes in the grid, switches as tiles, a choice of pills, files and notes
   // across the card - from the schema's row kind, so every model's form lays out the same way
   const kind = {check: "check", radio: "radio", note: "note", text: "wide", path: "wide", folder: "wide", shown: "wide"}[r.kind] || "field";
-  const wrap = el("div", {class: "form-row kind-" + kind, "data-key": r.key});
+  const wrap = el("div", {class: "form-row kind-" + kind + (r.featured ? " row-featured" : ""), "data-key": r.key});
   if (r.kind === "shown") {                       // a value from elsewhere (the Start tab's folder), read-only here
     wrap.append(el("div", {class: "field-row"}, el("span", {class: "field-label", text: r.label + ":"}),
       el("input", {type: "text", class: "w-path", id: "note_" + r.key, readonly: true, tabindex: -1})));
@@ -492,7 +492,8 @@ async function refreshState() {
 // A model with both (Qwen Image 2.1, MOSS-Image) gets one answer for the boxes they share: a ticked preview checkpoint's
 // own values, else a live Turbo's, else the plain model's. Each used to switch the boxes on its own, so an unticked
 // checkpoint put the plain model's 25 steps, CFG 3 back under a live Turbo LoRA (noisy previews). A box still on any
-// of the defaults is put right on every load, which also mends a form saved in that state.
+// of the defaults is put right when the form loads, which also mends a form saved in that state; after that the boxes
+// move only when a switch changes, so steps typed by hand stay (they used to snap back to the mode's default).
 function turboFollow() {
   const rows = [];
   for (const s of S.fam.form.sections) for (const row of s.rows) if (row && (row.turbo || row.follow)) rows.push(row);
@@ -523,6 +524,9 @@ function turboFollow() {
     return parseFloat(v) !== parseFloat(want[k]) && known[k].includes(parseFloat(v));   // "3.0" is the default 3
   });
   const flagsChanged = Object.entries(flags).some(([f, live]) => S.values[f] !== live);
+  const loading = S._turboFollowFor !== S.fam;       // the first pass for this model's form
+  S._turboFollowFor = S.fam;
+  if (!flagsChanged && !loading) return;
   if (!moved.length && !flagsChanged) return;
   for (const k of moved) S.values[k] = want[k];
   Object.assign(S.values, flags);
@@ -1356,8 +1360,10 @@ function previewLabel(it) {
   return [`Epoch ${it.epoch}`, `Prompt ${it.idx + 1}`, it.strength != null && `strength ${it.strength}`]
     .filter(Boolean).join(" · ");
 }
-function previewFigure(it, prompts, eager) {
-  const prompt = it.idx != null && prompts ? prompts[it.idx] : "";
+function previewFigure(it, prompts, eager, byEpoch) {
+  // its own epoch's prompt (recorded by the trainer, so a mid-run change shows), else the run's
+  const own = byEpoch && it.epoch != null && byEpoch[String(it.epoch)];
+  const prompt = it.idx == null ? "" : (own && own[it.idx]) || (prompts ? prompts[it.idx] : "");
   return el("figure", {class: "gallery-item", title: it.name}, mediaFor(it, eager && eager.has(it)),
     el("figcaption", {}, el("b", {text: previewLabel(it)}), prompt ? el("span", {class: "preview-prompt", text: prompt}) : null,
       el("span", {class: "preview-file", text: it.name})));
@@ -1419,7 +1425,7 @@ async function loadGallery() {
   const top = epochs.length ? Math.max(...epochs) : null;
   const eager = new Set((top != null ? g.items.filter((it) => it.epoch === top) : g.items.slice(0, 3)).slice(0, 8));
   if (view === "grid" && g.items.length) host.append(previewGrid(g.items, g.prompts || [], eager));
-  else for (const it of g.items.slice(0, 120)) host.append(previewFigure(it, g.prompts || [], eager));
+  else for (const it of g.items.slice(0, 120)) host.append(previewFigure(it, g.prompts || [], eager, g.epoch_prompts));
   S.gal = {items: g.items, run, sig};
   likenessShow(dir, g.items, run, view);
   const others = g.runs.filter((r) => r !== run).length;
@@ -2990,7 +2996,7 @@ async function runFiles(run) {
       .catch(() => ({items: [], prompts: []})),
     api("/api/checkpoints?dir=" + encodeURIComponent(run.output_dir)).catch(() => ({items: []}))]);
   const shots = g.items.slice(0, 12);
-  if (shots.length) out.push(el("div", {class: "gallery run-gallery"}, shots.map((it) => previewFigure(it, g.prompts))));
+  if (shots.length) out.push(el("div", {class: "gallery run-gallery"}, shots.map((it) => previewFigure(it, g.prompts, null, g.epoch_prompts))));
   const size = (b) => b >= 2 ** 30 ? (b / 2 ** 30).toFixed(1) + " GB" : (b / 2 ** 20).toFixed(0) + " MB";
   const ckpts = c.items.filter((it) => it.run === run.lora);
   if (ckpts.length) out.push(el("div", {class: "checkpoint-list"}, ckpts.map((it) => el("div", {class: "checkpoint-row"},

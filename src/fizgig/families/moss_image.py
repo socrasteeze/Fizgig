@@ -57,7 +57,13 @@ MOSS_IMAGE = FamilyDescription(
                   # verified 17 Oct 2026: tensor for tensor the official transformer/ shards, q / k / v fused into
                   # proj.qkv = [q; k; v]; the loader splits it back
                   hint="MOSS-Image Base - ComfyUI's single file. The official diffusers shards "
-                       "(OpenMOSS-Team/MOSS-Image-Base transformer/) and the int8_convrot file load too."),
+                       "(OpenMOSS-Team/MOSS-Image-Base transformer/) and the int8_convrot file load too. So does "
+                       "Kromoss, lodestones' sharper fine-tune of Base, in its place.",
+                  # Kromoss: a full fine-tune of Base at 1024 px (same architecture, files and recipe); checked 19 Oct
+                  # 2026 on a 5090 as the Base DiT - int8 auto, 9.4 GB peak at 1 MP, trains, saves and previews
+                  alt_repo="lodestones/Kromoss", alt_path="diffusion_models/kromoss_bf16.safetensors",
+                  alt_label="Download Kromoss",
+                  alt_note="Kromoss ~10.2 GB - lodestones' fine-tune of Base for sharper pictures, trains the same way"),
         ModelFile("moss_image_vae", "FLUX.2 autoencoder (small decoder)", True, _COMFY,
                   "vae/flux2-vae_small.safetensors", 0.25,
                   "The FLUX.2 autoencoder with BFL's small decoder, the decoder MOSS-Image ships with.",
@@ -244,23 +250,25 @@ MOSS_IMAGE = FamilyDescription(
         ("✨ MOSS-Image Fine-tune (1e-5)", _preset(16, lr=1e-5, ft=True)),
     ),
     options=(
-        FamilyOption("MOSS_LORA_SFT", "Base is SFT or a fine-tune of it", kind="check", tokens="lora_sft=1",
-                     hint="Tick when the Base DiT is MOSS-Image SFT or a model fine-tuned from it: the LoRA then trains "
-                          "attention only (q, k, v, o). Training its feed-forward layers breaks anatomy.",
-                     mode="lora", section="after", summary="SFT base"),
-        FamilyOption("MOSS_LOWNOISE_PCT", "Clean-end share", kind="entry", tokens="lownoise_pct={}", default="60",
+        FamilyOption("MOSS_LORA_SFT", "Train attention only", kind="check", tokens="lora_sft=1",
+                     hint="A LoRA or a fine-tune trains only attention (q, k, v, o), not the feed-forward layers. "
+                          "Recommended on MOSS-Image SFT or a fine-tune of it, where training the feed-forward "
+                          "layers breaks anatomy. Uses less VRAM, so a fine-tune fits a smaller card, but on Base "
+                          "it may cost quality or slow convergence.",
+                     section="after", summary="attention only"),
+        FamilyOption("MOSS_LOWNOISE_PCT", "Clean-end share", kind="entry", tokens="lownoise_pct={}", default="30",
                      width=8, suffix="% of steps",
                      hint="The share of training steps on nearly-clean images (noise below half), where faces and "
                           "fine detail are refined. Empty = the model's own schedule, about 11%.",
                      warn="Experimental figure.",
-                     warn_link="https://www.reddit.com/r/StableDiffusion/comments/1x9khtm/a_potential_fix_for_moss_training_issues/", summary="clean-end {}%"),
+                     warn_link="https://www.reddit.com/r/StableDiffusion/comments/1x9khtm/a_potential_fix_for_moss_training_issues/", summary="clean-end {}%", featured=True),
     ),
     workbench=("repair", "profiler", "extract", "royale"),
 
     notes=(
         ("Training timesteps follow the released weights' last pretraining interval: sigma = 1 - sigmoid(Z), "
          "Z ~ N(-1.09, 0.95^2), truncated at 0.95 and rescaled onto the 1000-step grid, mixed with 1% uniform (Fizgig's "
-         "Clean-end share moves the curve's centre, 60% of steps below sigma 0.5 by default; the reference is about 11%); the "
+         "Clean-end share moves the curve's centre, 30% of steps below sigma 0.5 by default; the reference is about 11%); the "
          "DiT is told 1000 * sigma; loss is the unweighted per-token MSE on noise - x0.",
          f"{_REPORT} Appendix A.2, eq. 3-4, Table 6"),
         ("Text conditioning: Qwen3.5-9B's final hidden state through the chat template with an open <think> block, "
