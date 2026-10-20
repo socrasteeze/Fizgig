@@ -1,9 +1,9 @@
 # HANDOFF
 
-**Updated:** 2026-10-20 · **Branch:** master · **Upstream:** 0d03b4a4 (after v8.8.2) · **Publication:** local only
+**Updated:** 2026-10-20 · **Branch:** master · **Upstream:** 0d03b4a4 (after v8.8.2) · **Delivery target:** fork/master
 
 ## State
-Merged 60 upstream commits from a575518a through 0d03b4a4 into master, preserving the fork fixes. This sync is local only; the published fork remains at 0ca6ea10.
+Merged 60 upstream commits from a575518a through 0d03b4a4 into master, preserving the fork fixes. Upstream is contained in HEAD; fork/master is the authorized publication target.
 Source inspection: 254 Python files compile and both JavaScript files parse, before and after the merge. Tests and application startup were not run; this merge is not fully qualified.
 
 ## Done this session
@@ -20,12 +20,11 @@ Source inspection: 254 Python files compile and both JavaScript files parse, bef
 
 ## Open
 1. No tests were requested. Run the commands below only after explicit test authorization; the prior 98-test result is historical, not a baseline for this merge.
-2. Push requires explicit authorization; the dashboard compares the published fork and will still count this local-only sync as behind.
-3. The venv still lacks `pywebview` and `soundfile`, confirmed through package metadata on 2026-10-20. The app window (`Launch Fizgig.bat`) needs `pywebview`.
-4. Preserve the local leftovers: ignored `webui/`, the excluded pre-v8 preferences backup, and untracked `WEBUI_ADOPTION_AUDIT.md`.
-5. The audit's slate theme (Tier 2 #11) remains unfinished.
-6. Previously recorded: training Start while Studio loads can leave Studio on "loading". This was not rechecked during the sync.
-7. A prior full checks run errored twice without retained output. It was not reproduced then and no checks ran now. Keep the output if it recurs.
+2. The venv still lacks `pywebview` and `soundfile`, confirmed through package metadata on 2026-10-20. The app window (`Launch Fizgig.bat`) needs `pywebview`.
+3. Preserve the local leftovers: ignored `webui/`, the excluded pre-v8 preferences backup, and untracked `WEBUI_ADOPTION_AUDIT.md`.
+4. The audit's slate theme (Tier 2 #11) remains unfinished.
+5. Previously recorded: training Start while Studio loads can leave Studio on "loading". This was not rechecked during the sync.
+6. A prior full checks run errored twice without retained output. It was not reproduced then and no checks ran now. Keep the output if it recurs.
 
 ## Decisions
 - Upstream's app replaces the fork's. Keep fork patches to upstream files minimal so syncs merge cleanly.
