@@ -226,15 +226,35 @@ class MOSSImageDriver(FamilyDriver):
         return min_t + (max_t - min_t) * sigma
 
     def _t_mu(self):
-        """lownoise_pct=P (the share of steps below sigma 0.5) moves the curve's centre; unset = the reference's."""
-        pct = str(self.options.get("lownoise_pct", "") or "").rstrip("%").strip()
+        """lownoise_pct=P (the share of steps below sigma 0.5) moves the curve's centre; unset = the reference's.
+        Split, "A:N:B": A% for the first N epochs, then B%. Slide, "A:H:B:E": A% until epoch H, then in a straight
+        line down to B% by epoch E (and B% after); "A:H:B:E:R": and every R epochs after E, one epoch at A% again."""
+        pct = str(self.options.get("lownoise_pct", "") or "").replace("%", "").strip()
         if not pct:
             return T_MU
+        if ":" in pct:
+            try:
+                parts = [float(x) for x in pct.split(":")]
+                if len(parts) not in (3, 4, 5):
+                    raise ValueError
+            except ValueError:
+                raise RuntimeError(f"Clean-end share '{pct}': give share:epochs:share (75:5:40 = 75% for the first 5 "
+                                   "epochs, then 40%) or share:epoch:share:epoch (75:6:40:10 = 75% until epoch 6, "
+                                   "then down to 40% by epoch 10; a fifth number R = every R epochs after that, one "
+                                   "epoch at the first share)") from None
+            first, until, rest = parts[:3]
+            end = parts[3] if len(parts) >= 4 else until
+            every = int(parts[4]) if len(parts) == 5 else 0
+            e = self.epoch
+            share = first if e <= until else rest if e >= end else first + (rest - first) * (e - until) / (end - until)
+            if every > 0 and e > end and (e - end) % every == 0:
+                share = first                     # a refresh epoch at the first share
+            pct = f"{round(share, 2):g}"
         cached = getattr(self, "_mu_cached", None)
         if cached is None or cached[0] != pct:
             cached = self._mu_cached = (pct, mu_for_clean_share(pct))
-            logger.info(f"MOSS-Image: {pct}% of training steps at the clean end (sigma < 0.5), Z mean "
-                        f"{cached[1]:.2f} (reference -1.09, about 11%)")
+            logger.info(f"MOSS-Image: {pct}% of training steps at the clean end (sigma < 0.5) from epoch {self.epoch}, "
+                        f"Z mean {cached[1]:.2f} (reference -1.09, about 11%)")
         return cached[1]
 
     def _forward(self, dit, xt, t, cond):

@@ -470,8 +470,14 @@ def _studio_samples(desc):
     neg = v.get("SAMPLE_NEGATIVE")
     if neg is None:                     # never saved: the Samples tab's own default, as its box shows it
         neg = desc.preview_negative or ""
+    # the Samples tab's preview-checkpoint tick (MOSS-Image's Use the SFT model for samples): the workbench renders
+    # where training previews do - on the checkpoint while it's ticked, on the training model when it isn't
+    ck = v.get("SAMPLE_CHECKPOINT")
+    if blank(ck):
+        ck = desc.preview_checkpoint_on
+    ck = ck if isinstance(ck, bool) else str(ck).strip().lower() in ("1", "true", "yes", "on")
     return {"steps": str(steps), "cfg": str(cfg), "turbo": str(turbo), "negative": neg,
-            "turbo_live": live, "turbo_name": sp.name if sp is not None else ""}
+            "turbo_live": live, "turbo_name": sp.name if sp is not None else "", "checkpoint": ck}
 
 
 def _gpu_training():
@@ -888,11 +894,13 @@ def _plan(family_key, values, image_folder, resume="", ft_continue=None):
 
 
 _SIZE_KEYS = ("DATASET_MEGAPIXELS", "CLIP_MEGAPIXELS")
-# the settings a Resume takes from the form as it is now: the Samples tab's, and block swap (memory only, the
-# results are the same); the run trains on as it was
+# the settings a Resume takes from the form as it is now: the Samples tab's, block swap (memory only, the results
+# are the same) and the save schedule (when checkpoints are written); the run trains on as it was
 _RESUME_SAMPLE_KEYS = ("SAMPLE_PROMPT", "SAMPLE_SEED", "SAMPLE_WIDTH", "SAMPLE_HEIGHT", "SAMPLE_STEPS",
                        "SAMPLE_CFG_SCALE", "FAMILY_TURBO_STRENGTH", "SAMPLE_CHECKPOINT",   # + previews on the checkpoint
-                       "BLOCKS_SWAP")
+                       "FAMILY_PREVIEW_LOOK",                                              # + the SFT look tick
+                       "SAMPLE_EVERY_N_EPOCHS", "SAMPLE_LATER", "SAMPLE_UNTIL_EPOCH", "SAMPLE_EVERY_AFTER",
+                       "BLOCKS_SWAP", "SAVE_EVERY_N_EPOCHS", "SAVE_LATER", "SAVE_UNTIL_EPOCH", "SAVE_EVERY_AFTER")
 
 
 # a prompt slider's live prompts: the request the web UI writes, and what the trainer took (fizgig.families.train's
@@ -1652,6 +1660,23 @@ def _audio_seconds(path):
 _SAMPLE_NAME = re.compile(r"^(?P<run>.+)_e(?P<epoch>\d{6})_(?P<idx>\d{2})_\d+_\d+(?:_s(?P<s>\d{3}))?\.\w+$")
 
 
+def preview_labels(mode) -> dict:
+    """{epoch: the line over that epoch's enlarged previews} from the run's record (rounds) and its family's words
+    (description preview_labels); {} for a family that declares none or a run from before the record."""
+    desc = get_family(mode.get("family", "")) if isinstance(mode, dict) else None
+    words = dict(getattr(desc, "preview_labels", ()) or ())
+    if not words:
+        return {}
+    out = {}
+    for ep, r in (mode.get("rounds") or {}).items():
+        line = words.get("checkpoint" if r.get("checkpoint") else "look" if r.get("look") else "base", "")
+        if r.get("turbo") and words.get("turbo"):
+            line = (words["turbo"] + " " + line).strip()
+        if line:
+            out[str(ep)] = line
+    return out
+
+
 def sample_info(name) -> dict:
     """What a preview's name says: its run, epoch, prompt number and strength (None = full)."""
     m = _SAMPLE_NAME.match(name)
@@ -2188,6 +2213,66 @@ def _start_fetch(family, token="", optional=False, choices=None):
     with _lock:
         _fetch.update(proc=proc, state="running", family=family, file="", done=0, total=0, lines=[])
     threading.Thread(target=_fetch_watch, args=(proc,), daemon=True).start()
+
+
+_on_use = {}          # pref key -> {"state": "running" | "failed" | "done", "at": time}: files fetched on first use
+
+
+def _fetch_on_use(f):
+    """One model file declared fetch_on_use, downloaded the first time its feature is used: into the models folder
+    on a worker thread, its Preferences row set once it is complete (hf_hub_download writes the final name only
+    then). A failed download is tried again 30 s on, not on every form change. Returns "running" / "failed" / ""."""
+    with _lock:
+        st = _on_use.get(f.pref_key)
+        if st and (st["state"] == "running" or (st["state"] == "failed" and time.time() - st["at"] < 30)):
+            return st["state"]
+        _on_use[f.pref_key] = {"state": "running", "at": time.time()}
+
+    def work():
+        try:
+            from huggingface_hub import hf_hub_download
+            got = hf_hub_download(repo_id=f.repo, filename=f.path, local_dir=user_data.MODELS_DIR)
+            dest = os.path.join(user_data.MODELS_DIR, f.local_name or os.path.basename(f.path))
+            if os.path.normcase(os.path.abspath(got)) != os.path.normcase(os.path.abspath(dest)):
+                os.replace(got, dest)             # a file in a repo subfolder: to the models folder itself
+            update_prefs({f.pref_key: dest})
+            with _lock:
+                _on_use[f.pref_key] = {"state": "done", "at": time.time()}
+            logger.info(f"Downloaded {os.path.basename(dest)} on first use")
+        except Exception as e:
+            with _lock:
+                _on_use[f.pref_key] = {"state": "failed", "at": time.time()}
+            logger.warning(f"Couldn't download {f.path} from {f.repo}: {e}")
+
+    threading.Thread(target=work, daemon=True).start()
+    return "running"
+
+
+def _on_use_gb(f):
+    """How much of a first-use download has arrived, in GB: hf_hub_download's part file in the models folder's
+    .cache (a hashed name ending .incomplete) until it is complete - the largest there, as a resumed one may sit
+    beside an older leftover."""
+    d = os.path.join(user_data.MODELS_DIR, ".cache", "huggingface", "download", os.path.dirname(f.path))
+    try:
+        return max((os.path.getsize(os.path.join(d, n)) for n in os.listdir(d) if n.endswith(".incomplete")),
+                   default=0) / 2 ** 30
+    except OSError:
+        return 0.0
+
+
+def _look_fetch(desc, values, path):
+    """The preview look LoRA (MOSS-Image's SFT look LoRA), ticked on the Samples tab: its own download
+    (_fetch_on_use) when it is not on disk. Returns (state, GB arrived of GB): state "running" / "failed" / "done"
+    (just finished: the note says so) / "" (nothing to say)."""
+    look = desc.preview_look()
+    if look is None or not look.fetch_on_use or not values.get("FAMILY_PREVIEW_LOOK"):
+        return "", None
+    if path and os.path.isfile(path):
+        with _lock:
+            st = _on_use.get(look.pref_key) or {}
+        return ("done" if st.get("state") == "done" and time.time() - st["at"] < 120 else ""), None
+    state = _fetch_on_use(look)
+    return state, ((_on_use_gb(look), look.size_gb) if state == "running" else None)
 
 
 def _fetch_watch(proc):
@@ -2929,6 +3014,7 @@ class Handler(BaseHTTPRequestHandler):
         newest = by_epoch[max(by_epoch, key=int)] if by_epoch else None
         return self.json({"items": out[:1000] if run else out[:300], "runs": runs, "epoch_prompts": by_epoch,
                           "preview_mode": mode if isinstance(mode, dict) else None,
+                          "preview_labels": preview_labels(mode),
                           "prompts": newest or (run_prompts(os.path.dirname(folder.rstrip("\\/")), run) if run else [])})
 
     def _checkpoints(self, folder):
@@ -3074,13 +3160,16 @@ class Handler(BaseHTTPRequestHandler):
                 ck = desc.preview_checkpoint()
                 ckf = pref_path(prefs, ck[0].pref_key) if ck else ""
                 vals = b.get("values") or {}
+                lk = desc.preview_look()
+                lkf = launch.look_path(desc, {"models": {lk.pref_key: pref_path(prefs, lk.pref_key)}}) if lk else ""
                 dit = next((f.pref_key for f in desc.model_files if f.role == "dit"), "")
                 st = form.state(desc, vals, b.get("image_folder") or "",
                                 captioner=cap if cap and os.path.isfile(cap) else "",
                                 speed_file=bool(spf and os.path.isfile(spf)),
                                 checkpoint_file=bool(ckf and os.path.isfile(ckf)),
                                 base_file=pref_path(prefs, dit) if dit else "",
-                                checkpoint_path=ckf if ckf and os.path.isfile(ckf) else "")
+                                checkpoint_path=ckf if ckf and os.path.isfile(ckf) else "",
+                                look_file=bool(lkf and os.path.isfile(lkf)), look_fetch=_look_fetch(desc, vals, lkf))
                 if st["kind"] in ("standard", "finetune"):     # the Subjects card: what each folder trains as
                     mpn = _multi_person_notes(vals, b.get("image_folder") or "",
                                               multi_person=st["kind"] == "standard" and
@@ -3281,6 +3370,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/run/sample_override":   # the Samples tab's live previews: the run going now's override
                 with _lock:
                     out = _run["output_dir"] if _run["proc"] is not None and _run["proc"].poll() is None else ""
+                    fam = _run["family"]
                 if not out:
                     return self.json({"error": "Nothing is training right now."}, 400)
                 side = os.path.join(out, ".sample_override.json")
@@ -3293,12 +3383,20 @@ class Handler(BaseHTTPRequestHandler):
                     return self.json({"ok": True, "on": False})
                 live = {"prompts": prompts, "seed": _seed(b.get("seed"), 1234),
                         "width": _seed(b.get("width"), 1024), "height": _seed(b.get("height"), 1024)}
-                for k in ("steps", "cfg", "turbo"):   # the Samples tab's Steps, CFG and Turbo strength, when given
+                for k in ("steps", "cfg", "turbo", "every", "until", "after"):   # Steps, CFG, Turbo strength and
+                    # the preview cadence (until / after 0 = Then preview less often off), when given
                     try:
                         if str(b.get(k, "")).strip() != "":
-                            live[k] = float(b[k]) if k != "steps" else int(float(b[k]))
+                            live[k] = float(b[k]) if k in ("cfg", "turbo") else int(float(b[k]))
                     except (TypeError, ValueError):
                         pass
+                desc = get_family(fam or "")
+                lk = desc.preview_look() if desc is not None and "look" in b else None
+                if lk is not None:      # the SFT look tick: its file's path when ticked ("" = off), at its strength
+                    live["look"] = launch.look_path(desc, {"models": {lk.pref_key: pref_path(load_prefs(),
+                                                                                            lk.pref_key)}}) \
+                        if b.get("look") else ""
+                    live["look_strength"] = desc.preview_look_strength
                 _write_json(side, live)
                 return self.json({"ok": True, "on": True})
             if path == "/api/run/now":               # Sample now / Save now: a request the trainer takes after a step

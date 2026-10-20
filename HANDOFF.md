@@ -1,17 +1,17 @@
 # HANDOFF
 
-**Updated:** 2026-10-19 · **Branch:** master · **Upstream:** 27a9e380 (after v8.7.0) · **Delivery target:** fork/master
+**Updated:** 2026-10-20 · **Branch:** master · **Upstream:** 0d03b4a4 (after v8.8.2) · **Publication:** local only
 
 ## State
-Merged 253 upstream commits from 504ea916 through 27a9e380 into master, preserving the fork fixes. Upstream is contained in HEAD; fork/master is the authorized publication target.
-Source inspection: 252 Python files compile and both JavaScript files parse. Tests and application startup were not run; this merge is not fully qualified.
+Merged 60 upstream commits from a575518a through 0d03b4a4 into master, preserving the fork fixes. This sync is local only; the published fork remains at 0ca6ea10.
+Source inspection: 254 Python files compile and both JavaScript files parse, before and after the merge. Tests and application startup were not run; this merge is not fully qualified.
 
 ## Done this session
-- Adopted Flux 3, MOSS-Image, LoRA Isolation, Studio improvements, upstream checks and documentation.
-- Resolved `.gitignore` and the server's resume conflicts; resume confirmations remain, and only a successful start releases a paused queue.
-- Restricted `.github/workflows/sync-v8.yml` to the upstream repository; it cannot push a branch in the fork.
-- Removed two incoming trailing-whitespace errors. Preserved the untracked audit document unchanged.
-- Prepared clean delivery with the configured Git identity and `[skip ci]`; local files stay out of the commits.
+- Adopted MOSS-Image Clean-end schedules, SFT-look previews, preview labels and preview/save schedules with their guides and release notes.
+- Adopted resume/cache fixes, live-run history protection, folder controls, Royale sheet fixes and batched console replay.
+- Merged without conflicts. Kept fork safeguards and the upstream-only `sync-v8.yml` condition.
+- Removed one extra EOF blank line in `docs/NEWS.md`. Preserved the untracked audit document unchanged.
+- No dependencies, models or runtime data were changed by the sync. The merge tip uses `[skip ci]`.
 
 ## Fork changes on top of upstream
 - `.gitignore`: ignores both `AGENTS.md` and upstream's `.cursor/`.
@@ -20,11 +20,12 @@ Source inspection: 252 Python files compile and both JavaScript files parse. Tes
 
 ## Open
 1. No tests were requested. Run the commands below only after explicit test authorization; the prior 98-test result is historical, not a baseline for this merge.
-2. The venv still lacks `pywebview` and `soundfile`, confirmed through package metadata. The app window (`Launch Fizgig.bat`) needs `pywebview`. No dependencies were installed.
-3. Preserve the local leftovers: ignored `webui/`, the excluded pre-v8 preferences backup, and untracked `WEBUI_ADOPTION_AUDIT.md`.
-4. The audit's slate theme (Tier 2 #11) remains unfinished.
-5. Previously recorded: training Start while Studio loads can leave Studio on "loading". This was not rechecked during the sync.
-6. A prior full checks run errored twice without retained output. It was not reproduced then and no checks ran now. Keep the output if it recurs.
+2. Push requires explicit authorization; the dashboard compares the published fork and will still count this local-only sync as behind.
+3. The venv still lacks `pywebview` and `soundfile`, confirmed through package metadata on 2026-10-20. The app window (`Launch Fizgig.bat`) needs `pywebview`.
+4. Preserve the local leftovers: ignored `webui/`, the excluded pre-v8 preferences backup, and untracked `WEBUI_ADOPTION_AUDIT.md`.
+5. The audit's slate theme (Tier 2 #11) remains unfinished.
+6. Previously recorded: training Start while Studio loads can leave Studio on "loading". This was not rechecked during the sync.
+7. A prior full checks run errored twice without retained output. It was not reproduced then and no checks ran now. Keep the output if it recurs.
 
 ## Decisions
 - Upstream's app replaces the fork's. Keep fork patches to upstream files minimal so syncs merge cleanly.
@@ -39,6 +40,7 @@ Source inspection: 252 Python files compile and both JavaScript files parse. Tes
 - A test that imports `fizgig.web` before `isolate` writes the real `user_data/`. `test_isolation` fails if a web module holds a path in the Fizgig folder.
 - `checks/test_plan_presets.py` fills in the Edit and Slider folders and the prompt slider's prompts. A new kind of run needs its inputs added there.
 - A warning response from Start is not a successful resume. `_resumed()` must require `ok` before clearing a paused queue's hold.
+- `FAMILY_PREVIEW_LOOK` can download its model through `/api/form/state`; do not exercise the live form as an incidental source check.
 
 ## Verify
 Syntax and source inspection ran; tests and runtime checks did not. For an authorized test run:

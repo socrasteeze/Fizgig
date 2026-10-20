@@ -48,6 +48,7 @@ logger = logging.getLogger(__name__)
 ADAPTER = "training_adapter"
 CONTEXT = "context"
 SPEED = "speed_lora"
+LOOK = "preview_look"         # a LoRA for previews only (MOSS-Image's SFT look LoRA), on CPU between previews
 TRAINABLE_PREVIEW = "epoch_lora"         # the epoch's LoRA, frozen on a preview checkpoint
 
 
@@ -250,8 +251,8 @@ def _record_prompts(sample_dir, output_name, epoch, prompts):
 
 def _read_sample_override(output_dir):
     """The live sample override (<output_dir>/.sample_override.json, written by the desktop's status-bar panel or the
-    web UI's Samples tab): {prompts, prompt (the first), seed, width, height, steps, cfg, turbo} while a prompt is
-    set, else None. A "prompts" list (the web's, every line of its box) or a single "prompt"; the reference image field
+    web UI's Samples tab): {prompts, prompt (the first), seed, width, height, steps, cfg, turbo, every, until, after}
+    while a prompt is set, else None (every / until / after: the preview cadence, see preview_due). A "prompts" list (the web's, every line of its box) or a single "prompt"; the reference image field
     is ignored. steps / cfg / turbo (the Turbo LoRA's strength) are None when the override doesn't set them."""
     path = os.path.join(output_dir, ".sample_override.json")
     try:
@@ -266,13 +267,26 @@ def _read_sample_override(output_dir):
                 except (TypeError, ValueError):
                     return None
             steps, cfg, turbo = num("steps", int), num("cfg", float), num("turbo", float)
+            look = d.get("look") if isinstance(d.get("look"), str) else None   # the look LoRA's path, "" = off
             return {"prompts": prompts, "prompt": prompts[0], "seed": int(d.get("seed", 1234)),
                     "width": int(d.get("width", 1024)), "height": int(d.get("height", 1024)),
                     "steps": steps if steps and steps > 0 else None, "cfg": cfg if cfg and cfg > 0 else None,
-                    "turbo": turbo if turbo is not None and turbo >= 0 else None}
+                    "turbo": turbo if turbo is not None and turbo >= 0 else None,
+                    "look": look, "look_strength": num("look_strength", float),
+                    **{k: (lambda v: v if v is not None and v >= 0 else None)(num(k, int))
+                       for k in ("every", "until", "after")}}
     except (OSError, ValueError, TypeError):
         pass
     return None
+
+
+def preview_due(done, every, until=0, after=0):
+    """Whether epoch `done` previews (or saves): every `every` epochs, or with `until` and `after` both set (How often
+    to preview / save, switched on: "then from epoch `until`"), every `every` before epoch `until`, then from it on
+    whole multiples of `after`."""
+    if until > 0 and after > 0 and done >= until:
+        return done % after == 0
+    return every > 0 and done % every == 0
 
 
 SLIDER_LIVE = ".slider_prompts.json"            # written by the web UI while a prompt slider trains
@@ -544,7 +558,7 @@ def _dop_ft_loss(driver, dit, rows, cond, device):
 
 def _render_previews(driver, dit, net, vae, encoded, out_dir, epoch, *, output_name, steps, cfg, neg, width,
                      height, seed, ema=None, speed=None, lowmem=False, swapped=False, refs=None, slider=False,
-                     strengths=()):
+                     strengths=(), look=False):
     """Previews on the RESIDENT training model: training adapter OFF (the deployment setup), the family's speed
     LoRA ON if one is loaded (it lives on CPU between previews). On small cards the DiT parks on CPU for the
     decode. File names match the other trainers so the GUI gallery reads them:
@@ -565,6 +579,10 @@ def _render_previews(driver, dit, net, vae, encoded, out_dir, epoch, *, output_n
             done.add("speed")              # before the move: a move that runs out of memory still gets put back
             net.move_adapter(SPEED, device)
             net.set_enabled(SPEED, True)
+        if look:
+            done.add("look")
+            net.move_adapter(LOOK, device)
+            net.set_enabled(LOOK, True)
         if ema is not None:
             ema.swap_in()
             done.add("ema")
@@ -634,6 +652,9 @@ def _render_previews(driver, dit, net, vae, encoded, out_dir, epoch, *, output_n
         if "speed" in done:
             net.set_enabled(SPEED, False)
             net.move_adapter(SPEED, "cpu")
+        if "look" in done:
+            net.set_enabled(LOOK, False)
+            net.move_adapter(LOOK, "cpu")
         if "adapter" in done:
             net.set_enabled(ADAPTER, True)
         dit.train(was_training)
@@ -854,12 +875,14 @@ class _FineTune:
 
 
 def train_family(family, dit_path, dataset_config, output_dir, output_name, *, network_dim=32, network_alpha=32,
-                 learning_rate=1e-4, max_train_epochs=16, save_every_n_epochs=1, save_state=False,
+                 learning_rate=1e-4, max_train_epochs=16, save_every_n_epochs=1, save_until_epoch=0,
+                 save_every_n_epochs_after=0, save_state=False,
                  save_state_on_train_end=False, keep_last_n_states=2, seed=42, precision="bf16",
                  training_adapter=None, training_adapter_strength=1.0,
                  context_lora_path=None, context_lora_strength=1.0, min_timestep=0.0, max_timestep=1.0,
-                 speed_lora=None, speed_lora_strength=None,
-                 vae_path=None, te_path=None, sample_prompts=None, sample_every_n_epochs=0, sample_width=None,
+                 speed_lora=None, speed_lora_strength=None, preview_lora=None, preview_lora_strength=1.0,
+                 vae_path=None, te_path=None, sample_prompts=None, sample_every_n_epochs=0, sample_until_epoch=0,
+                 sample_every_n_epochs_after=0, sample_width=None,
                  sample_height=None, sample_steps=None, sample_cfg_scale=None, sample_negative=None,
                  sample_at_first=False, sample_seed=42, sample_reference=None, sample_image=None,
                  sample_strengths=(), slider_pairs=False, slider_diff_weight=1.0, slider_prompts=None, slider_guidance=3.0,
@@ -1229,6 +1252,37 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                     f"(strength {strength:g})")
         return True
 
+    look_said = [False]
+
+    def _look_ready(path=None, strength=None):
+        """The preview look LoRA on the training model (added the first time its file is there: it may still be
+        downloading), off and on CPU between previews. False = previews without it. path / strength: the live
+        override's, when the Samples tab's tick turned it on after the run started."""
+        path, strength = path or preview_lora, strength or preview_lora_strength
+        if not path or look_said[0] == "bad":
+            return False
+        if net.has(LOOK):
+            return True
+        if not os.path.isfile(path):
+            if not look_said[0]:
+                logger.info(f"[sample] {os.path.basename(path)} isn't downloaded yet - previews render without "
+                            "it until it is")
+                look_said[0] = True
+            return False
+        n = net.add_file(path, LOOK, strength)
+        driver.frozen_file_added(dit, path, strength, "speed")
+        if n == 0:
+            net.remove(LOOK)
+            logger.warning(f"[sample] {os.path.basename(path)} matched no {desc.display_name} layers - "
+                           "previews render without it")
+            look_said[0] = "bad"
+            return False
+        net.set_enabled(LOOK, False)
+        net.move_adapter(LOOK, "cpu")
+        logger.info(f"[sample] {os.path.basename(path)}: {n} Linears at {strength:g}, on previews "
+                    "only (on CPU between them)")
+        return True
+
     if speed_lora and encoded is not None and not speed_idle:
         if not _add_speed(speed_desc.strength if speed_lora_strength is None else speed_lora_strength):
             speed_lora = None
@@ -1530,6 +1584,16 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                 st[k] = st[k].to(device)
 
     ov_cache = [None, None]                  # the override's prompts and their encoding, kept while they don't change
+
+    def _preview_due(done):
+        """This epoch previews, by the launch cadence or the live override's (the Samples tab, changed mid-run)."""
+        every, until, after = sample_every_n_epochs, sample_until_epoch, sample_every_n_epochs_after
+        ov = _read_sample_override(output_dir)
+        if ov:
+            every = ov["every"] if ov.get("every") else every
+            until = ov["until"] if ov.get("until") is not None else until
+            after = ov["after"] if ov.get("after") is not None else after
+        return preview_due(done, every, until, after)
     speed_bad = [False]                      # the speed LoRA matched no layers: not tried again
 
     def _previews(epoch):
@@ -1605,7 +1669,8 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                     swapped=bool(swp), refs=ref_latents)
             ckpt_previews.render(dit, net, ema, _ck_render)
             write_mode({"model": os.path.basename(preview_checkpoint), "steps": ck_steps, "cfg": ck_cfg,
-                        "turbo": speed_desc.name if turbo_ck else "", "strength": strength_now if turbo_ck else 0})
+                        "turbo": speed_desc.name if turbo_ck else "", "strength": strength_now if turbo_ck else 0},
+                       epoch)
             last_prompt[0] = prompts[-1] if prompts else None
             _record_prompts(sample_dir, output_name, epoch, prompts)
             return
@@ -1614,11 +1679,13 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                          seed=sd, ema=ema,
                          speed=speed_now, lowmem=lowmem,
                          swapped=bool(swapped), refs=ref_latents, slider=slider,
-                         strengths=sample_strengths if epoch > 0 else ())   # before training the LoRA is all zero
+                         strengths=sample_strengths if epoch > 0 else (),   # before training the LoRA is all zero
+                         look=(look_now := (_look_ready() if not ov or ov.get("look") is None   # as launched
+                                            else ov["look"] != "" and _look_ready(ov["look"], ov.get("look_strength")))))
         last_prompt[0] = prompts[-1] if prompts else None
         _record_prompts(sample_dir, output_name, epoch, prompts)
         write_mode({"model": "", "steps": steps_now, "cfg": cfg_now, "turbo": speed_desc.name if speed_now else "",
-                    "strength": strength_now if speed_now else 0})
+                    "strength": strength_now if speed_now else 0}, epoch, look_now)
 
     ckpt_previews = None
     if preview_checkpoint and encoded is not None:
@@ -1641,12 +1708,25 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
             if ck_speed:
                 logger.info(f"[sample] {os.path.basename(preview_checkpoint)} takes the {speed_desc.name}: previews "
                             f"on it use it while its strength is above 0")
-    def write_mode(mode):
+    def write_mode(mode, epoch=None, look=False):
         """What this run's previews render with now, for the gallery (<sample_dir>/.previews_<name>.json): written at
-        the start and after each preview round, so a live change of steps, CFG or Turbo strength shows."""
+        the start and after each preview round, so a live change of steps, CFG or Turbo strength shows. After a round
+        (`epoch`) its setup joins `rounds` (epoch -> checkpoint / look / turbo), so each picture keeps its own."""
+        if mode.get("turbo") and speed_desc is not None and speed_desc.gallery_note:
+            mode = {**mode, "turbo_note": speed_desc.gallery_note}     # the family's word on its Turbo previews
+        path = os.path.join(sample_dir, f".previews_{output_name}.json")
+        try:
+            with open(path, encoding="utf-8") as f:
+                rounds = json.load(f).get("rounds") or {}               # this run's earlier rounds (a resume's too)
+        except (OSError, ValueError, AttributeError):
+            rounds = {}
+        if epoch is not None:
+            rounds[str(epoch)] = {"checkpoint": bool(mode.get("model")), "look": bool(look),
+                                  "turbo": bool(mode.get("turbo"))}
+        mode = {**mode, "family": desc.key, "rounds": rounds}
         try:
             os.makedirs(sample_dir, exist_ok=True)
-            with open(os.path.join(sample_dir, f".previews_{output_name}.json"), "w", encoding="utf-8") as f:
+            with open(path, "w", encoding="utf-8") as f:
                 json.dump(mode, f)
         except OSError as e:
             logger.warning(f"[sample] could not record the preview settings ({e})")
@@ -1766,6 +1846,7 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
     warmup_note = [0.0]
     for epoch in range(start_epoch, max_train_epochs):
         shared_epoch.value = epoch + 1
+        driver.begin_epoch(epoch + 1 + (ftr.epochs_done if ftr is not None else 0))   # a continued fine-tune counts on
         if ftr is not None and ftr.needs_window(epoch):
             optimizer = params = None       # let go of the outgoing window before the swap, or both sit in VRAM
             params, optimizer = ftr.enter(epoch)                 # the epoch's window, and a fresh optimizer for it
@@ -1920,7 +2001,9 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
         watch.boundary(epoch + 1, dit, device, parkable=not swapped)
 
         done = epoch + 1
-        cadence = bool(save_every_n_epochs) and done % save_every_n_epochs == 0 and done < max_train_epochs
+        # the save schedule (the Training tab's How often to save; a fine-tune saves at whole rotations)
+        cadence = done < max_train_epochs and preview_due(
+            done, save_every_n_epochs, *((0, 0) if ftr is not None else (save_until_epoch, save_every_n_epochs_after)))
         if ftr is not None:
             # a fine-tune saves and previews at whole rotations only, and the preview renders the checkpoint just
             # saved: the window goes back to NF4 (the master holds every trained weight) and its optimizer is
@@ -1949,7 +2032,7 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
             state_saved = state(done)
             if state_saved:
                 prune_state_dirs(output_dir, output_name, keep_last_n_states)
-        if sample_every_n_epochs and done % sample_every_n_epochs == 0:
+        if sample_every_n_epochs and _preview_due(done):
             _tp = time.time()
             previews(done)
             progress.start_t += time.time() - _tp       # the bar's s/it is training speed, not previews
@@ -2008,6 +2091,10 @@ def setup_parser():
                    help="blocks streamed between CPU and GPU (not with nf4); -1 = as few as fit free VRAM")
     p.add_argument("--network_dim", type=int, default=32)
     p.add_argument("--network_type", default="lora", choices=("lora", "lokr"))
+    p.add_argument("--preview_lora", default=None,
+                   help="a LoRA on previews of the training model only, never in training (MOSS-Image's SFT look "
+                        "LoRA); a file not there yet is picked up at a later preview")
+    p.add_argument("--preview_lora_strength", type=float, default=1.0)
     p.add_argument("--speed_lora_strength", type=float, default=None,
                    help="the preview speed LoRA's strength (default: the family's recommended value)")
     p.add_argument("--log_per_image_loss", action="store_true", help="detect problem images (Problem Images window)")
@@ -2024,6 +2111,9 @@ def setup_parser():
     p.add_argument("--learning_rate", type=float, default=1e-4)
     p.add_argument("--max_train_epochs", type=int, default=16)
     p.add_argument("--save_every_n_epochs", type=int, default=1)
+    p.add_argument("--save_until_epoch", type=int, default=0,
+                   help="With --save_every_n_epochs_after: saves every --save_every_n_epochs up to this epoch")
+    p.add_argument("--save_every_n_epochs_after", type=int, default=0, help="...then on whole multiples of this")
     p.add_argument("--save_state", action="store_true")
     p.add_argument("--save_state_on_train_end", action="store_true")
     p.add_argument("--keep_last_n_states", type=int, default=2)
@@ -2040,6 +2130,10 @@ def setup_parser():
     p.add_argument("--text_encoder", default=None)
     p.add_argument("--sample_prompts", default=None, help="One prompt per line")
     p.add_argument("--sample_every_n_epochs", type=int, default=0)
+    p.add_argument("--sample_until_epoch", type=int, default=0,
+                   help="With --sample_every_n_epochs_after: previews every --sample_every_n_epochs up to this epoch")
+    p.add_argument("--sample_every_n_epochs_after", type=int, default=0,
+                   help="...then on whole multiples of this")
     p.add_argument("--sample_width", type=int, default=None)
     p.add_argument("--sample_height", type=int, default=None)
     p.add_argument("--sample_steps", type=int, default=None)
@@ -2147,13 +2241,17 @@ def main():
         recaption_instruction=a.recaption_instruction,
         recaption_instruction_detailed=a.recaption_instruction_detailed, captioner=a.captioner,
         network_dim=a.network_dim, network_alpha=a.network_alpha, learning_rate=a.learning_rate,
-        max_train_epochs=a.max_train_epochs, save_every_n_epochs=a.save_every_n_epochs, save_state=a.save_state,
+        max_train_epochs=a.max_train_epochs, save_every_n_epochs=a.save_every_n_epochs,
+        save_until_epoch=a.save_until_epoch, save_every_n_epochs_after=a.save_every_n_epochs_after, save_state=a.save_state,
         save_state_on_train_end=a.save_state_on_train_end, keep_last_n_states=a.keep_last_n_states, seed=a.seed,
         training_adapter=a.training_adapter, training_adapter_strength=a.training_adapter_strength,
         context_lora_path=a.context_lora_path, context_lora_strength=a.context_lora_strength,
-        min_timestep=a.min_timestep, max_timestep=a.max_timestep, speed_lora=a.speed_lora,
+        min_timestep=a.min_timestep, max_timestep=a.max_timestep, speed_lora=a.speed_lora, preview_lora=a.preview_lora,
+        preview_lora_strength=a.preview_lora_strength,
         vae_path=a.vae, te_path=a.text_encoder,
-        sample_prompts=prompts, sample_every_n_epochs=a.sample_every_n_epochs, sample_width=a.sample_width,
+        sample_prompts=prompts, sample_every_n_epochs=a.sample_every_n_epochs,
+        sample_until_epoch=a.sample_until_epoch, sample_every_n_epochs_after=a.sample_every_n_epochs_after,
+        sample_width=a.sample_width,
         sample_height=a.sample_height, sample_steps=a.sample_steps, sample_cfg_scale=a.sample_cfg_scale,
         sample_negative=a.sample_negative, sample_at_first=a.sample_at_first, sample_seed=a.sample_seed,
         sample_strengths=tuple(float(x) for x in a.sample_strengths.split(",") if x.strip()),

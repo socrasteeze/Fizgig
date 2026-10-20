@@ -144,7 +144,10 @@ const saveTriggerSoon = debounce((word) => api("/api/trigger", {folder: S.imageF
 
 function defaults() {
   const v = {};
-  for (const s of S.fam.form.sections) for (const r of s.rows) if (r.kind !== "note" && r.kind !== "shown") v[r.key] = r.default;
+  for (const s of S.fam.form.sections) for (const r of s.rows) if (r.kind !== "note" && r.kind !== "shown") {
+    v[r.key] = r.default;
+    for (const p of r.parts || []) v[p.key] = p.default;   // a control of several values (the preview cadence)
+  }
   return v;
 }
 
@@ -250,12 +253,20 @@ function renderSections(tab, host) {
 function renderRow(r) {
   // its kind sets its layout (style.css): boxes in the grid, switches as tiles, a choice of pills, files and notes
   // across the card - from the schema's row kind, so every model's form lays out the same way
-  const kind = {check: "check", radio: "radio", note: "note", text: "wide", path: "wide", folder: "wide", shown: "wide"}[r.kind] || "field";
+  const kind = {check: "check", radio: "radio", note: "note", text: "wide", path: "wide", folder: "wide", shown: "wide",
+    cadence: "cadence", split: "cadence"}[r.kind] || "field";
   const wrap = el("div", {class: "form-row kind-" + kind + (r.featured ? " row-featured" : "") +
     (r.boxed ? " row-boxed" : ""), "data-key": r.key});
   if (r.kind === "shown") {                       // a value from elsewhere (the Start tab's folder), read-only here
-    wrap.append(el("div", {class: "field-row"}, el("span", {class: "field-label", text: r.label + ":"}),
-      el("input", {type: "text", class: "w-path", id: "note_" + r.key, readonly: true, tabindex: -1})));
+    const shownRow = el("div", {class: "field-row"}, el("span", {class: "field-label", text: r.label + ":"}),
+      el("input", {type: "text", class: "w-path", id: "note_" + r.key, readonly: true, tabindex: -1}));
+    if (r.sets_training_folder) {                 // the training folder itself (an edit's Edited folder, #217): choosing
+      shownRow.append(el("button", {class: "btn", text: "Choose…",          // it here sets the Start tab's
+        title: "Pick from what is on the machine running Fizgig - it becomes the training folder on the Start tab",
+        onclick: () => pick(S.imageFolder, true, (p) => {
+          $("imageFolder").value = p; $("imageFolder").dispatchEvent(new Event("change")); })}));
+    }
+    wrap.append(shownRow);
     if (r.hint) wrap.append(el("div", {class: "field-hint", text: r.hint}));
     return wrap;
   }
@@ -269,6 +280,8 @@ function renderRow(r) {
   let input;
   const set = (val) => onValue(r, val);
   if (r.kind === "blocks") return blockPicker(r, wrap);
+  if (r.kind === "cadence") return cadenceRow(r, wrap);
+  if (r.kind === "split") return splitRow(r, wrap);
   if (r.kind === "check") {
     input = el("input", {type: "checkbox", id: "f_" + r.key, onchange: (e) => set(e.target.checked)});
     input.checked = !!v;
@@ -371,9 +384,135 @@ function renderRow(r) {
     if (r.hint.includes("\n")) h.style.whiteSpace = "pre-line";
     wrap.append(h);
   }
+  if (r.bold) wrap.append(el("div", {class: "field-hint"}, el("b", {text: r.bold})));   // a line the row stresses
   if (link) wrap.append(el("div", {class: "field-hint"}, link));
   if (r.warn) wrap.append(el("div", {class: "field-hint tc-warn"}, r.warn, r.warn_link ? el("a", {class: "inline-link",
     target: "_blank", rel: "noopener", href: r.warn_link, text: " Best values: the Reddit discussion →"}) : ""));
+  return wrap;
+}
+
+// How often to preview: one sentence of boxes - "Every [N] epochs", then (ticked) "then from epoch [10], every
+// [1] epochs" - each box its own value, greyed one by one (refreshState reads data-field / data-part). Ticking it
+// fills in the row's tick_fills (every 5) while the first box is still at its default, and unticking puts that back
+function cadenceRow(r, wrap) {
+  const [later, until, after] = r.parts.map((p) => p.key);
+  const num = (key) => {
+    const i = el("input", {type: "text", inputmode: "numeric", class: "cad-num", id: "f_" + key, "data-field": key,
+      oninput: (e) => onValue({key}, e.target.value)});
+    i.value = S.values[key] ?? "";
+    return i;
+  };
+  const tick = el("input", {type: "checkbox", id: "f_" + later, "data-field": later, onchange: (e) => {
+    S._cadFilled = S._cadFilled || {};            // what the tick filled in, so unticking undoes only that
+    for (const [k, v] of Object.entries(r.tick_fills || {})) {
+      if (e.target.checked && String(S.values[k] ?? "") === String(r.default)) {
+        S.values[k] = v; S._cadFilled[k] = v; syncInputs([k]);
+      } else if (!e.target.checked && S._cadFilled[k] !== undefined && String(S.values[k]) === String(v)) {
+        S.values[k] = r.default; syncInputs([k]);
+      }
+      if (!e.target.checked) delete S._cadFilled[k];
+    }
+    onValue({key: later}, e.target.checked);
+  }});
+  tick.checked = !!S.values[later];
+  wrap.append(el("div", {class: "cad-title", text: r.label}),
+    el("div", {class: "cad-line"}, el("span", {text: "Every"}), num(r.key), el("span", {text: "epochs"})),
+    el("div", {class: "cad-line", "data-part": later},
+      el("label", {class: "cad-tick"}, tick, el("span", {text: "then from epoch"})),
+      el("span", {class: "cad-pair"}, num(until)),
+      el("span", {class: "cad-pair"}, el("span", {text: "every"}), num(after), el("span", {text: "epochs"}))),
+    el("div", {class: "field-hint row-note", id: "note_" + r.key}),
+    el("div", {class: "field-hint", "data-part": later, text: r.hint}));
+  return wrap;
+}
+
+// An entry with a Split mode (MOSS-Image's Clean-end share): Single is one value, Split a value for the first
+// epochs and another for the rest, Slide (when the row has one) a value held to an epoch, then easing down to another
+// by a later epoch. It stays one text - "30", "75:5:40" or "75:6:40:10" - so presets, Last Train and the queue carry
+// it as any entry; each mode remembers its own numbers while you switch between them
+function splitRow(r, wrap) {
+  // a row without Split shows a split value (75:5:40) as a Slide that drops at once (75:5:40:5)
+  const modeOf = () => { const n = String(S.values[r.key] ?? "").split(":").length;
+    return (n === 4 || n === 5) && r.slide ? "Slide" : n === 3 ? (r.split ? "Split" : "Slide") : "Single"; };
+  const partsOf = () => { const p = String(S.values[r.key] ?? "").split(":");
+    return p.length === 3 && !r.split ? [...p, p[1]] : p; };
+  S._split = S._split || {};
+  const m0 = modeOf();
+  const mem = S._split[r.key] = S._split[r.key] || {
+    single: m0 === "Single" ? String(S.values[r.key] ?? "") : String(r.single ?? (String(r.default ?? "").includes(":") ? "" : r.default ?? "")),
+    split: m0 === "Split" ? partsOf() : (r.split || []).slice(), slide: m0 === "Slide" ? partsOf() : (r.slide || []).slice()};
+  if (mem.slide.length === 5) { mem.every = mem.slide[4]; mem.slide = mem.slide.slice(0, 4); }   // the tick's number apart
+  const unit = (r.suffix || "").split(" ")[0];
+  const write = () => {
+    const m = modeOf();
+    if (m === "Split") { mem.split = [first, until, rest].map((i) => i.value.trim()); onValue(r, mem.split.join(":")); }
+    else if (m === "Slide") {          // the refresh tick adds its "every N" as a fifth number
+      mem.slide = [sFirst, sHold, sRest, sBy].map((i) => i.value.trim());
+      mem.every = sEvery.value.trim() || mem.every || "3";
+      sFirstEcho.textContent = sFirst.value;     // "one epoch at 75%" follows the first box
+      sEvery.disabled = !sTick.checked;
+      onValue(r, [...mem.slide, ...(sTick.checked ? [mem.every] : [])].join(":"));
+    }
+    else { mem.single = one.value.trim(); onValue(r, mem.single); }
+  };
+  const box = () => el("input", {type: "text", inputmode: "numeric", class: "cad-num", oninput: write});
+  const one = box(), first = box(), until = box(), rest = box();
+  const sFirst = box(), sHold = box(), sRest = box(), sBy = box(), sEvery = box();
+  const sTick = el("input", {type: "checkbox", onchange: write});
+  const sFirstEcho = el("span");                   // "one epoch at 75%": the first share, as typed
+  const pills = el("div", {class: "radio-row"});
+  for (const c of ["Single", ...(r.split ? ["Split"] : []), ...(r.slide ? ["Slide"] : [])]) {
+    pills.append(el("label", {class: "checkbox-label"}, el("input", {type: "radio", name: "split_" + r.key, value: c,
+      onchange: () => { onValue(r, c === "Split" ? mem.split.join(":") : c === "Slide" ? [...mem.slide,
+          ...(mem.every && mem.slideTick !== false ? [mem.every] : [])].join(":") : mem.single);
+        show(); }}), " " + c));
+  }
+  const lineOne = el("div", {class: "cad-line"}, one, el("span", {text: r.suffix || ""}));
+  const lineSplit = el("div", {class: "cad-line"},
+    el("span", {class: "cad-pair"}, first, el("span", {text: unit + " for the first"})),
+    el("span", {class: "cad-pair"}, until, el("span", {text: "epochs, then"})),
+    el("span", {class: "cad-pair"}, rest, el("span", {text: unit})));
+  const lineSlide = el("div", {class: "cad-line"},
+    el("span", {class: "cad-pair"}, sFirst, el("span", {text: unit + " until epoch"})),
+    el("span", {class: "cad-pair"}, sHold, el("span", {text: "then down to"})),
+    el("span", {class: "cad-pair"}, sRest, el("span", {text: unit + " by epoch"})),
+    el("span", {class: "cad-pair"}, sBy));
+  const lineRefresh = (r.slide || []).length > 4 ? el("div", {class: "cad-line"},
+    el("label", {class: "cad-tick"}, sTick, el("span", {text: "then every"})),
+    el("span", {class: "cad-pair"}, sEvery, el("span", {}, "epochs, one epoch at ", sFirstEcho, unit))) : null;
+  const hintOne = el("div", {class: "field-hint", text: r.hint});
+  const hintSplit = el("div", {class: "field-hint", text: r.split_hint || r.hint});
+  const hintSlide = el("div", {class: "field-hint", text: r.slide_hint || r.hint});
+  function show() {
+    const m = modeOf();
+    pills.querySelectorAll("input").forEach((rb) => { rb.checked = rb.value === m; });
+    if (m === "Split") { mem.split = partsOf(); [first.value, until.value, rest.value] = mem.split; }
+    else if (m === "Slide") {
+      const p = partsOf();
+      mem.slide = p.slice(0, 4); [sFirst.value, sHold.value, sRest.value, sBy.value] = mem.slide;
+      sTick.checked = p.length === 5;
+      if (p.length === 5) mem.every = p[4];
+      sEvery.value = mem.every || (r.slide || [])[4] || "3";
+      sEvery.disabled = !sTick.checked;
+      sFirstEcho.textContent = sFirst.value;
+    }
+    else { one.value = S.values[r.key] ?? ""; mem.single = one.value; }
+    for (const [node, on] of [[lineOne, m === "Single"], [hintOne, m === "Single"], [lineSplit, m === "Split"],
+                              [hintSplit, m === "Split"], [lineSlide, m === "Slide"], [lineRefresh, m === "Slide"],
+                              [hintSlide, m === "Slide"]]) {
+      if (node) node.style.display = on ? "" : "none";
+    }
+  }
+  const sync = el("input", {type: "hidden", id: "f_" + r.key});    // syncInputs (a preset, Last Train) redraws it
+  sync._sync = show;
+  sTick.addEventListener("change", () => { mem.slideTick = sTick.checked; });
+  wrap.append(el("div", {class: "cad-title", text: r.label}), pills, lineOne, lineSplit, lineSlide, ...(lineRefresh ? [lineRefresh] : []),
+    hintOne, hintSplit,
+    hintSlide, sync,
+    el("div", {class: "field-hint row-note", id: "note_" + r.key}));
+  if (r.warn) wrap.append(el("div", {class: "field-hint tc-warn"}, r.warn, r.warn_link ? el("a", {class: "inline-link",
+    target: "_blank", rel: "noopener", href: r.warn_link, text: " Best values: the Reddit discussion →"}) : ""));
+  show();
   return wrap;
 }
 
@@ -407,7 +546,8 @@ function onValue(r, val) {
   S.values[r.key] = val;
   if (r.key === "__SAMPLE_LIVE" || (S.values.__SAMPLE_LIVE &&
       ["SAMPLE_PROMPT", "SAMPLE_SEED", "SAMPLE_WIDTH", "SAMPLE_HEIGHT", "SAMPLE_STEPS", "SAMPLE_CFG_SCALE",
-       "FAMILY_TURBO_STRENGTH"].includes(r.key))) sampleLiveSoon();
+       "FAMILY_TURBO_STRENGTH", "SAMPLE_EVERY_N_EPOCHS", "SAMPLE_LATER", "SAMPLE_UNTIL_EPOCH",
+       "SAMPLE_EVERY_AFTER", "FAMILY_PREVIEW_LOOK"].includes(r.key))) sampleLiveSoon();
   if (r.key === "CAPTION_TRIGGER_WORD") { S.trigger = String(val).trim(); $("capTrigger").value = S.trigger; saveTriggerSoon(S.trigger); }
   const extra = r.sets && r.sets[val];            // a kind of training that also sets others (Fine-tune's LR)
   if (extra) { Object.assign(S.values, extra); syncInputs(Object.keys(extra)); }
@@ -442,12 +582,14 @@ function syncInputs(keys) {
       fillCombo(i, row.choices, S.values[k], row.labels);
       continue;
     }
+    if (i._sync) { i._sync(); continue; }         // a control that draws itself from the value (splitRow)
     if (i.type === "checkbox") i.checked = !!S.values[k]; else i.value = S.values[k] ?? "";
   }
 }
 
 async function refreshState() {
   S.state = await api("/api/form/state", {family: S.family, values: S.values, image_folder: S.imageFolder});
+  if (S.state.poll) setTimeout(refreshStateSoon, 2000);     // a download under way: its note moves on
   const force = Object.keys(S.state.force || {});      // what a setting turns off (automagic3: Adaptive LR...)
   if (force.length) { Object.assign(S.values, S.state.force); syncInputs(force); saveStateSoon(); }
   const hidden = new Set(S.state.hidden), disabled = new Set(S.state.disabled);
@@ -462,7 +604,17 @@ async function refreshState() {
     const lab = row.querySelector(".field-label"), rowDef = (S.fam.form.sections.flatMap((s) => s.rows)
       .find((r) => r && r.key === k));
     if (lab && rowDef) lab.textContent = ((S.state.labels || {})[k] || rowDef.label) + ":";
-    row.querySelectorAll("input,select,textarea,button").forEach((i) => { i.disabled = disabled.has(k); });
+    // a control of several values greys and hides each of its parts by its own key
+    row.querySelectorAll("input,select,textarea,button").forEach((i) => { i.disabled = disabled.has(i.dataset.field || k); });
+    row.querySelectorAll("[data-part]").forEach((p) => { p.style.display = hidden.has(p.dataset.part) ? "none" : ""; });
+    // single choices greyed in a row of pills (Fizgig LoRA Isolation with one subject)
+    const off = ((S.state.disabled_choices || {})[k]) || {};       // {choice: why}, the why on hover
+    row.querySelectorAll(`input[type="radio"][name="f_${k}"]`).forEach((rb) => {
+      if (rb.value in off) rb.disabled = true;
+      const lab = rb.closest("label");
+      lab.classList.toggle("choice-off", rb.disabled);
+      lab.title = off[rb.value] || "";
+    });
     // a greyed box shows what that run will really use (the Distilled's steps / CFG), the form's own value kept
     const shown = (S.state.shown || {})[k], box = $("f_" + k);
     if (box && shown !== undefined && disabled.has(k)) { box.value = shown; box.dataset.shown = "1"; }
@@ -1137,7 +1289,10 @@ async function resumeClick() {
   // the previews as the Samples tab has them now (prompts, seed, size, steps, CFG, Turbo strength, the preview
   // checkpoint tick) and block swap go with the resume
   const samples = r.family === S.family ? Object.fromEntries(["SAMPLE_PROMPT", "SAMPLE_SEED", "SAMPLE_WIDTH",
-    "SAMPLE_HEIGHT", "SAMPLE_STEPS", "SAMPLE_CFG_SCALE", "FAMILY_TURBO_STRENGTH", "SAMPLE_CHECKPOINT", "BLOCKS_SWAP"]
+    "SAMPLE_HEIGHT", "SAMPLE_STEPS", "SAMPLE_CFG_SCALE", "FAMILY_TURBO_STRENGTH", "SAMPLE_CHECKPOINT", "BLOCKS_SWAP",
+    "FAMILY_PREVIEW_LOOK",
+    "SAMPLE_EVERY_N_EPOCHS", "SAMPLE_LATER", "SAMPLE_UNTIL_EPOCH", "SAMPLE_EVERY_AFTER",
+    "SAVE_EVERY_N_EPOCHS", "SAVE_LATER", "SAVE_UNTIL_EPOCH", "SAVE_EVERY_AFTER"]
     .filter((k) => k in S.values).map((k) => [k, S.values[k]])) : {};
   const diff = r.family === S.family ? Object.keys(SIZE_KEYS).filter((k) => S.values[k] !== undefined &&
     String(S.values[k]).trim() !== "" && Number(S.values[k]) !== Number(was[k])) : [];
@@ -1325,19 +1480,29 @@ function renderWebQueue(q) {
 function followLog() {
   const src = S.logSrc = new EventSource(`/api/log?since=${S.logSince}&t=${encodeURIComponent(TOKEN)}`);
   const out = $("console");
+  // the console as finished lines (body) and the line still being written (tail: a progress bar's latest state),
+  // drawn at most every 50 ms. A new tab replays the run's backlog (up to 5000 lines) at once, and rewriting the
+  // whole console and laying it out again for every line froze the page on a long run
+  const t0 = out.textContent, nl = t0.lastIndexOf("\n");
+  let body = t0.slice(0, nl + 1), tail = t0.slice(nl + 1), done = [], queued = false;
+  const flush = () => {
+    queued = false;
+    const atEnd = out.scrollTop + out.clientHeight >= out.scrollHeight - 30;
+    if (done.length) { body = (body + done.join("")).slice(-200000); done = []; }
+    out.textContent = body + tail;
+    if (atEnd) out.scrollTop = out.scrollHeight;
+  };
   src.onmessage = (e) => {
     S.logSince = Number(e.lastEventId) || S.logSince;
     const line = JSON.parse(e.data);
-    if (line === "\u0000clear\n") { out.textContent = ""; return; }   // a new run: its own log from here
-    const atEnd = out.scrollTop + out.clientHeight >= out.scrollHeight - 30;
-    // a progress bar redraws itself with \r: keep only its latest state
-    const text = out.textContent;
-    if (line.includes("\r") && !line.endsWith("\n")) {
-      out.textContent = text.slice(0, text.lastIndexOf("\n") + 1) + line.split("\r").pop();
-    } else {
-      out.textContent = (text + line.split("\r").pop()).slice(-200000);
+    if (line === "\u0000clear\n") { body = tail = ""; done = []; }   // a new run: its own log from here
+    else if (line.includes("\r") && !line.endsWith("\n")) tail = line.split("\r").pop();   // a progress bar redraws
+    else {
+      const all = tail + line.split("\r").pop(), cut = all.lastIndexOf("\n") + 1;
+      if (cut) done.push(all.slice(0, cut));
+      tail = all.slice(cut);
     }
-    if (atEnd) out.scrollTop = out.scrollHeight;
+    if (!queued) { queued = true; setTimeout(flush, 50); }
   };
   src.onerror = () => { src.close(); if (S.logSrc === src) setTimeout(followLog, 3000); };
 }
@@ -1398,9 +1563,15 @@ function previewFigure(it, prompts, eager, byEpoch) {
   // its own epoch's prompt (recorded by the trainer, so a mid-run change shows), else the run's
   const own = byEpoch && it.epoch != null && byEpoch[String(it.epoch)];
   const prompt = it.idx == null ? "" : (own && own[it.idx]) || (prompts ? prompts[it.idx] : "");
-  return el("figure", {class: "gallery-item", title: it.name}, mediaFor(it, eager && eager.has(it)),
+  return withMode(el("figure", {class: "gallery-item", title: it.name}, mediaFor(it, eager && eager.has(it)),
     el("figcaption", {}, el("b", {text: previewLabel(it)}), prompt ? el("span", {class: "preview-prompt", text: prompt}) : null,
-      el("span", {class: "preview-file", text: it.name})));
+      el("span", {class: "preview-file", text: it.name}))), it);
+}
+// the family's line on how this preview was made (the run's record), shown over it in the lightbox
+function withMode(fig, it) {
+  const L = S.galleryLabels;
+  if (L && it.epoch != null && (!it.run || it.run === L.run)) fig._mode = L.labels[String(it.epoch)] || "";
+  return fig;
 }
 
 // prompts as rows, epochs as columns (full-strength pictures; a slider's strip is its own picture)
@@ -1416,9 +1587,9 @@ function previewGrid(items, prompts, eager) {
       el("th", {class: "prompt-head"}, el("b", {text: `Prompt ${i + 1}`}),
         prompts[i] ? el("span", {class: "preview-prompt", text: prompts[i]}) : null),
       ...epochs.map((e) => { const it = at.get(e + ":" + i);
-        return el("td", {}, it ? el("figure", {class: "gallery-item", title: it.name}, mediaFor(it, eager && eager.has(it)),
+        return el("td", {}, it ? withMode(el("figure", {class: "gallery-item", title: it.name}, mediaFor(it, eager && eager.has(it)),
           el("figcaption", {class: "visually-hidden"}, el("b", {text: previewLabel(it)}),
-            prompts[i] ? el("span", {text: " · " + prompts[i]}) : null)) : null); })));
+            prompts[i] ? el("span", {text: " · " + prompts[i]}) : null)), it) : null); })));
   }
   return el("div", {class: "gallery prompt-grid-wrap"}, table);
 }
@@ -1439,6 +1610,7 @@ async function loadGallery() {
   let run = want;
   if (!g.items.length && g.runs.length && !g.runs.includes(want)) { run = g.runs[0]; g = await get(run); }
   previewMode(g.preview_mode);
+  S.galleryLabels = {run, labels: g.preview_labels || {}};        // the lightbox's line per epoch (previewFigure)
   const sel = $("galleryRun");
   sel.innerHTML = "";
   // "this run" while it trains; once it has ended it is the last run
@@ -1722,7 +1894,8 @@ function previewMode(m) {
   if (!m) { box.style.display = "none"; return; }
   const how = `${m.steps} steps, CFG ${Number(m.cfg).toFixed(1).replace(/\.0$/, "")}`;
   box.textContent = m.turbo
-    ? `⚡ Turbo LoRA in use: ${m.turbo} at strength ${m.strength}, ${how}. For full-quality previews, set Turbo ` +
+    ? `⚡ Turbo LoRA in use: ${m.turbo} at strength ${m.strength}, ${how}. ${m.turbo_note ? m.turbo_note + " " : ""}` +
+      "For full-quality previews, set Turbo " +
       "LoRA strength to 0 above (Steps and CFG go back with it); tick Change the previews of the run going now " +
       "for it to apply from this run's next preview."
     : `Previews render on ${m.model || "the model being trained"}: ${how}, no Turbo LoRA.`;
@@ -2194,6 +2367,7 @@ async function rySheet(confirm) {
     }
     if (r.family !== $("ryFamily").value) await royaleFamily(r.family);
     $("ryCSheet").style.display = "none";
+    $("ryCStatus").textContent = "Starting…";    // the Render it button goes, so the poll's progress shows (#215)
     ryRemember(); ryTravelPoll();
   } catch (e) { $("ryCStatus").textContent = e.message; }
 }
@@ -2207,7 +2381,8 @@ async function ryTravelPoll() {
     running = running || t.state === "rendering";
     if (mode === "sheet") {
       $("ryCGo").disabled = t.state === "rendering";
-      if (t.status) $("ryCStatus").textContent = t.status;
+      // not over the big sheet's Render it button (#215, @Nessa2026691)
+      if (t.status && !$("ryCStatus").querySelector("button")) $("ryCStatus").textContent = t.status;
       if (t.state === "done" && t.sheet && S.ry.tr.sheet !== t.gen) {
         S.ry.tr.sheet = t.gen;
         $("ryCImg").src = `/api/royale/travel/image?mode=sheet&g=${t.gen}&t=${encodeURIComponent(TOKEN)}`;
@@ -3026,7 +3201,9 @@ const sampleLiveSoon = debounce(async () => {
   try {
     const r = await api("/api/run/sample_override", {on: !!v.__SAMPLE_LIVE, prompts: v.SAMPLE_PROMPT || "",
       seed: v.SAMPLE_SEED, width: v.SAMPLE_WIDTH, height: v.SAMPLE_HEIGHT, steps: v.SAMPLE_STEPS,
-      cfg: v.SAMPLE_CFG_SCALE, turbo: v.FAMILY_TURBO_STRENGTH});
+      cfg: v.SAMPLE_CFG_SCALE, turbo: v.FAMILY_TURBO_STRENGTH, every: v.SAMPLE_EVERY_N_EPOCHS,
+      until: v.SAMPLE_LATER ? v.SAMPLE_UNTIL_EPOCH : 0, after: v.SAMPLE_LATER ? v.SAMPLE_EVERY_AFTER : 0,
+      look: !!v.FAMILY_PREVIEW_LOOK});
     if (note) note.textContent = r.on ? "Sent: the run's next previews use these." : "The run is back on its own prompts.";
   } catch (e) {
     if (note) note.textContent = S.run && (S.run.running || S.run.state === "starting") ? e.message : liveIdleText();
@@ -6773,6 +6950,8 @@ function lightboxShow(i) {
   }
   $("lightboxImg").src = pic.src;
   $("lightboxName").textContent = pic.name;
+  $("lightboxMode").textContent = pic.mode || "";
+  $("lightboxMode").style.display = pic.mode ? "" : "none";
   $("lightboxPrev").style.visibility = i > 0 ? "" : "hidden";
   $("lightboxNext").style.visibility = i < S.lb.list.length - 1 ? "" : "hidden";
   $("lightbox").style.display = "";
@@ -6803,7 +6982,8 @@ function wireLightbox() {
       const fig = i.closest(".gallery-item, .caption-card");
       const cap = fig && fig.querySelector("figcaption, .caption-card-title");
       const label = cap ? [...cap.childNodes].map((n) => n.textContent).filter(Boolean).join(" · ") : "";
-      return {src: fullPicture(i.currentSrc || i.src), name: label || i.alt, cap: fig && fig._cap};
+      return {src: fullPicture(i.currentSrc || i.src), name: label || i.alt, cap: fig && fig._cap,
+              mode: (fig && fig._mode) || ""};
     });
     lightboxShow(imgs.indexOf(img));
   });
