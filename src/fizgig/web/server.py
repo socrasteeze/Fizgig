@@ -38,7 +38,7 @@ from fizgig.web import queue as webqueue
 from fizgig.web import prep_jobs
 from fizgig.families import refmod
 from fizgig.web import studio
-from fizgig.web.port import PORT_DEFAULT, PORT_WALK, listening, on_pod, saved_port
+from fizgig.web.port import PORT_DEFAULT, PORT_WALK, listening, on_pod, on_runpod, on_vast, saved_port
 from fizgig.web.schema import get_schema
 
 logger = logging.getLogger("fizgig.web")
@@ -895,12 +895,14 @@ def _plan(family_key, values, image_folder, resume="", ft_continue=None):
 
 _SIZE_KEYS = ("DATASET_MEGAPIXELS", "CLIP_MEGAPIXELS")
 # the settings a Resume takes from the form as it is now: the Samples tab's, block swap (memory only, the results
-# are the same) and the save schedule (when checkpoints are written); the run trains on as it was
+# are the same), the save schedule (when checkpoints are written) and the learning rate (the run trains on at the
+# new one, logged); the rest trains on as it was
 _RESUME_SAMPLE_KEYS = ("SAMPLE_PROMPT", "SAMPLE_SEED", "SAMPLE_WIDTH", "SAMPLE_HEIGHT", "SAMPLE_STEPS",
                        "SAMPLE_CFG_SCALE", "FAMILY_TURBO_STRENGTH", "SAMPLE_CHECKPOINT",   # + previews on the checkpoint
                        "FAMILY_PREVIEW_LOOK",                                              # + the SFT look tick
                        "SAMPLE_EVERY_N_EPOCHS", "SAMPLE_LATER", "SAMPLE_UNTIL_EPOCH", "SAMPLE_EVERY_AFTER",
-                       "BLOCKS_SWAP", "SAVE_EVERY_N_EPOCHS", "SAVE_LATER", "SAVE_UNTIL_EPOCH", "SAVE_EVERY_AFTER")
+                       "BLOCKS_SWAP", "SAVE_EVERY_N_EPOCHS", "SAVE_LATER", "SAVE_UNTIL_EPOCH", "SAVE_EVERY_AFTER",
+                       "LEARNING_RATE", "ADAPTIVE_LR_MIN", "ADAPTIVE_LR_MAX")
 
 
 # a prompt slider's live prompts: the request the web UI writes, and what the trainer took (fizgig.families.train's
@@ -1459,6 +1461,8 @@ def pod_storage():
     except OSError:
         return ["Storage: unavailable", False]
     free, total = u.free / 1024 ** 3, u.total / 1024 ** 3
+    if on_vast() and not on_runpod():  # Vast's container disk: kept through a stop, gone when the instance is destroyed
+        return [f"Storage: {free:.0f} GB free of {total:.0f} GB on /workspace", free < 40]
     if total > 10000:                # a network volume shows the host's whole pool, not its quota
         return ["Storage: /workspace is a network volume. Its size is set in RunPod and isn't visible from in "
                 "here - check usage in the RunPod dashboard.", False]
@@ -1599,7 +1603,7 @@ def _stop():
 UPLOAD_EXTS = (MEDIA - {".gif", ".webm"}) | {".txt", ".caption", ".json", ".zip"}
 UPLOAD_DEFAULT = os.path.join(BASE_DIR, "training_data")     # when Preferences has no input folder set
 UPLOAD_FILES = os.path.join(BASE_DIR, "uploads")              # single files: a context LoRA, a test photo
-UPLOAD_FILE_EXTS = (UPLOAD_EXTS - {".zip"}) | {".safetensors"}
+UPLOAD_FILE_EXTS = (UPLOAD_EXTS - {".zip"}) | {".safetensors", ".onnx"}      # .onnx: a YOLO face model (Image Prep)
 
 
 def uploads_root() -> str:
@@ -1915,7 +1919,8 @@ def about_info() -> dict:
             v = rel[0] if rel[1] == git("rev-parse", "HEAD") else f"{rel[0]} + later changes ({v})"
     rocm = os.environ.get("FIZGIG_GPU_BACKEND", "").lower() == "rocm"
     if on_pod():
-        how = "On RunPod, Fizgig updates itself every time you restart the pod - just stop and start it to get the latest."
+        how = ("Fizgig updates itself every time this rented GPU starts again - stop and start the pod (RunPod) or "
+               "restart the instance (Vast.ai) to get the latest.")
     elif os.name == "nt":
         how = f"To update: close Fizgig and run {'update_fizgig_rocm.bat' if rocm else 'update_fizgig.bat'}."
     else:
@@ -2049,7 +2054,7 @@ def _upload_target(folder, name, single):
     ext = os.path.splitext(name)[1].lower()
     if single:
         if ext not in UPLOAD_FILE_EXTS:
-            raise ValueError(f"{name}: not a LoRA (.safetensors), picture, clip or song.")
+            raise ValueError(f"{name}: not a LoRA (.safetensors), face model (.onnx), picture, clip or song.")
         dest = UPLOAD_FILES
     else:
         folder = _upload_name(folder, "Folder name")
@@ -2447,9 +2452,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _cookie(self, remember=False):
         """The login cookie: for 30 days on this device with Keep me logged in, else until the browser closes.
-        Secure through a pod's HTTPS proxy."""
+        Secure through a RunPod pod's HTTPS proxy (a Vast.ai instance's ports are plain http: a Secure cookie would
+        never be kept there)."""
         return ("Set-Cookie", f"fizgig_session={self._session()}; Path=/; HttpOnly; SameSite=Strict"
-                              + ("; Max-Age=2592000" if remember else "") + ("; Secure" if on_pod() else ""))
+                              + ("; Max-Age=2592000" if remember else "") + ("; Secure" if on_runpod() else ""))
 
     def _logged_in(self):
         if not self.password:
@@ -2535,8 +2541,10 @@ class Handler(BaseHTTPRequestHandler):
                                       "key_saved": bool(str(p.get("runpod_api_key") or "").strip()),
                                       "key_env": bool((os.environ.get("RUNPOD_STOP_API_KEY") or "").strip()),
                                       "pod_id": __import__("fizgig.web.pod_stop", fromlist=["x"]).pod_id(),
-                                      "storage": pod_storage()}
-                              if on_pod() else None,
+                                      "storage": pod_storage(), "provider": "vast" if on_vast() and not on_runpod()
+                                      else "runpod", "https": __import__("fizgig.web.pod_stop",
+                                                                         fromlist=["x"]).tunnels().get("web", "")}
+                              if on_runpod() or on_vast() else None,     # the rented GPU's own card
                               "gpu_env_locked": bool(os.environ.get("CUDA_VISIBLE_DEVICES"))})
         if path == "/api/state":
             st = load_state()
@@ -2727,7 +2735,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/prep/options":            # Image Prep: its choices, and whether face tools are here
             from fizgig.dataset import prep as _prep
             return self.json({"modes": list(_prep.MODES), "megapixels": _prep.MEGAPIXELS,
-                              "faces": _prep.FACE_TARGETS, "face_tools": prep_jobs.faces_available()})
+                              "faces": _prep.FACE_TARGETS, "face_tools": prep_jobs.faces_available(),
+                              "face_settings": prep_jobs.face_settings()})
         if path == "/api/prep/summary":            # the What will happen card
             from fizgig.dataset import prep as _prep
             g = lambda k, d="": (qs.get(k) or [d])[0]
@@ -3044,8 +3053,7 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             cap = os.path.join(folder, stem + ext)
             try:
-                with open(cap, encoding="utf-8") as f:
-                    text = f.read()
+                text = captions.read_text(cap)          # any encoding: one odd file never empties the list (#225)
             except OSError:
                 text = None
             p = os.path.join(folder, n)
@@ -3103,7 +3111,9 @@ class Handler(BaseHTTPRequestHandler):
                 # on a pod everyone arrives through RunPod's proxy (one address), so the visitor is the address the
                 # proxy adds - the LAST in X-Forwarded-For (earlier ones are whatever the visitor sent). Off a pod the
                 # header could be forged outright, so the connection's own address counts.
-                fwd = (self.headers.get("X-Forwarded-For") or "").split(",")[-1].strip() if on_pod() else ""
+                fwd = (self.headers.get("X-Forwarded-For") or "").split(",")[-1].strip() if on_runpod() else ""
+                if on_vast() and self.client_address[0] == "127.0.0.1":   # through the Vast image's https tunnel:
+                    fwd = (self.headers.get("Cf-Connecting-Ip") or "").strip()  # Cloudflare names the visitor
                 ip, now = fwd or self.client_address[0], time.time()
                 with _login_lock:
                     n, until, last = _login_fails.get(ip, (0, 0.0, 0.0))
@@ -3511,9 +3521,13 @@ class Handler(BaseHTTPRequestHandler):
                     return self.json({"error": "Set a password first (Preferences > Web UI)."}, 400)
                 from fizgig.web import pod_stop
                 from fizgig.web.port import lan_ip
-                if on_pod():
+                if on_runpod():
                     pid = pod_stop.pod_id()
                     base = f"https://{pid}-8081.proxy.runpod.net/" if pid else ""
+                elif on_pod():                      # a Vast.ai instance: its https tunnel, else its public address
+                    ip, vp = os.environ.get("PUBLIC_IPADDR"), os.environ.get("VAST_TCP_PORT_8081")
+                    web = pod_stop.tunnels().get("web", "")
+                    base = web.rstrip("/") + "/" if web else f"http://{ip}:{vp}/" if ip and vp else ""
                 else:
                     ip = lan_ip()
                     base = f"http://{ip}:{self.server.server_address[1]}/" if ip else ""
@@ -3599,6 +3613,12 @@ class Handler(BaseHTTPRequestHandler):
                         return self.json(prep_jobs.look_scan(folder, b.get("baselines") or []))
                     return self.json(prep_jobs.look_move(folder, b.get("paths") or [],
                                                          captions.caption_ext(b.get("ext"))))
+                except ValueError as e:
+                    return self.json({"error": str(e)}, 400)
+            if path == "/api/prep/face_settings":     # the face finder / YOLO model / look match (prefs.json face_*)
+                try:
+                    update_prefs(prep_jobs.save_face_settings(b))
+                    return self.json(prep_jobs.face_settings())
                 except ValueError as e:
                     return self.json({"error": str(e)}, 400)
             if path == "/api/prep/test":              # Test face detection on one photo (writes nothing)
@@ -4109,9 +4129,11 @@ def main(argv=None):
     saved = str(load_prefs().get("web_password") or "").strip()
     pwd = (a.password or os.environ.get("FIZGIG_PASSWORD")
            or ((os.environ.get("VNC_PASSWORD") or saved) if on_pod() else saved))
-    pod_pwd = on_pod() and not a.password and not os.environ.get("FIZGIG_PASSWORD") and pwd == os.environ.get(
+    # a RunPod pod's own VNC password is taken at any length (it opens its remote desktop too); anywhere else the
+    # image runs (Vast.ai: plain http on a public address) a password is 8 characters or more, as at home
+    pod_pwd = on_runpod() and not a.password and not os.environ.get("FIZGIG_PASSWORD") and pwd == os.environ.get(
         "VNC_PASSWORD")
-    if pwd and len(pwd) < 8 and not pod_pwd:          # a pod's own VNC password is taken at any length
+    if pwd and len(pwd) < 8 and not pod_pwd:
         sys.exit("The web UI password needs at least 8 characters (Preferences > Web UI, web_password in "
                  "prefs.json, FIZGIG_PASSWORD or --password).")
     host = a.host or ("0.0.0.0" if pwd else "127.0.0.1")

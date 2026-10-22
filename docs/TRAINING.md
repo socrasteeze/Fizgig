@@ -6,18 +6,18 @@ Everything on this page works on every model unless it says otherwise: [Klein 9B
 
 ## The sample gallery is an instrument
 
-- **Live likeness scoring** — pick 3 dataset photos and every sample gets a colour-coded likeness badge (ArcFace, CPU — zero training-speed cost), with a per-epoch trend chart and best-epoch highlight, live while the run goes.
+- **Live likeness scoring** — pick 3 dataset photos and every sample gets a colour-coded likeness badge (ArcFace for people, DINOv2 for furry / anime: [face backends](FACE_BACKENDS.md); CPU — zero training-speed cost), with a per-epoch trend chart and best-epoch highlight, live while the run goes.
 - **Training Run Visualiser** — scrub the run epoch by epoch in the browser, Royale-style, with share-ready WebM/PNG export.
 - **Every epoch checkpoint carries its own preview as the thumbnail**, so file browsers and LoRA managers show what each epoch looks like.
 - **How often to preview** (Samples tab): **Every** N epochs, and, switched on, **then from epoch** Y, **every** Z epochs (whole multiples). Switching it on fills in every 5, then from epoch 10 every 1: few previews early, every epoch once the run gets close. Off, previews run every N epochs throughout.
 - **How often to save** (Training tab) works the same way for checkpoints: **Every** N epochs, and, switched on, **then from epoch** Y, **every** Z epochs. The last epoch is always saved. A fine-tune saves at whole rotations, so it doesn't use it.
-- **Change the previews of the run going now** (a tick on the Samples tab) changes the preview prompts, seed, size, steps, CFG, Turbo LoRA strength and how often they run mid-run from the next preview, no restart (a Turbo strength works on a run started at 0 too, as long as the Turbo LoRA file is set in Preferences); **Resume** also takes the Samples tab's preview settings as they are now, the preview-checkpoint tick (SFT, Distilled) included, and block swap; **Sample now** and **Save now** on the run card render or save at the next step. The top bar carries VRAM/RAM gauges.
+- **Change the previews of the run going now** (a tick on the Samples tab) changes the preview prompts, seed, size, steps, CFG, Turbo LoRA strength and how often they run mid-run from the next preview, no restart (a Turbo strength works on a run started at 0 too, as long as the Turbo LoRA file is set in Preferences); **Resume** also takes the Samples tab's preview settings as they are now, the preview-checkpoint tick (SFT, Distilled) included, block swap and the learning rate (a new Learning Rate, or adaptive LR Min / Max, is used from there on and the console says so); **Sample now** and **Save now** on the run card render or save at the next step. The top bar carries VRAM/RAM gauges.
 
 ## Dataset prep
 
 - **AI captioning with Krea 2's Qwen3-VL-4B** — every model's captions, on the Captions tab and in auto-recaption, come from it. It writes viewpoint-aware training captions in five editable preset styles (including **Style**, which describes everything *except* the look so your trigger word binds to it). Every preset's instruction is editable in plain English and persists. Florence-2 is the zero-setup option. **Bilingual captions** (English + Chinese via Helsinki-NLP) act as text-level augmentation — measurably better skin detail on Klein at identical loss.
-- **Image Prep** — batch resize, PNG conversion, InsightFace face-crops with gender targeting. Pairing a tight crop with a full shot adds a lot to a character dataset.
-- **Look Consistency Filter** — pick the 3 images that best nail the look and every image is scored against them (ArcFace). Worst matches surface first; mark drifters or let Auto-Suggest flag the outliers, then move them out in one click — nothing is deleted, and the scores feed the trainer's [look-outlier warm-up](KREA2.md#the-trainer-curates-your-dataset-while-it-trains-experimental).
+- **Image Prep** — batch resize, PNG conversion, face crops (InsightFace with gender targeting for people, or a YOLO face model such as Fdetailer for furry / anime characters: [face backends](FACE_BACKENDS.md)). Pairing a tight crop with a full shot adds a lot to a character dataset.
+- **Look Consistency Filter** — pick the 3 images that best nail the look and every image is scored against them (ArcFace, or DINOv2 for furry / anime faces). Worst matches surface first; mark drifters or let Auto-Suggest flag the outliers, then move them out in one click — nothing is deleted, and the scores feed the trainer's [look-outlier warm-up](KREA2.md#the-trainer-curates-your-dataset-while-it-trains-experimental).
 
 ## Subjects: more than one person, and keeping them to their trigger
 
@@ -56,7 +56,7 @@ Repair Studio's **🎲 I'm feeling lucky** rolls a new strength for each of the 
 
 ### LoRA Royale
 
-Point it at a training run and it renders **every epoch on one fixed seed**, with a crossfade slider — drag until it looks best and stop. An optional **likeness score** (ArcFace, CPU) rates each epoch against a training photo and jumps you to the best. Then make it shareable: epoch-morph clips, seed / prompt / strength **travels**, a **comparison sheet** (with/without-LoRA grid, same seed per row), all exportable as looping MP4/GIF with an optional deflicker pass. Works on any folder of LoRAs, or a single file.
+Point it at a training run and it renders **every epoch on one fixed seed**, with a crossfade slider — drag until it looks best and stop. An optional **likeness score** (the Image Prep tab's look match, CPU) rates each epoch against a training photo and jumps you to the best. Then make it shareable: epoch-morph clips, seed / prompt / strength **travels**, a **comparison sheet** (with/without-LoRA grid, same seed per row), all exportable as looping MP4/GIF with an optional deflicker pass. Works on any folder of LoRAs, or a single file.
 
 ### Profiler
 

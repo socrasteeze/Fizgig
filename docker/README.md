@@ -6,6 +6,8 @@ Fizgig in your browser: the pod runs the app and you open it as a web page, from
 
 *That link is a referral one — it supports Fizgig's development at no extra cost to you.*
 
+Prefer Vast.ai? The same image runs there too: [Fizgig on Vast.ai](https://cloud.vast.ai/?ref_id=757773&creator_id=757773&name=Fizgig%20LoRa%20Training%20and%20Fine-tuning) (also a referral link) · [the Vast.ai guide](../docs/VAST.md).
+
 ## Quick start: nothing installed on your computer
 
 You don't need Fizgig on your own computer for this. You need a RunPod account and a web browser.
@@ -148,6 +150,10 @@ It needs an API key, pasted into that same panel. Make one at **RunPod → Setti
 key RunPod gives a pod automatically is pod-scoped and cannot stop pods, which is a RunPod
 limitation rather than a Fizgig one. It's stored on your volume, not in any template.
 
+**Stopping a pod yourself mid-run** loses what the run trained since its last save: the pod gets a few seconds'
+notice, not the minutes an epoch can take. Press **Pause** first (it saves and stops at the end of the epoch), then
+stop the pod.
+
 ## Settings
 
 Environment variables, set on the deploy screen under **Edit Template**:
@@ -163,6 +169,10 @@ Nothing is compulsory — the defaults are the intended setup, and everything he
 inside the app instead.
 
 Two more exist for unusual cases: `FETCH_MODELS_EXTRA` passes extra flags to the downloader, and `FIZGIG_REPO` points the pod at a fork.
+
+## On Vast.ai
+
+The same image runs on Vast.ai, with its own template: see [Fizgig on Vast.ai](../docs/VAST.md).
 
 ## The classic template (remote desktop)
 

@@ -297,9 +297,11 @@ def form(desc):
                         "stronger, a bigger file, and ~5 GB more VRAM with adamw (use adamw8bit) · above 8: just use LoRA")]
     if desc.loss_watch:
         params += [
-            _row("KREA2_LOSS_WATCH", "Detect problem images (per-image loss tracking)", "check",
-                 "Each image's verdict, with its thumbnail and its caption to fix, is under the run's Per-image "
-                 "loss in Runs & outputs."),
+            _row("KREA2_LOSS_WATCH", "Track how each image trains (per-image loss)", "check",
+                 "Follows every image's loss through the run. Most images do their work early and are simply learned "
+                 "by the end, which is what you want; a few stay hard, often because the caption doesn't match the "
+                 "picture. Each image's progress, with its thumbnail and its caption to edit, is under Per-image loss "
+                 "on the run card while it trains, and in Runs & outputs."),
             _row("KREA2_PER_IMAGE_LR", "Per-image adaptive LR (throttle stuck images, boost healthy learned ones)",
                  "check", "Images that stay hard without improving train more gently (x0.7, then x0.5 down to x0.1); "
                  "mined-out ones ease off (x0.6) and healthy learned ones get a gentle boost (x1.1). Batch size 1."),
@@ -659,6 +661,9 @@ LEGACY_AREAS = {"All Layers": "Full Model", "Identity Blocks": "Identity",
                 "Style+Composition Blocks": "Style+Composition", "Details Blocks": "Details"}
 
 
+SLIDER_PREVIEW_EVERY = "5"           # a Slider preset's preview cadence (apply_preset)
+
+
 def _not_in_preset(k):
     return k.startswith("SAMPLE_") or k in NOT_IN_PRESETS
 
@@ -682,6 +687,10 @@ def apply_preset(desc, values, preset, whole=False):
         p.setdefault("FAMILY_CONCEPT_COUNT", CONCEPT_COUNTS[min(max(len(dirs), 1), len(CONCEPT_COUNTS)) - 1])
     if not whole:
         p = {k: v for k, v in p.items() if not _not_in_preset(k)}
+        # the one Samples box a preset sets: a Slider preset previews its dial every 5 epochs, whatever the model's
+        # own preview default (every epoch is too often for a slider, ACE-Step's 40 too rare)
+        if str(p.get("FAMILY_SLIDER")).lower() in ("true", "1"):
+            p["SAMPLE_EVERY_N_EPOCHS"] = SLIDER_PREVIEW_EVERY
     rows = {r["key"]: r for sec in form(desc)["sections"] for r in sec["rows"] if r}
     for k in STRICT_CHOICES:
         if k in p and k in rows and rows[k].get("choices"):

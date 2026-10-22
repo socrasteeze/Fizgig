@@ -306,7 +306,7 @@ function renderRow(r) {
       for (const c of opts) input.append(el("option", {value: c, text: c}));
       input.value = String(val ?? "");
     } else if (r.kind === "text") {
-      input = el("textarea", {id: "f_" + r.key, rows: 4, oninput: (e) => set(e.target.value)});
+      input = el("textarea", {id: "f_" + r.key, rows: 4, spellcheck: "false", oninput: (e) => set(e.target.value)});
       input.value = v ?? "";
     } else if (r.kind === "combo") {
       // a dropdown of the usual values, as the desktop's, with Other… for a value of your own (a browser's
@@ -1051,6 +1051,29 @@ function podCard() {
   const saveKey = async (v) => { await api("/api/prefs", {changes: {runpod_api_key: v}}); P.key_saved = !!v; key.value = ""; sayKey(); };
   key.addEventListener("change", () => key.value.trim() && saveKey(key.value.trim()));
   sayKey();
+  const vast = P.provider === "vast";
+  const midRun = el("div", {class: "field-hint warn", text: "Stopping the " + (vast ? "instance" : "pod") +
+    " yourself while a run trains loses what it trained since its last save: press Pause first (it saves and stops " +
+    "at the end of the epoch), then stop it."});
+  if (vast) return el("div", {class: "section-card"},
+    el("div", {class: "card-title"}, el("span", {text: "Vast.ai"})),
+    el("div", {class: "card-desc", text: "Fizgig is running on a rented GPU (a Vast.ai instance). These settings only appear here."}),
+    el("div", {class: "card-content"},
+      P.https ? el("div", {class: "field-hint"}, "Its https address (new each time the instance starts): ",
+        el("a", {href: P.https, target: "_blank", rel: "noopener", text: P.https}),
+        location.protocol === "http:" ? " - use it rather than this plain http one: your password and login travel " +
+        "encrypted there." : "") : null,
+      el("label", {class: "checkbox-label"}, on, " Stop this instance when a training run finishes"),
+      el("div", {class: "field-hint", text: "Only after a run completes on its own - never after a pause, a stop or a " +
+        "failure, and with a queue only after its last run. A two-minute countdown you can cancel comes first, on any " +
+        "page. It stops the GPU billing; the instance's disk still bills until you destroy it on Vast's site, so bring " +
+        "your LoRAs home and destroy it when you're done. No key needed: the instance stops itself."}),
+      midRun,
+      P.storage ? el("div", {class: "field-hint" + (P.storage[1] ? " warn" : ""), text: P.storage[0]}) : null,
+      el("div", {class: "field-hint prefs-note", text: "Your files: datasets in /workspace/datasets, models in " +
+        "/workspace/models, finished LoRAs in /workspace/output_loras. They survive stopping and starting the " +
+        "instance, and go when you destroy it. A stopped instance may not start again while someone else rents its GPU."}),
+      el("div", {class: "field-hint", text: "Closing this browser tab doesn't stop training: Fizgig runs on the instance, not in your browser."})));
   return el("div", {class: "section-card"},
     el("div", {class: "card-title"}, el("span", {text: "RunPod"})),
     el("div", {class: "card-desc", text: "Fizgig is running on a rented GPU" + (P.pod_id ? ` (pod ${P.pod_id})` : "") + ". These settings only appear here."}),
@@ -1059,6 +1082,7 @@ function podCard() {
       el("div", {class: "field-hint", text: "Only after a run completes on its own - never after a pause, a stop or a failure, " +
         "and with a queue only after its last run. A two-minute countdown you can cancel comes first, on any page. It stops " +
         "the pod, never terminates it, so your files are still here when you start it again."}),
+      midRun,
       el("div", {class: "field-row"}, el("span", {class: "field-label", text: "RunPod API key:"}), key,
         el("button", {class: "btn btn-sm", text: "Clear", onclick: () => saveKey("")}), keySay),
       el("div", {class: "field-hint", text: "Make one at RunPod > Settings > API Keys. The key RunPod gives a pod by itself " +
@@ -1287,12 +1311,13 @@ const SIZE_KEYS = {DATASET_MEGAPIXELS: "Target Megapixels", CLIP_MEGAPIXELS: "Cl
 async function resumeClick() {
   const r = S.run || {}, was = r.values || {}, box = $("resumeChoice");
   // the previews as the Samples tab has them now (prompts, seed, size, steps, CFG, Turbo strength, the preview
-  // checkpoint tick) and block swap go with the resume
+  // checkpoint tick), block swap, the save schedule and the learning rate go with the resume
   const samples = r.family === S.family ? Object.fromEntries(["SAMPLE_PROMPT", "SAMPLE_SEED", "SAMPLE_WIDTH",
     "SAMPLE_HEIGHT", "SAMPLE_STEPS", "SAMPLE_CFG_SCALE", "FAMILY_TURBO_STRENGTH", "SAMPLE_CHECKPOINT", "BLOCKS_SWAP",
     "FAMILY_PREVIEW_LOOK",
     "SAMPLE_EVERY_N_EPOCHS", "SAMPLE_LATER", "SAMPLE_UNTIL_EPOCH", "SAMPLE_EVERY_AFTER",
-    "SAVE_EVERY_N_EPOCHS", "SAVE_LATER", "SAVE_UNTIL_EPOCH", "SAVE_EVERY_AFTER"]
+    "SAVE_EVERY_N_EPOCHS", "SAVE_LATER", "SAVE_UNTIL_EPOCH", "SAVE_EVERY_AFTER",
+    "LEARNING_RATE", "ADAPTIVE_LR_MIN", "ADAPTIVE_LR_MAX"]
     .filter((k) => k in S.values).map((k) => [k, S.values[k]])) : {};
   const diff = r.family === S.family ? Object.keys(SIZE_KEYS).filter((k) => S.values[k] !== undefined &&
     String(S.values[k]).trim() !== "" && Number(S.values[k]) !== Number(was[k])) : [];
@@ -1361,6 +1386,10 @@ async function pollRun() {
   renderWebQueue(r.web_queue || {items: []});
   queueSummary(r.web_queue || {items: []}, r);
   runLossTick(live);
+  // Per-image loss on the run card while a run with the per-image loss tick trains (Runs & outputs has it after)
+  const ilOn = live && r.history_id && (r.values || {}).KREA2_LOSS_WATCH;
+  $("btnImageLoss").style.display = ilOn ? "" : "none";
+  if (!ilOn) $("runImageLoss").style.display = "none";
   // Sample now / Save now: while a LoRA trains (a fine-tune saves and previews at whole rotations)
   const runDesc = S.schema.families.find((f) => f.key === r.family);
   const ftRun = r.values && r.values.FAMILY_KIND && /fine-tune/i.test(String(r.values.FAMILY_KIND));
@@ -1671,7 +1700,8 @@ async function likenessShow(dir, items, run, view) {
     const it = pics.find((p) => p.name === fig.title);
     if (!on || !it) continue;
     const s = d.scores[it.name];
-    const cls = s === undefined || s === null ? "na" : s >= 0.45 ? "good" : s >= 0.30 ? "mid" : "bad";
+    const t = d.thresholds || {match: 0.45, borderline: 0.30};     // the embedder's own bands (ArcFace / DINOv2 / CLIP)
+    const cls = s === undefined || s === null ? "na" : s >= t.match ? "good" : s >= t.borderline ? "mid" : "bad";
     fig.append(el("span", {class: `lik-badge ${cls}${it.epoch === bestEpoch && bestEpoch != null ? " best" : ""}`,
       text: s === undefined ? "…" : s === null ? "no face" : `${Math.round(s * 100)}%`}));
   }
@@ -1683,11 +1713,12 @@ async function likenessShow(dir, items, run, view) {
   if (cv.width !== w) cv.width = w;
   const g = cv.getContext("2d"), W = cv.width, H = cv.height, L = 42, R = 12, T = 12, B = 22;
   g.clearRect(0, 0, W, H);
-  const ymax = Math.max(0.7, Math.max(...avgs) + 0.05);
+  const ymax = Math.min(1, Math.max(0.7, (d.thresholds || {}).match + 0.15 || 0, Math.max(...avgs) + 0.05));
   const x = (i) => epochs.length === 1 ? L + (W - L - R) / 2 : L + (W - L - R) * i / (epochs.length - 1);
   const y = (v) => T + (H - T - B) * (1 - v / ymax);
   g.font = "11px sans-serif"; g.lineWidth = 1;
-  for (const band of [0.30, 0.45]) {         // the badge colour bands, for orientation
+  const bands = d.thresholds || {match: 0.45, borderline: 0.30};
+  for (const band of [bands.borderline, bands.match]) {         // the badge colour bands, for orientation
     g.strokeStyle = "#34495E"; g.fillStyle = "#7F8C8D";
     g.beginPath(); g.moveTo(L, y(band)); g.lineTo(W - R, y(band)); g.stroke();
     g.fillText(Math.round(band * 100) + "%", 8, y(band) + 4);
@@ -1922,8 +1953,9 @@ function newsCard() {
 // ---- Start tab: your training data (the folders in the training data folder) ---------------------------------
 async function loadDatasets() {
   try { S.datasets = await api("/api/datasets"); } catch (e) { return; }
-  $("datasetsDesc").textContent = `The folders in ${S.datasets.root}, and the ones you've picked from anywhere ` +
-    "else (outlined). Click one to train on it; upload a new one below, or pick any folder with Choose… above.";
+  $("datasetsDesc").textContent = `A shortcut: the folders in ${S.datasets.root}, and the ones you've picked from ` +
+    "anywhere else (outlined). Click one to make it the training folder above. For a folder that isn't listed " +
+    "(another drive, or a subfolder), press Choose… above; to add a new one, upload it below.";
   $("datasetsSearchRow").style.display = S.datasets.total > 8 ? "" : "none";
   renderDatasets();
 }
@@ -2143,7 +2175,7 @@ function imageLossPanel(box, d, run) {
   const sort = el("select", {class: "w-combo"}, ...[["hard", "Hardest now first"], ["easy", "Easiest now first"],
     ["verdict", "By verdict"], ["name", "By name"]].map(([v, t]) => el("option", {value: v, text: t})));
   const show = el("select", {class: "w-combo"}, el("option", {value: "all", text: "All images"}),
-    el("option", {value: "problems", text: "Problems only (excluded, stuck, suspect, watch)"}));
+    el("option", {value: "problems", text: "Worth a look (excluded, stuck, suspect, watching)"}));
   const grid = el("div", {class: "il-grid"}), pager = el("div", {class: "field-row"});
   let page = 0;
   const draw = () => {
@@ -2155,7 +2187,7 @@ function imageLossPanel(box, d, run) {
     const pages = Math.max(1, Math.ceil(list.length / IL_PAGE));
     page = Math.min(page, pages - 1);
     grid.replaceChildren(...list.slice(page * IL_PAGE, (page + 1) * IL_PAGE).map((im) => imageLossTile(im, ymax, run, d.live)));
-    if (!list.length) grid.append(el("div", {class: "field-hint", text: "No image has a problem verdict."}));
+    if (!list.length) grid.append(el("div", {class: "field-hint", text: "No image needs a look right now."}));
     pager.replaceChildren(...(pages > 1 ? [
       el("button", {class: "btn btn-sm", text: "‹ Prev", disabled: page === 0, onclick: () => { page--; draw(); }}),
       el("span", {class: "field-hint", text: `page ${page + 1} of ${pages}`}),
@@ -2587,7 +2619,8 @@ async function royaleScore() {
     if (r.best == null) { $("ryLikeStatus").textContent = "No faces detected in the renders or subject image."; $("ryBest").disabled = true; return; }
     $("ryBest").disabled = false;
     $("ryLikeStatus").textContent = `Best: ${ryLabel(r.best).toLowerCase()} (${r.scores[r.best].toFixed(3)})` +
-      (r.no_face ? `  (${r.no_face} no-face)` : "");
+      (r.no_face ? `  (${r.no_face} no-face)` : "") +
+      (r.embedder && !r.embedder.startsWith("ArcFace") ? `  · ${r.embedder}` : "");     // named when it isn't the usual one
     royaleBest();
   } catch (e) { $("ryLikeStatus").textContent = e.message; }
 }
@@ -3228,7 +3261,11 @@ async function loadIntoForm(s) {
   // a run recorded before it had a Turbo value: its steps and CFG follow the Turbo on now (refreshState)
   if (!("FAMILY_TURBO_STRENGTH" in kept)) delete S.values.__turbo_live;
   S.all[S.family] = S.values;
-  if (s.image_folder) { $("imageFolder").value = s.image_folder; S.imageFolder = s.image_folder; await loadTrigger(); }
+  if (s.image_folder) {
+    const was = S.imageFolder;
+    $("imageFolder").value = s.image_folder; S.imageFolder = s.image_folder; await loadTrigger();
+    if (S.imageFolder !== was) lookForget();
+  }
   renderSections("samples", $("samplesForm"));
   renderSections("training", $("trainingForm"));
   await refreshState();
@@ -3378,6 +3415,7 @@ async function loadPrep() {
     document.querySelectorAll('input[name="prepMode"]').forEach((r) => { r.checked = r.value === mode; });
     document.querySelectorAll('input[name="prepReplace"]').forEach((r) => { r.checked = r.value === (saved.replace ? "1" : "0"); });
     $("prepNoFaces").style.display = o.face_tools ? "none" : "";
+    faceSettingsShow(o.face_settings);
   }
   $("prepFolder").textContent = S.imageFolder ? `Folder: ${S.imageFolder}  (set on the Start tab)` :
     "Choose the training folder on the Start tab first.";
@@ -3430,6 +3468,68 @@ async function prepRun() {
   } catch (e) { $("prepState").textContent = e.message; }
 }
 
+// Image Prep's "Anime/furry/drawn characters" (fizgig/face_utils.py, prefs.json face_*): saved as soon as they
+// change. InsightFace + ArcFace are the defaults; the section opens by itself when something else is chosen.
+const FACE_HINTS = {
+  insightface: "For people. It can tell men from women, for Largest Male / Female Face. It doesn't see anime, furry " +
+    "or drawn faces.",
+  yolo: "For anime, furry or drawn characters, and fursuits, pick this. It can't tell men from women, so Largest " +
+    "Male / Female Face use the largest face.",
+  auto: "For a set with both people and characters in it. Both finders look at every picture, so it's a little slower."};
+const LOOK_HINTS = {
+  arcface: "For people's faces. For anime, furry or drawn characters, pick Anime/furry/drawn.",
+  dinov2: "For anime, furry or drawn characters, and fursuits; it works on people too. Its scores run higher than the people setting's, and " +
+    "the colours follow.",
+  auto: "Fizgig looks at some of the pictures each time it scores: People (the default) for a set of people, " +
+    "Anime/furry/drawn for anything else."};
+function faceSettingsShow(f, msg) {
+  if (!f) return;
+  S.prep.face = f;
+  for (const [id, list, v] of [["prepDetector", f.detectors, f.detector], ["prepIdentity", f.identities, f.identity]]) {
+    $(id).innerHTML = "";
+    for (const [k, label] of list) $(id).append(el("option", {value: k, text: label}));
+    $(id).value = v;
+  }
+  if (document.activeElement !== $("prepYolo")) $("prepYolo").value = f.yolo_model;
+  $("prepYoloRow").style.display = f.detector === "insightface" ? "none" : "";
+  $("prepDetectorHint").textContent = FACE_HINTS[f.detector] || "";
+  $("prepIdentityHint").textContent = f.identity === "auto" && f.detector !== "auto" ?
+    `With this face finder that means ${f.detector === "yolo" ? "Anime/furry/drawn" : "People (the default)"}.` :
+    LOOK_HINTS[f.identity] || "";
+  $("prepYoloHint").textContent = `Blank: Fdetailer if it's saved as ${f.local_model}, otherwise a free anime head ` +
+    "finder that downloads the first time it's used. docs/FACE_BACKENDS.md explains how to get Fdetailer.";
+  $("prepFaceMsg").textContent = msg || "";
+  const custom = f.defaults && (f.detector !== f.defaults.detector || f.identity !== f.defaults.identity);
+  if (custom) $("prepChars").open = true;              // never hide a choice that is changing what you get
+}
+async function faceSettingsSave(changes, msg) {
+  try { faceSettingsShow(await api("/api/prep/face_settings", changes), msg); }
+  catch (e) { $("prepFaceMsg").textContent = e.message; }
+}
+function faceSettingsWire() {
+  $("prepDetector").addEventListener("change", () => {
+    const det = $("prepDetector").value, f = S.prep.face || {};
+    // a YOLO face finder with the people-only look match would score nothing: the look match follows, said aloud
+    if (det !== "insightface" && f.identity === "arcface") {
+      const ident = det === "yolo" ? "dinov2" : "auto";
+      return faceSettingsSave({detector: det, identity: ident}, `Look match changed to ${ident === "dinov2" ?
+        "Anime/furry/drawn" : "Auto (Decide for each set)"}, so characters' faces get scored too.`);
+    }
+    faceSettingsSave({detector: det});
+  });
+  $("prepIdentity").addEventListener("change", () => faceSettingsSave({identity: $("prepIdentity").value}));
+  // the YOLO face model: the standard path row (type, Choose… on the Fizgig machine, or Upload… from this device)
+  const input = $("prepYolo"), set = (p) => faceSettingsSave({yolo_model: p});
+  input.addEventListener("change", () => set(input.value.trim()));
+  const row = $("prepYoloPick");
+  row.append(el("button", {class: "btn", text: "Choose…", title: "Pick from what is on the machine running Fizgig",
+    onclick: () => pick(input.value || ((S.prep.face || {}).local_model || "").replace(/[\\/][^\\/]*$/, ""), false,
+      (p) => { input.value = p; set(p); })}));
+  const up = uploadButton({kind: "path", key: "FACE_YOLO_MODEL", accept: ".onnx"}, input, set);
+  row.append(up.btn);
+  $("prepYoloRow").append(up.status);
+}
+
 function prepTest() {
   pick(S.imageFolder, false, async (path) => {
     const host = $("prepTestResult");
@@ -3438,7 +3538,7 @@ function prepTest() {
       const r = await api("/api/prep/test", {path, face: $("prepFace").value});
       if (!r.faces.length) { host.replaceChildren(el("div", {class: "field-hint", text: "No faces found in that photo."})); return; }
       host.replaceChildren(
-        el("div", {class: "field-hint", text: `${r.faces.length} face${r.faces.length === 1 ? "" : "s"} found: ` +
+        el("div", {class: "field-hint", text: `${r.faces.length} face${r.faces.length === 1 ? "" : "s"} found (${r.finder}): ` +
           r.faces.map((f, i) => `face ${i + 1}, ${f.gender === "unknown" ? "?" : f.gender}, ${f.area.toLocaleString()} px` +
             (f.selected ? " (chosen for the crop)" : "")).join("; ") + ". Green = chosen, yellow = the others."}),
         el("img", {class: "prep-test-img", src: r.image, alt: "faces found"}));
@@ -3447,6 +3547,14 @@ function prepTest() {
 }
 
 // ---- the Look Filter ----
+function lookForget() {
+  // a new training folder starts with no baselines or marks (#218); its own last scan, if any, comes back with the poll
+  Object.assign(S.prep, {bases: [], marked: new Set(), page: 0, picking: false});
+  $("lookPicker").style.display = "none";
+  lookBasesShow();
+  lookPoll();
+}
+
 async function lookPickOpen() {
   const host = $("lookPicker");
   if (S.prep.picking) { S.prep.picking = false; host.style.display = "none"; return; }
@@ -3485,14 +3593,18 @@ async function lookScan() {
 
 async function lookPoll() {
   clearTimeout(S.prep.lookTimer);
+  if (S.prep.intro == null) S.prep.intro = $("lookStatus").textContent;    // the card's own words, for a new folder
   const r = await api("/api/look/status").catch(() => null);
   if (!r) return;
   S.prep.look = r;
+  $("lookDecision").textContent = r.decision ? r.decision.replace("[faces] ", "") : "";
+  const mine = r.folder === S.imageFolder;        // the last scan may be of another folder
   if (r.state === "running") {
     $("lookStatus").textContent = r.progress[0] ? `Scoring faces… ${r.progress[0]}/${r.progress[1]}` :
-      "Loading the face model (the first time downloads about 300 MB)…";
+      "Loading the face model and choosing the look match (the first time downloads about 300 MB)…";
     S.prep.lookTimer = setTimeout(lookPoll, 1000);
   } else if (r.state === "failed") $("lookStatus").textContent = r.error;
+  else if (r.state === "done" && r.rows.length && !mine) $("lookStatus").textContent = S.prep.intro;
   else if (r.state === "done" && r.rows.length) {
     if (!S.prep.bases.length) { S.prep.bases = r.baselines; lookBasesShow(); }
     const faces = r.rows.filter((x) => x.score != null).length;
@@ -3596,6 +3708,7 @@ function wirePrep() {
   for (const id of ["prepMp", "prepFace", "prepPadding"]) $(id).addEventListener("change", () => { prepSummary(); savePrepSoon(); });
   $("prepRun").addEventListener("click", prepRun);
   $("prepTest").addEventListener("click", prepTest);
+  faceSettingsWire();
   $("lookPick").addEventListener("click", lookPickOpen);
   $("lookScan").addEventListener("click", lookScan);
   $("lookSuggest").addEventListener("click", lookSuggest);
@@ -4499,6 +4612,7 @@ async function studioMetrics() {
     const lb = m.like_base * 100, lt = m.like_tweak * 100, d = lt - lb;
     put("like", `Likeness ${lb.toFixed(0)}% ${d > 0.5 ? "▲" : d < -0.5 ? "▼" : "→"} ${lt.toFixed(0)}%`, d > 0.5 ? "good" : d < -0.5 ? "bad" : "");
   }
+  $(chips.like).title = m.embedder ? `Look match: ${m.embedder} (scores are on its own scale)` : "";
   put("grid", `Grid ${m.grid_base.toFixed(2)} → ${m.grid_tweak.toFixed(2)}`, m.grid_delta > 0.05 ? "bad" : m.grid_delta < -0.05 ? "good" : "");
   const td = (m.texture_tweak - m.texture_base) / Math.max(m.texture_base, 1e-6);
   put("tex", `Detail ${m.texture_base.toFixed(0)} → ${m.texture_tweak.toFixed(0)}`, Math.abs(td) > 0.10 ? "warm" : "");
@@ -6361,7 +6475,8 @@ function phoneCard() {
 // ---- a pod's file manager (port 8080): the sidebar button, the Start tab's upload card, Runs & outputs ---------
 function fileManagerLinks(fm) {
   const how = !fm ? "" : fm.login === "none" ? "Its login isn't set up: it refuses this pod's password as too common. " +
-    "Give the pod a less common FIZGIG_PASSWORD (Edit pod on RunPod) and restart it" :
+    "Give it a less common FIZGIG_PASSWORD (on RunPod: Edit pod, then restart it; on Vast.ai: rent a new instance " +
+    "with it set)" :
     "Log in as admin with this pod's password" + (fm.login === "padded" ? ", with 0s added to make it 12 characters " +
     "(the file manager refused it as too common): abc123 → abc123000000. The pod's log shows it" : "");
   $("sideFiles").style.display = fm ? "" : "none";
@@ -6377,6 +6492,7 @@ S.pods = {list: [], timer: 0, waitFor: ""};
 const inApp = () => !!window.pywebview;
 const POD_STATE = {ready: ["Ready", "ok"], waiting: ["Starting - a pod can take a few minutes. If it isn't ready after that, check it on RunPod", "warn"],
   stopped: ["Stopped", "muted"], off: ["Not answering", "muted"], starting: ["Starting...", "warn"],
+  gone: ["Deleted on RunPod: it isn't on your account any more. Forget takes it off this list", "muted"],
   away: ["Not on your network now: is it on, awake and running Fizgig?", "muted"],
   blocked: ["Found, but it doesn't let this computer in yet: on it, Preferences > Web UI > Allow on my network", "warn"]};
 
@@ -6889,7 +7005,7 @@ function uploadButton(r, input, set) {
   const status = el("div", {class: "field-hint upload-status"});
   const say = (t, bad) => { status.textContent = t; status.classList.toggle("bad", !!bad); };
   const picker = r.kind === "folder" ? el("input", {type: "file", webkitdirectory: true, hidden: true}) :
-    el("input", {type: "file", hidden: true, accept: ".safetensors,image/*,.mp4,audio/*,.m4a"});
+    el("input", {type: "file", hidden: true, accept: r.accept || ".safetensors,image/*,.mp4,audio/*,.m4a"});
   picker.addEventListener("change", async () => {
     const files = [...picker.files];
     picker.value = "";
@@ -7053,6 +7169,14 @@ function wire() {
   wireStudio();
   wirePrep();
   $("presetSave").addEventListener("click", presetSaveOpen);
+  $("btnImageLoss").addEventListener("click", async () => {      // the same view as Runs & outputs, for the run going now
+    const box = $("runImageLoss"), id = S.run && S.run.history_id;
+    if (!id) return;
+    if (box.style.display !== "none") { box.style.display = "none"; return; }
+    box.style.display = ""; box.textContent = "Loading…";
+    try { imageLossPanel(box, await api("/api/runs/image_loss?id=" + encodeURIComponent(id)), {...S.run, id}); }
+    catch (e) { box.replaceChildren(el("div", {class: "problems", text: e.message})); }
+  });
   document.querySelectorAll(".tab-item").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
   document.querySelectorAll("[data-goto]").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.goto)));
   // the sidebar's run opens the run card itself (it sits under the Training form)
@@ -7063,7 +7187,11 @@ function wire() {
   for (const sel of document.querySelectorAll(".family-pick"))
     sel.addEventListener("change", (e) => chooseFamily(e.target.value));
   const folder = $("imageFolder");
-  const setFolder = () => { S.imageFolder = folder.value.trim(); loadTrigger(); refreshStateSoon(); saveStateSoon(); };
+  const setFolder = () => {
+    const was = S.imageFolder;
+    S.imageFolder = folder.value.trim(); loadTrigger(); refreshStateSoon(); saveStateSoon();
+    if (S.imageFolder !== was) lookForget();
+  };
   folder.addEventListener("change", setFolder);
   $("uploadFiles").addEventListener("change", (e) => { uploadFiles([...e.target.files]); e.target.value = ""; });
   $("uploadDir").addEventListener("change", (e) => {
