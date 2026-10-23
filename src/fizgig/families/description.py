@@ -77,6 +77,24 @@ class ModelFile:
 
 
 @dataclass(frozen=True)
+class TextEncoderBuild:
+    """Another build of a family's text encoder (another precision of the same weights, or a variant such as an
+    abliterated fine-tune) that the family's own loader takes, measured against the default file with
+    scripts/check_te_builds.py (docs/drivers/README.md, "Text encoder builds"). A helper uses the index to fetch the
+    exact build a lead's run uses (found by hash) for a training share, and the lightest close build to try prompts
+    on another computer's epochs."""
+    label: str                        # "int8 (convrot)", "Huihui abliterated, fp8"
+    repo: str                         # Hugging Face repo
+    path: str                         # file in the repo
+    size_gb: float
+    sha256: str                       # the file's hash (its LFS etag): a file on disk is this build if it hashes to it
+    cosine: float                     # its conditioning next to the default file's on check_te_builds' prompts
+    variant: bool = False             # different weights (a fine-tune), not just another precision: conditions
+    #                                   differently on purpose, so never picked as a lighter stand-in
+    note: str = ""
+
+
+@dataclass(frozen=True)
 class SamplingSettings:
     """A complete, citable way to sample the family: steps, CFG, sampler, schedule."""
     name: str
@@ -304,6 +322,8 @@ class FamilyDescription:
 
     # model files (Preferences rows, in display order)
     model_files: tuple = ()
+    # other builds of the text encoder the family's loader takes (TextEncoderBuild), measured against the default
+    text_encoder_builds: tuple = ()
     text_encoder_label: str = ""
     vae_label: str = ""
     # the name its workbench files (Repair Studio presets folder, metrics table) were kept under before the family
@@ -452,6 +472,11 @@ class FamilyDescription:
     # LoRA was on). Empty = no line (a family opts in)
     preview_labels: tuple = ()
     preview_look_strength: float = 1.0
+    # the workbench tabs' choice while the Samples tab previews on the training model (its preview-checkpoint tick
+    # off): render on the preview checkpoint (the default: what most people generate with) or follow the Samples tab,
+    # its preview look LoRA included. One choice per family, kept in prefs (workbench_render_<key>). Needs
+    # workbench_follows_samples and workbench_checkpoint_follows_tick
+    workbench_render_choice: bool = False
     preview_checkpoint_tick: str = "Use Distilled model for samples (4-step, matches ComfyUI)"
     preview_checkpoint_on: bool = True
     # (tensor name, sum) that identifies the model's own released Base (families/base_check.py): with any other Base
@@ -534,6 +559,10 @@ class FamilyDescription:
     # Repair Studio's Turbo Preview tick (families/act_cache.py): a slider change replays the unchanged blocks on
     # step 1 - the same picture as a full render
     activation_cache: bool = False
+    # the text cache's padding is dropped before every step (only the tokens its <name>__attention_mask marks are
+    # used, in order), so a training share can send it trimmed to those and pad it back on the helper (Krea 2: 512
+    # tokens kept, ~80 used - 31.5 MB a caption trimmed to ~5 MB)
+    text_cache_trim: bool = False
     workbench_follows_samples: bool = False   # Repair Studio / Royale previews take the Samples tab's steps,
     #                                   CFG, negative prompt and turbo strength (else the family's fixed preview recipe)
     # with workbench_follows_samples: the workbench renders on the preview checkpoint only while the Samples tab's tick
