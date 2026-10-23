@@ -2524,6 +2524,14 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return {}
 
+    def _raw(self):
+        """A helper's piece (web/helpers.py) as bytes, capped as _body() is: a peer sends one 8 MB piece at most."""
+        n = int(self.headers.get("Content-Length") or 0)
+        if not 0 <= n <= 16 << 20:
+            self.close_connection = True        # the unread body is never taken for the next request
+            raise ValueError("That request is too large.")
+        return self.rfile.read(n)
+
     # -- GET
     def _get(self):
         if not self._host_ok():
@@ -3249,9 +3257,8 @@ class Handler(BaseHTTPRequestHandler):
             from fizgig.web import helpers
             qs = parse_qs(urlparse(self.path).query)
             try:
-                n = int(self.headers.get("Content-Length") or 0)
                 return self.json(helpers.deliver((qs.get("round") or [""])[0], (qs.get("name") or [""])[0],
-                                                 self.rfile.read(n)))
+                                                 self._raw()))
             except (ValueError, OSError) as e:
                 return self.json({"error": str(e)}, 400)
         if path == "/api/helpers/share_deliver":      # a piece of a pulling helper's share LoRA for an epoch
@@ -3259,25 +3266,24 @@ class Handler(BaseHTTPRequestHandler):
             qs = parse_qs(urlparse(self.path).query)
             g = lambda k: (qs.get(k) or [""])[0]
             try:
-                n = int(self.headers.get("Content-Length") or 0)
-                return self.json(helpers.share_deliver(g("epoch"), int(g("offset") or 0), self.rfile.read(n),
+                return self.json(helpers.share_deliver(g("epoch"), int(g("offset") or 0), self._raw(),
                                                        done=g("done") == "1", steps=int(g("steps") or 0),
                                                        seconds=float(g("seconds") or 0), name=g("name"),
                                                        launch=g("launch")))
             except (ValueError, OSError) as e:
                 return self.json({"error": str(e)}, 400)
         if path == "/api/helper/speed":               # a link test's upload: read and dropped
-            n = int(self.headers.get("Content-Length") or 0)
-            while n > 0:
-                n -= len(self.rfile.read(min(n, 1 << 20)) or b"x" * n)
+            try:
+                self._raw()
+            except ValueError as e:
+                return self.json({"error": str(e)}, 400)
             return self.json({"ok": True})
         if path == "/api/helper/put":                 # a piece of a file a lead sends this helper (web/helpers.py)
             from fizgig.web import helpers
             qs = parse_qs(urlparse(self.path).query)
             try:
-                n = int(self.headers.get("Content-Length") or 0)
                 return self.json(helpers.put((qs.get("name") or [""])[0], int((qs.get("offset") or ["0"])[0]),
-                                             self.rfile.read(n)))
+                                             self._raw()))
             except (ValueError, OSError) as e:
                 return self.json({"error": str(e)}, 400)
         b = self._body()

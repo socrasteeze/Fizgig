@@ -50,6 +50,36 @@ class BodyCap(unittest.TestCase):
         self.assertEqual(status, 200)
 
 
+class RawCap(unittest.TestCase):
+    """A helper's raw-body routes (web/helpers.py pieces) are capped as JSON bodies are."""
+    @classmethod
+    def setUpClass(cls):
+        cls.s = Served()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.s.close()
+
+    def put_claiming(self, length):
+        c = http.client.HTTPConnection("127.0.0.1", self.s.port, timeout=5)
+        try:
+            c.putrequest("POST", "/api/helper/put?name=fake_piece", skip_accept_encoding=True)
+            c.putheader("X-Fizgig-Token", server.TOKEN)
+            c.putheader("Content-Length", str(length))
+            c.endheaders()
+            return c.getresponse().status
+        finally:
+            c.close()
+
+    def test_huge_and_negative_not_read(self):
+        for length in (1 << 30, -1):
+            self.assertEqual(self.put_claiming(length), 400, length)
+
+    def test_a_piece_still_arrives(self):
+        status, d = self.s.json("POST", "/api/helper/put?name=fake_piece&offset=0", b"fake piece")
+        self.assertEqual((status, d.get("size")), (200, 10))
+
+
 class CaptionExt(unittest.TestCase):
     def test_only_caption_kinds(self):
         for given, used in ((".caption", ".caption"), ("caption", ".caption"), (".TXT", ".TXT"), ("", ".txt"),
