@@ -1822,7 +1822,8 @@ def _media_size(path):
             if ext in _IMAGES:
                 from PIL import Image
                 with Image.open(path) as im:
-                    wh = [int(im.width), int(im.height)]
+                    from fizgig.utils.upright import upright_size
+                    wh = list(upright_size(im))
             else:
                 import cv2
                 cap = cv2.VideoCapture(path)
@@ -1907,6 +1908,8 @@ def _thumb(path, size=320):
         with _thumb_slots:
             with Image.open(path) as im:
                 im.draft("RGB", (size * 2, size * 2))      # a JPEG decodes at a reduced size: much faster
+                from fizgig.utils.upright import upright
+                im = upright(im)
                 im.thumbnail((size, size))
                 buf = io.BytesIO()
                 im.convert("RGB").save(buf, "JPEG", quality=82)
@@ -3612,6 +3615,11 @@ class Handler(BaseHTTPRequestHandler):
                                                                                             lk.pref_key)}}) \
                         if b.get("look") else ""
                     live["look_strength"] = desc.preview_look_strength
+                ck = desc.preview_checkpoint() if desc is not None and desc.train_preview_checkpoint \
+                    and "checkpoint" in b else None
+                if ck:                  # the preview-model tick (Qwen's Turbo): its file when ticked, "" = off
+                    path = pref_path(load_prefs(), ck[0].pref_key) if b.get("checkpoint") else ""
+                    live["checkpoint"] = path if (not path or os.path.isfile(path)) else ""
                 _write_json(side, live)
                 return self.json({"ok": True, "on": True})
             if path == "/api/run/now":               # Sample now / Save now: a request the trainer takes after a step

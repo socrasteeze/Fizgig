@@ -552,7 +552,7 @@ function onValue(r, val) {
   if (r.key === "__SAMPLE_LIVE" || (S.values.__SAMPLE_LIVE &&
       ["SAMPLE_PROMPT", "SAMPLE_SEED", "SAMPLE_WIDTH", "SAMPLE_HEIGHT", "SAMPLE_STEPS", "SAMPLE_CFG_SCALE",
        "FAMILY_TURBO_STRENGTH", "SAMPLE_EVERY_N_EPOCHS", "SAMPLE_LATER", "SAMPLE_UNTIL_EPOCH",
-       "SAMPLE_EVERY_AFTER", "FAMILY_PREVIEW_LOOK"].includes(r.key))) sampleLiveSoon();
+       "SAMPLE_EVERY_AFTER", "FAMILY_PREVIEW_LOOK", "SAMPLE_CHECKPOINT"].includes(r.key))) sampleLiveSoon();
   if (r.key === "CAPTION_TRIGGER_WORD") { S.trigger = String(val).trim(); $("capTrigger").value = S.trigger; saveTriggerSoon(S.trigger); }
   const extra = r.sets && r.sets[val];            // a kind of training that also sets others (Fine-tune's LR)
   if (extra) { Object.assign(S.values, extra); syncInputs(Object.keys(extra)); }
@@ -1757,7 +1757,18 @@ function previewGrid(items, prompts, eager) {
           el("figcaption", {class: "visually-hidden"}, el("b", {text: previewLabel(it)}),
             prompts[i] ? el("span", {text: " · " + prompts[i]}) : null)), it) : null); })));
   }
-  return el("div", {class: "gallery prompt-grid-wrap"}, table);
+  // a second scroll bar over the grid, in step with the one under it (a long grid puts that one far down the page)
+  const wrap = el("div", {class: "gallery prompt-grid-wrap"}, table);
+  const spacer = el("div", {class: "prompt-grid-spacer"});
+  const top = el("div", {class: "prompt-grid-top"}, spacer);
+  const follow = (from, to) => from.addEventListener("scroll", () => {    // the echo finds them level and stops
+    if (to.scrollLeft !== from.scrollLeft) to.scrollLeft = from.scrollLeft; });
+  follow(top, wrap); follow(wrap, top);
+  new ResizeObserver(() => {
+    spacer.style.width = table.scrollWidth + "px";
+    top.hidden = table.scrollWidth <= wrap.clientWidth;
+  }).observe(table);
+  return el("div", {}, top, wrap);
 }
 
 async function loadGallery() {
@@ -3366,6 +3377,13 @@ async function runLossTick(training) {
   host.replaceChildren(lossGraph(d));
 }
 
+// a form value as the tab shows it: the row's default while it's never been set
+function valueOrDefault(key) {
+  if (S.values[key] !== undefined) return S.values[key];
+  for (const s of S.fam.form.sections) for (const r of s.rows) if (r && r.key === key) return r.default;
+  return undefined;
+}
+
 // the Samples tab's "Change the previews of the run going now": its prompts, seed, size, steps, CFG and Turbo
 // strength go to the run as the
 // trainer's sample override while ticked (sent again on every change), and come off when it's unticked
@@ -3376,7 +3394,7 @@ const sampleLiveSoon = debounce(async () => {
       seed: v.SAMPLE_SEED, width: v.SAMPLE_WIDTH, height: v.SAMPLE_HEIGHT, steps: v.SAMPLE_STEPS,
       cfg: v.SAMPLE_CFG_SCALE, turbo: v.FAMILY_TURBO_STRENGTH, every: v.SAMPLE_EVERY_N_EPOCHS,
       until: v.SAMPLE_LATER ? v.SAMPLE_UNTIL_EPOCH : 0, after: v.SAMPLE_LATER ? v.SAMPLE_EVERY_AFTER : 0,
-      look: !!v.FAMILY_PREVIEW_LOOK});
+      look: !!v.FAMILY_PREVIEW_LOOK, checkpoint: !!valueOrDefault("SAMPLE_CHECKPOINT")});
     if (note) note.textContent = r.on ? "Sent: the run's next previews use these." : "The run is back on its own prompts.";
   } catch (e) {
     if (note) note.textContent = S.run && (S.run.running || S.run.state === "starting") ? e.message : liveIdleText();
