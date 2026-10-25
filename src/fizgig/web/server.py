@@ -91,6 +91,10 @@ _run = {"proc": None, "state": "idle", "stage": "", "lora": "", "output_dir": ""
 _log: list[tuple[int, str]] = []        # (line number, text), the last 5000
 _log_n = [0]
 _log_event = threading.Condition(_lock)
+LOGS_DIR = user_file("logs")            # each run's log as a file too (the console's only lasts until a restart)
+LOGS_KEPT = 20
+_run_log = {"file": None, "path": "", "bar_at": 0.0}
+_BAR = re.compile(r"\d+%\|")             # a progress bar's redraw: one a minute in the file, and its 100%
 _stats = {"vram": [0, 0], "ram": [0, 0], "vram_peak": 0, "ram_peak": 0, "device_name": "GPU"}
 
 
@@ -220,6 +224,46 @@ def append_log(text: str):
         _log.append((_log_n[0], text))
         del _log[:-5000]
         _log_event.notify_all()
+        f = _run_log["file"]
+        if f is None or text == LOG_CLEAR:
+            return
+        if _BAR.search(text) and "100%|" not in text:
+            if time.time() - _run_log["bar_at"] < 60:
+                return
+            _run_log["bar_at"] = time.time()
+        try:
+            f.write(text)
+            f.flush()
+        except (OSError, ValueError):
+            _run_log["file"] = None
+
+
+def _open_run_log(lora):
+    """A new run's log file, user_data/logs/<date>_<time>_<lora>.log; only the newest LOGS_KEPT are kept."""
+    with _lock:
+        if _run_log["file"] is not None:
+            try:
+                _run_log["file"].close()
+            except OSError:
+                pass
+        _run_log.update(file=None, path="", bar_at=0.0)
+        try:
+            os.makedirs(LOGS_DIR, exist_ok=True)
+            name = re.sub(r"[^\w.-]+", "_", lora or "run")[:80]
+            path = os.path.join(LOGS_DIR, f"{datetime.datetime.now():%Y-%m-%d_%H%M%S}_{name}.log")
+            _run_log.update(file=open(path, "w", encoding="utf-8"), path=path)
+        except OSError:
+            return
+    for p in sorted((p for p in os.listdir(LOGS_DIR) if p.endswith(".log")), reverse=True)[LOGS_KEPT:]:
+        try:
+            os.remove(os.path.join(LOGS_DIR, p))
+        except OSError:
+            pass
+
+
+def _log_where():
+    """The line naming this run's log file, for a failure's message."""
+    return f"Full log: {_run_log['path']}\n" if _run_log["path"] else ""
 
 
 # ---- prefs and the web UI's own state ---------------------------------------------------------------------------
@@ -339,6 +383,13 @@ def _prefs_unreadable() -> str:
     except OSError:
         pass
     return ""
+
+
+def _sam_info():
+    """The masks card's SAM 3.1 line: the downloaded file ("" before the download) and how a download is going."""
+    from fizgig.dataset import sammask
+    return {"path": sammask.find_model(user_data.MODELS_DIR), "fetch": sammask.fetch_state(user_data.MODELS_DIR),
+            "gb": sammask.SIZE_GB}
 
 
 def update_prefs(changes: dict):
@@ -1446,6 +1497,7 @@ def _start(family_key, values, image_folder, resume="", ft_continue=None, note="
     with _lock:
         _run["history_id"] = hid
     append_log(LOG_CLEAR)                    # this run's log on a clean console
+    _open_run_log(inputs["LORA_NAME"])
     if note:
         append_log(note + "\n")
     for line in plan.console:
@@ -1549,7 +1601,7 @@ def _run_stages(stages, out_dir):
         try:
             proc = _popen(stage.cmd)
         except OSError as e:
-            append_log(f"✖ {stage.name} could not start: {e}\n")
+            append_log(f"✖ {stage.name} could not start: {e}\n" + _log_where())
             with _lock:
                 _run.update(state="failed", proc=None, ended_at=time.time())
             history.end(_run.get("history_id"), "failed", _run.get("progress"))
@@ -1584,7 +1636,7 @@ def _run_stages(stages, out_dir):
             webqueue.on_run_ended("stopped", _run.get("lora"), _queue_starter)
             return
         if ret != 0:
-            append_log(f"\n✖ {stage.name} failed (exit code {ret}).\n")
+            append_log(f"\n✖ {stage.name} failed (exit code {ret}).\n" + _log_where())
             with _lock:
                 _run.update(state="failed", proc=None, ended_at=time.time())
             history.end(_run.get("history_id"), "failed", _run.get("progress"))
@@ -2850,7 +2902,7 @@ class Handler(BaseHTTPRequestHandler):
                               "model_here": os.path.isfile(automask.model_path(user_data.MODELS_DIR)),
                               "model_mb": automask.MODEL_MB, "pictures": len(pics), "with_mask": have,
                               "baselines": bool(prep_jobs.look_baselines(folder)) if folder else False,
-                              "faces": prep_jobs.faces_available()})
+                              "faces": prep_jobs.faces_available(), "sam": _sam_info()})
         if path == "/api/prep/summary":            # the What will happen card
             from fizgig.dataset import prep as _prep
             g = lambda k, d="": (qs.get(k) or [d])[0]
@@ -3844,6 +3896,34 @@ class Handler(BaseHTTPRequestHandler):
                         str(b.get("dir") or ""), str(b.get("dataset") or ""), b.get("baselines") or [])})
                 except ValueError as e:
                     return self.json({"error": str(e)}, 400)
+            if path == "/api/masks/sam_fetch":      # SAM 3.1 into the models folder (1.75 GB, once)
+                from fizgig.dataset import sammask
+                sammask.download(user_data.MODELS_DIR)
+                return self.json({"ok": True, "sam": _sam_info()})
+            if path == "/api/masks/sam_preview":    # the first two pictures with their SAM masks, nothing written
+                from fizgig.dataset import sammask
+                import base64
+                import io
+                folder, where = str(b.get("folder") or ""), _sam_info()["path"]
+                if not where:
+                    return self.json({"error": "SAM 3.1 isn't here yet: press Download first."}, 400)
+                include, exclude = sammask.split_words(b.get("include")), sammask.split_words(b.get("exclude"))
+                if not include:
+                    return self.json({"error": "Type what the masks should show in Mask these (e.g. person)."}, 400)
+                try:
+                    shots, fresh = sammask.preview(folder, include, exclude, where, shown=b.get("shown") or [])
+                except ValueError as e:
+                    return self.json({"error": str(e)}, 400)
+                except Exception as e:
+                    logger.exception("SAM preview")
+                    return self.json({"error": f"SAM 3.1 couldn't run: {type(e).__name__}: {e}"}, 400)
+                pics = []
+                for name, pic, cover in shots:
+                    buf = io.BytesIO()
+                    pic.save(buf, "JPEG", quality=88)
+                    pics.append({"name": name, "cover": round(cover, 3),
+                                 "src": "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()})
+                return self.json({"ok": True, "pictures": pics, "fresh": fresh, "of": len(sammask.pictures(folder))})
             if path in ("/api/prep/run", "/api/look/scan", "/api/look/move", "/api/masks/make"):
                 folder = str(b.get("folder") or "")
                 norm = lambda p: os.path.normcase(os.path.abspath(p or "."))
@@ -3861,8 +3941,14 @@ class Handler(BaseHTTPRequestHandler):
                     if path == "/api/look/scan":
                         return self.json(prep_jobs.look_scan(folder, b.get("baselines") or []))
                     if path == "/api/masks/make":
+                        sam = None
+                        if b.get("sam"):
+                            from fizgig.dataset import sammask
+                            sam = {"path": _sam_info()["path"], "include": sammask.split_words(b.get("include")),
+                                   "exclude": sammask.split_words(b.get("exclude"))}
                         return self.json(prep_jobs.start_masks(folder, str(b.get("kind") or ""),
-                                                               bool(b.get("subject_only")), bool(b.get("overwrite"))))
+                                                               bool(b.get("subject_only")), bool(b.get("overwrite")),
+                                                               sam=sam))
                     return self.json(prep_jobs.look_move(folder, b.get("paths") or [],
                                                          captions.caption_ext(b.get("ext"))))
                 except ValueError as e:

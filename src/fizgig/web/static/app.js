@@ -239,10 +239,19 @@ function triggerCheckBlock() {
 
 function renderSections(tab, host) {
   host.innerHTML = "";
+  if (!S.secShut) S.secShut = {};
   for (const sec of S.fam.form.sections.filter((s) => s.tab === tab)) {
-    const body = el("div", {class: "card-content" + (sec.collapsed ? " collapsed" : "")});
-    const head = el("div", {class: "card-title collapsible-header", onclick: () => body.classList.toggle("collapsed")},
-      el("span", {text: (sec.collapsed ? "▶ " : "▼ ") + sec.title}));
+    // open or closed as the form says, or as you left it this session (a family switch redraws the cards)
+    const key = tab + ":" + sec.id, shut = key in S.secShut ? S.secShut[key] : !!sec.collapsed;
+    const body = el("div", {class: "card-content" + (shut ? " collapsed" : "")});
+    const label = el("span");
+    const head = el("div", {class: "card-title collapsible-header"}, label);
+    const show = () => {
+      const c = body.classList.contains("collapsed");
+      label.textContent = (c ? "▶ " : "▼ ") + sec.title;
+      card.classList.toggle("sec-open", !c);
+    };
+    head.onclick = () => { body.classList.toggle("collapsed"); S.secShut[key] = body.classList.contains("collapsed"); show(); };
     if (sec.help) {         // the card's video, a link across the top of the card
       body.append(el("a", {class: "sec-video", href: sec.help.href, target: "_blank", rel: "noopener"},
         el("span", {class: "sec-video-play", text: "▶"}),
@@ -251,7 +260,12 @@ function renderSections(tab, host) {
     }
     for (const r of sec.rows) body.append(renderRow(r));
     if (sec.id === "subjects" && !S.family.startsWith("acestep")) body.append(triggerCheckBlock());
-    host.append(el("div", {class: "section-card", id: "sec-" + sec.id, "data-section": sec.id}, head, body));
+    const card = el("div", {class: "section-card", id: "sec-" + sec.id, "data-section": sec.id}, head, body);
+    show();
+    if (sec.extras) host.append(el("div", {class: "extras-divider", "data-extras": "1"}, el("span", {text: "✦ Extras ✦"})));
+    if (sec.extras) card.classList.add("sec-extra");
+    else if (host.querySelector(".extras-divider")) card.classList.add("sec-extra");
+    host.append(card);
   }
 }
 
@@ -285,6 +299,7 @@ function renderRow(r) {
   let input;
   const set = (val) => onValue(r, val);
   if (r.kind === "blocks") return blockPicker(r, wrap);
+  if (r.lines) return promptLines(r, wrap);
   if (r.kind === "cadence") return cadenceRow(r, wrap);
   if (r.kind === "split") return splitRow(r, wrap);
   if (r.kind === "check") {
@@ -521,6 +536,80 @@ function splitRow(r, wrap) {
   return wrap;
 }
 
+// a list of prompts, one numbered box each (the gallery's Prompt 1, 2, 3…), saved as the one-per-line text it always was
+function promptLines(r, wrap) {
+  const list = el("div", {class: "prompt-lines"});
+  const boxes = () => [...list.querySelectorAll("textarea")];
+  const save = () => onValue(r, boxes().map((b) => b.value).join("\n"));
+  const grow = (b) => {                     // to its text; a hidden tab measures 0, so it waits to be seen
+    if (!b.offsetParent) return;
+    b.style.height = "auto"; b.style.height = b.scrollHeight + 2 + "px";
+  };
+  new ResizeObserver(() => boxes().forEach(grow)).observe(list);     // shown at last, or a wider window
+  const renumber = () => list.querySelectorAll(".prompt-num").forEach((n, i) => { n.textContent = i + 1; });
+  function line(text, after) {
+    const box = el("textarea", {rows: 1, spellcheck: "false", "aria-label": "Prompt"});
+    box.value = text;
+    const item = el("div", {class: "prompt-line"}, el("span", {class: "prompt-num"}), box,
+      el("button", {class: "prompt-del", text: "×", title: "Remove this prompt", tabindex: -1, onclick: () => {
+        if (boxes().length > 1) item.remove(); else box.value = "";
+        renumber(); save();
+      }}));
+    box.addEventListener("input", () => { grow(box); save(); });
+    box.addEventListener("keydown", (e) => {
+      const at = box.selectionStart, flat = at === box.selectionEnd;
+      if (e.key === "Enter" && !e.isComposing) {           // the rest of the line starts the next prompt
+        e.preventDefault();
+        const rest = box.value.slice(box.selectionEnd);
+        box.value = box.value.slice(0, at); grow(box);
+        const next = line(rest, item);
+        next.setSelectionRange(0, 0); next.focus();
+        renumber(); save();
+      } else if (e.key === "Backspace" && flat && at === 0 && item.previousElementSibling) {   // join the one above
+        e.preventDefault();
+        const prev = item.previousElementSibling.querySelector("textarea"), end = prev.value.length;
+        prev.value += box.value; grow(prev);
+        item.remove(); prev.focus(); prev.setSelectionRange(end, end);
+        renumber(); save();
+      }
+    });
+    box.addEventListener("paste", (e) => {                 // pasted lines become prompts of their own
+      const text = (e.clipboardData || window.clipboardData).getData("text");
+      if (!/\r?\n/.test(text)) return;
+      e.preventDefault();
+      const parts = text.split(/\r?\n/);
+      const head = box.value.slice(0, box.selectionStart), tail = box.value.slice(box.selectionEnd);
+      box.value = head + parts[0]; grow(box);
+      let last = item, lastBox = box;
+      for (const p of parts.slice(1)) { lastBox = line(p, last); last = lastBox.parentNode; }
+      const end = lastBox.value.length;
+      lastBox.value += tail; grow(lastBox);
+      lastBox.focus(); lastBox.setSelectionRange(end, end);
+      renumber(); save();
+    });
+    if (after) after.after(item); else list.append(item);
+    requestAnimationFrame(() => grow(box));
+    return box;
+  }
+  function draw() {
+    list.replaceChildren();
+    const v = String(S.values[r.key] ?? "").split(/\r?\n/);
+    for (const t of v) line(t);
+    renumber();
+  }
+  const sync = el("input", {type: "hidden", id: "f_" + r.key});    // syncInputs (a preset, Last Train) redraws it
+  sync._sync = draw;
+  const add = el("button", {class: "btn btn-sm", text: "+ Add prompt", onclick: () => {
+    const last = list.lastElementChild;
+    line("", last).focus(); renumber(); save();
+  }});
+  wrap.append(el("span", {class: "field-label", text: r.label + ":"}), list, add, sync);
+  if (r.hint) wrap.append(el("div", {class: "field-hint", text: r.hint}));
+  wrap.append(el("div", {class: "field-hint row-note", id: "note_" + r.key}));
+  draw();
+  return wrap;
+}
+
 // Model Area to Train > Custom: the model's blocks as ticks (All / None / an area's blocks), as the desktop's
 function blockPicker(r, wrap) {
   const sel = () => ({...(S.values[r.key] || {})});
@@ -646,6 +735,10 @@ async function refreshState() {
   });
   document.querySelectorAll(".section-card[data-section]").forEach((c) => {
     c.style.display = hidden.has(c.dataset.section) ? "none" : "";
+  });
+  document.querySelectorAll(".extras-divider").forEach((d) => {    // no divider over nothing
+    const extras = [...d.parentNode.querySelectorAll(".section-card.sec-extra")];
+    d.style.display = extras.some((c) => c.style.display !== "none") ? "" : "none";
   });
   turboFollow();
   if (S.state.pending) setTimeout(refreshStateSoon, 2500);   // a note still being worked out (the fine-tune plan)
@@ -1754,7 +1847,7 @@ function previewFigure(it, prompts, eager, byEpoch) {
   const own = byEpoch && it.epoch != null && byEpoch[String(it.epoch)];
   const prompt = it.idx == null ? "" : (own && own[it.idx]) || (prompts ? prompts[it.idx] : "");
   return withMode(el("figure", {class: "gallery-item", title: it.name}, mediaFor(it, eager && eager.has(it)),
-    el("figcaption", {}, el("b", {text: previewLabel(it)}), prompt ? el("span", {class: "preview-prompt", text: prompt}) : null,
+    el("figcaption", {}, el("b", {text: previewLabel(it)}), prompt ? el("span", {class: "preview-prompt", text: prompt, title: prompt}) : null,
       el("span", {class: "preview-file", text: it.name}))), it);
 }
 // the family's line on how this preview was made (the run's record), shown over it in the lightbox
@@ -1775,7 +1868,7 @@ function previewGrid(items, prompts, eager) {
   for (const i of idxs) {
     table.append(el("tr", {},
       el("th", {class: "prompt-head"}, el("b", {text: `Prompt ${i + 1}`}),
-        prompts[i] ? el("span", {class: "preview-prompt", text: prompts[i]}) : null),
+        prompts[i] ? el("span", {class: "preview-prompt", text: prompts[i], title: prompts[i]}) : null),
       ...epochs.map((e) => { const it = at.get(e + ":" + i);
         return el("td", {}, it ? withMode(el("figure", {class: "gallery-item", title: it.name}, mediaFor(it, eager && eager.has(it)),
           el("figcaption", {class: "visually-hidden"}, el("b", {text: previewLabel(it)}),
@@ -1846,6 +1939,12 @@ async function loadGallery() {
 // ---- likeness to the subject (fizgig/web/gallery_likeness.py; the desktop gallery's likeness.json) ------------
 S.lik = {dir: "", picked: []};
 const LIK_PICS = /\.(png|jpe?g|webp)$/i;
+// ArcFace never reaches 100%: two photos of the same person score about 72% against each other. Shown wherever ArcFace
+// scores are (a scorer label that isn't ArcFace's means another embedder, on its own scale; none recorded = ArcFace).
+const ARC_PEAK = "Peak ArcFace is about 72%: that's what two photos of the same person score against each other, " +
+  "so no picture reaches 100%.";
+function arcPeak(label) { return !label || String(label).startsWith("ArcFace") ? ARC_PEAK : ""; }
+
 async function likenessShow(dir, items, run, view) {
   S.lik.dir = dir;
   const ask = S.lik.ask = (S.lik.ask || 0) + 1;     // an older refresh's answer arriving late changes nothing
@@ -1879,6 +1978,7 @@ async function likenessShow(dir, items, run, view) {
   }
   $("likPanel").style.display = epochs.length ? "" : "none";
   if (!epochs.length) return;
+  $("likPeak").textContent = arcPeak(d.embedder);
   $("likRun").textContent = `${run} - best so far: epoch ${bestEpoch} (${Math.round(avgs[best] * 100)}% average likeness)`;
   const cv = $("likChart");
   const w = cv.clientWidth || 900;
@@ -2785,6 +2885,7 @@ function royaleCurrent() { return Math.max(0, Math.min(Math.round(Number($("rySc
 
 async function royaleScore() {
   $("ryLikeStatus").textContent = "Scoring… (the first run loads the face model)";
+  $("ryLikePeak").textContent = "";
   try {
     const r = await api("/api/royale/score", {ref: $("ryLikeRef").value.trim()});
     S.ry.scores = r.scores; S.ry.best = r.best;
@@ -2794,6 +2895,7 @@ async function royaleScore() {
     $("ryLikeStatus").textContent = `Best: ${ryLabel(r.best).toLowerCase()} (${r.scores[r.best].toFixed(3)})` +
       (r.no_face ? `  (${r.no_face} no-face)` : "") +
       (r.embedder && !r.embedder.startsWith("ArcFace") ? `  · ${r.embedder}` : "");     // named when it isn't the usual one
+    $("ryLikePeak").textContent = arcPeak(r.embedder).replace("72%", "0.72 (72%)");
     royaleBest();
   } catch (e) { $("ryLikeStatus").textContent = e.message; }
 }
@@ -2912,7 +3014,7 @@ async function profilerRun() {
     await api("/api/profile/run", {family: $("pfFamily").value, lora: $("pfLora").value.trim(), mode: pfMode(),
       prompt: $("pfPrompt").value.trim(), class_prompt: $("pfClass").value.trim(), baselines: S.pf.photos,
       size: Number($("pfSize").value)});
-    $("pfReport").style.display = $("pfStudio").style.display = "none";
+    $("pfReport").style.display = "none";
     profilerPoll();
   } catch (e) { $("pfStatus").textContent = e.message; }
 }
@@ -2936,33 +3038,7 @@ async function profilerPoll() {
     $("pfReport").href = `/api/profile/report?path=${encodeURIComponent(res.report)}&t=${encodeURIComponent(TOKEN)}`;
     $("pfReport").style.display = "";
   }
-  S.pf.last = res && res.studio;
-  $("pfStudio").style.display = S.pf.last ? "" : "none";
   if (running && $("tab-profiler").classList.contains("active")) S.pf.poll = setTimeout(profilerPoll, 800);
-}
-
-async function profilerToStudio() {
-  // the desktop's "Open in Repair Studio": the LoRA on the same prompt, seed and size, the profile's suggestions on the
-  // sliders (bleed-heavy groups turned down, quiet ones off), so the change shows side by side and saves as a new file
-  const h = S.pf.last;
-  if (!h) return;
-  showTab("studio");                                 // opens Studio; wait for its model list and layout
-  for (let i = 0; i < 100 && !(S.st.familiesLoaded && S.st.layout); i++) await new Promise((r) => setTimeout(r, 100));
-  if ($("stFamily").value !== h.family) { $("stFamily").value = h.family; await studioFamily(); }
-  $("stPrimary").value = h.lora; $("stPrompt").value = h.prompt; $("stSeed").value = String(h.seed);
-  const [hw, hh] = Array.isArray(h.size) ? h.size : [h.size, h.size];
-  if ([...$("stW").options].some((o) => o.value === String(hw))) $("stW").value = String(hw);
-  if ([...$("stH").options].some((o) => o.value === String(hh))) $("stH").value = String(hh);
-  for (const [id, b] of Object.entries(S.st.blocks)) {
-    const [on, strength] = h.blocks[id] || [true, 1.0];
-    b.pe = !!on; b.ps = Number(strength);
-  }
-  studioSync(); studioCommit(); stRemember();
-  let msg = h.notes.length ? "From the profile: " + h.notes.join("; ") + "." :
-    "The profile found no group to turn down or switch off: the likeness and any bleed sit in the same blocks, so the sliders stay as trained.";
-  if (h.class_prompt) msg += ` To see the bleed, set the prompt to "${h.class_prompt}".`;
-  $("stSetupMsg").textContent = msg;                // stays put while the status line follows the load
-  await studioStart();
 }
 
 function wireProfiler() {
@@ -2980,7 +3056,6 @@ function wireProfiler() {
   $("pfPhotosClear").addEventListener("click", () => { S.pf.photos = []; pfPhotosDraw(); pfRemember(); });
   $("pfRun").addEventListener("click", profilerRun);
   $("pfStop").addEventListener("click", () => api("/api/profile/stop", {}).then(profilerPoll));
-  $("pfStudio").addEventListener("click", profilerToStudio);
 }
 
 // ---- Extract: a LoRA reduced to a lower rank (exact weight SVD from the file; fizgig/web/tools.py runs it) ----
@@ -3003,12 +3078,20 @@ function exMode(mode) {
   exRemember();
 }
 
+// Target rank: the dropdown shows the rank when it's one it lists, else Other… with the number in the box beside it
+function exRankShow() {
+  const v = String($("exRank").value), listed = [...$("exRankPick").options].some((o) => o.value === v);
+  $("exRankPick").value = listed ? v : "__other";
+  $("exRank").style.display = listed ? "none" : "";
+}
+
 async function extractOpen() {
   if (!S.ex.wired) wireExtract();
   const sv = exSaved();
   if (!S.ex.info) {
     if (sv.source) $("exSource").value = sv.source;
     if (sv.rank) $("exRank").value = sv.rank;
+    exRankShow();
     const on = new Set(sv.ftRanks || [32, 64]);
     $("exFtRanks").replaceChildren(...EX_FT_RANKS.map((r) => { const c = el("input", {type: "checkbox", value: r, onchange: exRemember});
       c.checked = on.has(r); return el("label", {class: "checkbox-label"}, c, " " + r); }));
@@ -3092,9 +3175,11 @@ async function extractRun() {
   const custom = $("exPreset").value === "Custom";
   const blocks = custom ? [...$("exCustom").querySelectorAll("input:checked")].map((c) => c.value) : [];
   if (custom && !blocks.length) { $("exStatus").textContent = "Custom is selected but no blocks are ticked."; return; }
+  const rank = Number($("exRank").value);
+  if (!Number.isInteger(rank) || rank < 1) { $("exStatus").textContent = "Target rank is a whole number, 1 or more."; return; }
   try {
     const r = await api("/api/extract/run", {family: $("exFamily").value, source: $("exSource").value.trim(),
-      name: $("exName").value.trim(), out_dir: $("exOutDir").value.trim(), rank: Number($("exRank").value),
+      name: $("exName").value.trim(), out_dir: $("exOutDir").value.trim(), rank,
       preset: custom || !(S.ex.info.presets || []).length ? "" : $("exPreset").value, blocks});
     $("exStatus").textContent = `Extracting to ${r.output}…`;
     $("exDone").replaceChildren();
@@ -3128,9 +3213,17 @@ async function extractPoll() {
 
 function wireExtract() {
   S.ex.wired = true;
+  exRankShow();
   $("exFamily").addEventListener("change", () => { extractFamily($("exFamily").value, $("exPreset").value); exRemember(); });
   $("exPreset").addEventListener("change", extractPresetChanged);
-  $("exRank").addEventListener("change", () => { extractName(); exRemember(); });
+  for (const ev of ["change", "input"]) $("exRank").addEventListener(ev, () => { extractName(); exRemember(); });
+  $("exRankPick").addEventListener("change", () => {      // a listed rank, or Other… and a box for any number
+    const other = $("exRankPick").value === "__other";
+    if (!other) $("exRank").value = $("exRankPick").value;
+    $("exRank").style.display = other ? "" : "none";
+    if (other) { $("exRank").focus(); $("exRank").select(); }
+    extractName(); exRemember();
+  });
   $("exSource").addEventListener("change", () => extractSource($("exSource").value.trim()));
   const up = uploadButton({kind: "path", key: "EXTRACT_SOURCE"}, $("exSource"), extractSource);
   $("exSourceBtns").replaceChildren(el("button", {class: "btn", text: "Choose…", onclick: () =>
@@ -3622,6 +3715,15 @@ async function maskInfo() {
   const r = await api("/api/masks/info?folder=" + encodeURIComponent(S.imageFolder)).catch(() => null);
   if (!r) return;
   if (!$("maskKinds").childElementCount) {
+    const sv = S.prepSaved || {};
+    $("maskSam").checked = !!sv.maskSam;
+    if (sv.maskSamInclude != null) $("maskSamInclude").value = sv.maskSamInclude;
+    if (sv.maskSamExclude != null) $("maskSamExclude").value = sv.maskSamExclude;
+    $("maskMethod").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
+      $("maskSam").checked = b.dataset.sam === "1"; maskSamSave(); maskShow(S.prep.maskOpts || r); }));
+    $("maskSamInclude").addEventListener("change", maskSamSave);
+    $("maskSamExclude").addEventListener("change", maskSamSave);
+    $("maskSamPreview").addEventListener("click", maskSamPreview);
     const saved = (S.prepSaved || {}).maskKind || "person";
     for (const [k, label] of Object.entries(r.kinds)) {
       $("maskKinds").append(el("label", {class: "radio-label"}, el("input", {type: "radio", name: "maskKind", value: k,
@@ -3633,25 +3735,82 @@ async function maskInfo() {
   S.prep.maskOpts = r;
   maskShow(r);
 }
+// SAM 3.1 on the masks card: words instead of the person finder's choices; its file is downloaded from here
+function maskSamShow(r) {
+  const on = $("maskSam").checked, sam = r.sam || {}, f = sam.fetch || {};
+  $("maskSamBox").style.display = on ? "" : "none";
+  $("maskKinds").style.display = on ? "none" : "";
+  $("maskMethod").querySelectorAll("button").forEach((b) => b.classList.toggle("active", (b.dataset.sam === "1") === on));
+  $("maskMethodHint").textContent = on ? "Meta's Segment Anything: type what to mask (\"person\", \"hair\", " +
+    "\"the dog\") and it finds it, with sharper edges. A 1.75 GB download, once; it runs on the GPU." :
+    "Google's person finder: pick a part of the person below. Small and quick, on the CPU.";
+  $("maskRunHint").textContent = on ? "It runs on the GPU, a fraction of a second a picture once loaded (several " +
+    "seconds a picture without a GPU). Make masks when nothing is training." :
+    "It runs on the CPU, a fraction of a second a picture. The first time, it downloads Google's person finder (16 MB).";
+  const st = $("maskSamState");
+  st.style.display = on ? "" : "none";
+  if (f.state === "running") {
+    st.replaceChildren(`Downloading SAM 3.1: ${f.gb} of ${f.of} GB …`);
+    clearTimeout(S.prep.samTimer);
+    S.prep.samTimer = setTimeout(maskInfo, 2000);
+  } else if (sam.path) {
+    st.replaceChildren("SAM 3.1 is downloaded.");
+  } else {
+    st.replaceChildren(el("button", {class: "btn btn-primary",
+      text: f.state === "failed" ? "Try the download again" : `Download SAM 3.1 (${sam.gb || 1.75} GB)`, onclick: async () => {
+        await api("/api/masks/sam_fetch", {}).catch((e) => { st.textContent = e.message; });
+        maskInfo(); }}), el("span", {class: "field-hint", text: f.state === "failed" ? ` The download failed: ${f.error}` :
+        " Needed once, before the first masks."}));
+  }
+  $("maskSamPreview").disabled = !on || !sam.path || !r.pictures || S.prep.running;
+}
+async function maskSamPreview() {
+  $("maskSamPrevState").textContent = "Finding them (the first time loads SAM 3.1, a few seconds) …";
+  $("maskSamPreview").disabled = true;
+  try {
+    // two pictures not shown yet in this folder, until every one has been: then a fresh round
+    if (S.prep.samShownFor !== S.imageFolder) { S.prep.samShown = []; S.prep.samShownFor = S.imageFolder; }
+    const r = await api("/api/masks/sam_preview", {folder: S.imageFolder, include: $("maskSamInclude").value,
+      exclude: $("maskSamExclude").value, shown: S.prep.samShown});
+    S.prep.samShown = r.fresh ? r.fresh : [...S.prep.samShown, ...r.pictures.map((p) => p.name)];
+    $("maskSamPreviews").replaceChildren(...r.pictures.map((p) => el("figure", {class: "mask-sam-shot"},
+      el("img", {src: p.src, alt: p.name}),
+      el("figcaption", {text: p.cover ? `${p.name} · ${Math.round(p.cover * 100)}% masked` : `${p.name} · nothing found`}))));
+    $("maskSamPrevState").textContent = "Blue is what the LoRA learns; nothing is saved yet. Press again for two " +
+      `more (${Math.min(S.prep.samShown.length, r.of)} of ${r.of} seen).`;
+  } catch (e) { $("maskSamPrevState").textContent = e.message; }
+  $("maskSamPreview").disabled = false;
+}
+function maskSamSave() {
+  S.prepSaved = {...(S.prepSaved || {}), maskSam: $("maskSam").checked, maskSamInclude: $("maskSamInclude").value,
+    maskSamExclude: $("maskSamExclude").value};
+  api("/api/state", {prep: S.prepSaved}).catch(() => {});
+}
 function maskShow(r) {
   const kind = (document.querySelector('input[name="maskKind"]:checked') || {}).value || "person";
-  $("maskInfo").textContent = !r.available ? "Making masks needs an update: run update_fizgig to add its one new " +
+  maskSamShow(r);
+  const sam = $("maskSam").checked;
+  $("maskInfo").textContent = !r.available && !sam ? "Making masks needs an update: run update_fizgig to add its one new " +
     "package (ai-edge-litert)." : r.pictures ? `${r.with_mask} of ${r.pictures} pictures have a mask.` : "";
   const subj = $("maskSubject");
-  subj.disabled = !r.baselines || !r.faces || kind === "not_faces" || kind === "background";
+  subj.disabled = !r.baselines || !r.faces || (!sam && (kind === "not_faces" || kind === "background"));
   if (subj.disabled) subj.checked = false;
-  $("maskSubjectHint").textContent = kind === "not_faces" ? "Not for Everything but the faces: every face is left out." :
+  $("maskSubjectHint").textContent = sam ? (!r.faces ? "Needs face detection, which isn't installed here (run install_fizgig.py)." :
+    r.baselines ? "Finds your subject by their face, with the Look Filter's 3 baselines, and keeps only what's on them." :
+    "Needs the Look Filter's 3 baselines: choose them and scan the folder (the last card on this tab), then come back.") :
+    kind === "not_faces" ? "Not for Everything but the faces: every face is left out." :
     kind === "background" ? "Not for Just the background: every person is left out." :
     !r.faces ? "Needs face detection, which isn't installed here (run install_fizgig.py)." :
     r.baselines ? "Finds your subject by their face, with the Look Filter's 3 baselines; everyone else counts as background." :
     "Needs the Look Filter's 3 baselines: choose them and scan the folder (the last card on this tab), then come back.";
-  $("maskRun").disabled = !r.available || !r.pictures || S.prep.running;
+  $("maskRun").disabled = (sam ? !(r.sam || {}).path : !r.available) || !r.pictures || S.prep.running;
 }
 async function maskRun() {
   if (!S.imageFolder) { $("maskState").textContent = "Choose the training folder on the Start tab first."; return; }
   const kind = (document.querySelector('input[name="maskKind"]:checked') || {}).value || "person";
   try {
     await api("/api/masks/make", {folder: S.imageFolder, kind, subject_only: $("maskSubject").checked,
+      sam: $("maskSam").checked, include: $("maskSamInclude").value, exclude: $("maskSamExclude").value,
       overwrite: $("maskReplace").checked});
     S.prep.masking = true;
     $("maskLog").textContent = ""; $("maskLog").style.display = "";
@@ -3840,6 +3999,7 @@ async function lookPoll() {
   if (!r) return;
   S.prep.look = r;
   $("lookDecision").textContent = r.decision ? r.decision.replace("[faces] ", "") : "";
+  $("lookPeak").textContent = r.state === "done" && r.rows && r.rows.length ? arcPeak(r.embedder) : "";
   const mine = r.folder === S.imageFolder;        // the last scan may be of another folder
   if (r.state === "running") {
     $("lookStatus").textContent = r.progress[0] ? `Scoring faces… ${r.progress[0]}/${r.progress[1]}` :

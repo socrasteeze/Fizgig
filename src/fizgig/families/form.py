@@ -66,13 +66,18 @@ DEFAULTS = {
     "FAMILY_FT_ROTATIONS": "10", "FAMILY_FT_SAVE_EVERY": "1", "FAMILY_FT_ROTATE_EVERY": "1",
     "FAMILY_FT_FUSED": True, "FAMILY_FT_REG_DIR": "", "FAMILY_FT_REG_MULT": "0.2",
     "DATASET_MEGAPIXELS": "0.25", "DATASET_CAPTION_EXT": ".txt", "ENABLE_BUCKET": True, "BUCKET_NO_UPSCALE": True,
-    "ENABLE_CACHE": True, "MASKED_TRAINING": False, "MASK_FLOOR": "0.1 (recommended)",
+    "ENABLE_CACHE": True, "MASKED_TRAINING": False, "MASK_FLOOR": "0.1 (recommended)", "MASK_PRIOR": "Off",
     "METADATA_TITLE": "", "METADATA_AUTHOR": "", "METADATA_DESCRIPTION": "", "METADATA_LICENSE": "",
     "METADATA_TAGS": "", "METADATA_TRIGGER_PHRASE": "", "METADATA_THUMBNAIL": "",
     "SAMPLE_ENABLED": True, "SAMPLE_PROMPT": "A high quality photo", "SAMPLE_SEED": "1234",
     "SAMPLE_EVERY_N_EPOCHS": "1", "SAMPLE_LATER": False, "SAMPLE_UNTIL_EPOCH": "10",
     "SAMPLE_EVERY_AFTER": "1", "SAMPLE_AT_FIRST": True, "SAMPLE_CHECKPOINT": True, "CACHE_SAMPLE_MODEL": "auto",
 }
+
+
+TRAINING_ORDER = ("model", "output", "params", "edit", "slider", "finetune", "memory", "optimizer", "other")
+# any other Training card (Masked training, Subjects) comes after these, under the Extras divider
+TRAINING_OPEN = ("output", "params")         # the Training tab's cards open when it opens; the rest start closed
 
 
 def _row(key, label, kind="entry", hint="", choices=(), default=None, **extra):
@@ -220,6 +225,8 @@ def form(desc):
     def add(sid, title, tab, rows, collapsed=False, help=None):
         """help: {"href", "text", "sub"?} - the card's video, a link across its top"""
         rows = [r for r in rows if r]
+        if tab == "training":                    # the Training tab opens on Output and Training Parameters only
+            collapsed = sid not in TRAINING_OPEN
         if rows:
             sections.append({"id": sid, "title": title, "tab": tab, "rows": rows, "collapsed": collapsed,
                              **({"help": help} if help else {})})
@@ -401,6 +408,14 @@ def form(desc):
             _row("MASK_FLOOR", "How much outside the mask counts", "choice",
                  "0.1 keeps a little of the background, so the LoRA still knows your subject sits in a scene. "
                  "0 ignores it completely - then a very small mask trains hard on a few spots.", launch.MASK_FLOORS),
+            _row("MASK_PRIOR", "Outside the mask, keep the model's own picture", "choice",
+                 "Prior preservation outside the mask. "
+                 "Off: outside the mask the LoRA still learns your photos a little (as much as the setting above). "
+                 "On: there it learns to draw what the model itself would, so backgrounds and the model's look stay "
+                 "the model's own. It works with the setting above at 0 too: 0 stops the outside learning your photos, and this "
+                 "still keeps it to the model's own picture. Each step takes longer (up to about half again). The "
+                 "higher the number, the firmer.",
+                 launch.MASK_PRIORS),
         ])
     add("subjects", "Subjects", "training", subjects,
         help={"href": VIDEO, "text": "How to set up Fizgig LoRA Isolation",
@@ -611,7 +626,8 @@ def form(desc):
         _row("_prompts_note", " ".join(t for k, t in desc.samples_text if k == "prompts"), "note")
         if any(k == "prompts" for k, _t in desc.samples_text) else None,
         _row("SAMPLE_PROMPT", "Prompts", "text", " ".join(t for k, t in desc.samples_text if k == "banner") or
-             "One prompt per line."),
+             "One prompt per line: Enter starts the next. The numbers are the gallery's Prompt 1, 2, 3…",
+             lines=True),
         _row("_overtrain_tip", "Tip - catch overtraining early: give one prompt something your dataset doesn't have, "
              "a pose, angle or setting none of your photos show. Early epochs follow it. When the LoRA starts to "
              "overtrain, that's the first thing to fail, as the previews drift back to your photos. The last epoch that "
@@ -667,6 +683,12 @@ def form(desc):
             _row("SAMPLE_CFG_SCALE", "CFG Scale", hint=desc.cfg_note(), default=str(desc.preview_cfg)),
             _row("SAMPLE_NEGATIVE", "Negative Prompt", "text", default=neg or "") if neg is not None else None,
         ])
+    # the Training tab's order: what every run sets, then (after the Extras divider) the features you choose to use
+    order = {sid: i for i, sid in enumerate(TRAINING_ORDER)}
+    sections.sort(key=lambda sec: (sec["tab"] != "training", order.get(sec["id"], len(order))))
+    first = next((sec for sec in sections if sec["tab"] == "training" and sec["id"] not in order), None)
+    if first:
+        first["extras"] = True               # the divider goes above it
     return {"sections": sections, "presets": [{"name": n, "values": dict(v)} for n, v in (desc.presets or ())]}
 
 
@@ -805,11 +827,14 @@ def state(desc, values, image_folder="", captioner="", speed_file=False, checkpo
         if prompt_slider or (media and "photo" not in media):
             hidden.add("masks")             # a prompt slider makes its own pictures; a folder of clips has none to mask
         elif not values.get("MASKED_TRAINING"):
-            hidden.add("MASK_FLOOR")
+            hidden |= {"MASK_FLOOR", "MASK_PRIOR"}
         else:
             note = _mask_note(desc, values, image_folder)
             if note:
                 notes["MASKED_TRAINING"] = note
+            if kind in ("slider", "finetune"):      # it switches the LoRA off for a step: a slider or a fine-tune has none
+                disabled.add("MASK_PRIOR")
+                notes["MASK_PRIOR"] = "For a LoRA: a slider or a fine-tune trains without it."
     lokr = str(values.get("NETWORK_TYPE", "")).startswith("LoKR") and kind not in ("slider", "finetune")
     hidden |= {"NETWORK_DIM", "NETWORK_ALPHA"} if lokr else {"LOKR_FACTOR"}
     if lokr:
@@ -1216,6 +1241,7 @@ def inputs(desc, values, *, models, python, repo_dir, image_folder, cache_root, 
         FAMILY_TURBO_STRENGTH=s("FAMILY_TURBO_STRENGTH"), FAMILY_TURBO_STEPS=s("FAMILY_TURBO_STEPS"),
         FAMILY_TURBO_PACE=s("FAMILY_TURBO_PACE"), FAMILY_PREVIEW_LOOK=b("FAMILY_PREVIEW_LOOK"),
         MASKED_TRAINING=b("MASKED_TRAINING") and desc.masked_training, MASK_FLOOR=s("MASK_FLOOR"),
+        MASK_PRIOR=s("MASK_PRIOR"),
         python=python, repo_dir=repo_dir, models=models, image_folder=image_folder,
         caption_ext=s("DATASET_CAPTION_EXT") or ".txt", batch_size=1, megapixels=s("DATASET_MEGAPIXELS"),
         clip_megapixels=s("CLIP_MEGAPIXELS") if "clip" in desc.media else "",

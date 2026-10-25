@@ -1,11 +1,10 @@
 # HANDOFF
 
-**Updated:** 2026-10-24 · **Branch:** master · **Upstream:** 416fa635 (v8.9.6) · **Delivery target:** fork/master
+**Updated:** 2026-10-25 · **Branch:** master · **Upstream:** 5d535dab (v8.9.8) · **Delivery target:** fork/master
 
 ## State
-Merged 32 upstream commits from adac6d8f through 416fa635 (v8.9.5-v8.9.6: masked training and Make masks, Auto plan checkpointing from 40 GB, MiniMax H3 cache scan, small-card simulator, Network tab switch #236) into master. One conflict, `server.py` serve(): kept the fork's `OSError` guard around `_lan_announce` inside upstream's `lan.enabled()` gate. New dependency: `ai-edge-litert` (Make masks); not installed in the venv. Not pushed. Checks after: pytest 1 failed (test_page, same four ids as before) / 230 passed; unittest 100 run, same single failure.
-Before that: Merged 16 upstream commits from 29abb42a through 70757c5f into master (merge a5c7857f), then capped the helpers' raw-body routes (6bafc99f). Upstream is contained in HEAD. Not pushed: fork/master is at dd087af1.
-Tests ran before and after (pytest from a temp `--target` folder; the venv has no pytest). pytest: 2 failed / 201 passed before (test_page and a WinError 10053 flake), 1 failed / 214 passed after. unittest: 98 run, 1 failure before; 100 run, 1 failure after. The only lasting failure is `test_page` (see Open 1), same four ids.
+Merged 29 upstream commits from 416fa635 through 5d535dab (v8.9.7-v8.9.8: masked prior preservation, run log files in `user_data/logs/` #240, ArcFace peak line, Profiler's Open in Studio removed, numbered sample prompts #238, Training tab card order, Extract any rank #237, SAM 3.1 masks from words #239) into master. All adopted. One conflict, `server.py`: kept both the fork's `_prefs_unreadable()` and upstream's `_sam_info()`. No new pip dependencies. New upstream files: `src/fizgig/sam3/` (GPL-3.0, ported from ComfyUI), `assets/clip_tokenizer/` (MIT), `LICENSES/GPL-3.0.txt`; the project license is unchanged. Not pushed. Checks before/after: pytest 1 failed / 230 passed -> 1 failed / 237 passed (test_page, same four ids; +7 are upstream's new `test_sammask`/`test_mask_prior`); unittest 100 run, same single failure; pyflakes 103 -> 104 lines (new: redefined `detect_fn` in upstream's `sam3/detector.py`).
+Before that: merged 32 upstream commits through 416fa635 (v8.9.5-v8.9.6, merge efa02bf5), pushed to fork/master.
 
 ## Done this session
 - Adopted v8.9.0-v8.9.3: helpers (a second PC, a second GPU, a RunPod pod or Vast.ai instance renders previews, trains a share of each epoch, or takes over a run with Move to...; a pod's checkpoints come home), Move a run for every LoRA kind with clips and songs, MOSS-Image workbench Render with choice, release notes and docs (HELPERS, MOVE_RUN, TRAINING_SHARE, HELPER_PREVIEWS).
@@ -47,6 +46,9 @@ Tests ran before and after (pytest from a temp `--target` folder; the venv has n
 - `_start` takes `models=` (helpers) and `confirm=` (fork) by keyword; anything that can raise between its claim and launch must go through `_unclaim`, or every later Start says "A run is already going".
 - New raw-body routes must read through `_raw()`, never `self.rfile.read(n)`.
 - `FAMILY_PREVIEW_LOOK` can download its model through `/api/form/state`; do not exercise the live form as an incidental source check.
+- `/api/masks/sam_fetch` downloads the 1.75 GB SAM 3.1 file into the models folder; tests must not call it.
+- `_start` opens the run's log file (`_open_run_log`) after the state is "starting", outside `_unclaim`; it must stay non-raising.
+- Run Python with `-c` from outside the repo root: `fizgig.py` there shadows the `fizgig` package.
 - `fizgig.face_utils` holds `PREFS_FILE` from import time and is not a `fizgig.web` module, so `test_isolation` doesn't see it. Upstream's `test_face_backends.py` points it at `tmp_path` in an autouse fixture; a new test that uses it must too.
 - `FIZGIG_USER_DATA` (set for a second Fizgig on another GPU) moves `user_data.USER_DATA`; tests must not inherit it.
 - Upstream commit messages carry AI-session trailers and other authors' emails. The pre-push hook skips commits already on `origin/*` and merge commits; only the fork's own commits are scanned.
