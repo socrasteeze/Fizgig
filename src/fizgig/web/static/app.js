@@ -744,6 +744,7 @@ function renderPrefs() {
   host.innerHTML = "";
   if (S.pod) host.append(podCard());
   host.append(webPortCard());
+  if (!S.pod) host.append(networkCard());
   host.append(dataFolderCard());
   host.append(outputFolderCard());
   host.append(foldersCard());
@@ -1206,6 +1207,29 @@ function firewallRow() {
   };
   api("/api/lan/firewall").then(show).catch(() => {});
   return box;
+}
+
+// what Fizgig does on the network by itself (issue #236): finding your other computers and being found by them (a
+// broadcast on the local network while the Helpers or Pods tab is open, and an answer to theirs), and the release check
+function networkCard() {
+  const box = (key, label) => {
+    const on = el("input", {type: "checkbox"});
+    on.checked = String(S.set[key] ?? "1") !== "0";
+    on.addEventListener("change", () => api("/api/prefs", {changes: {[key]: on.checked}})
+      .then(() => { S.set[key] = on.checked ? "1" : "0"; }));
+    return el("label", {class: "checkbox-label"}, on, " " + label);
+  };
+  return el("div", {class: "section-card"}, el("div", {class: "card-title"}, el("span", {text: "Network"})),
+    el("div", {class: "card-desc", text: "What Fizgig does on the network without being asked. Pods, RunPod and " +
+      "computers added by their address work either way."}),
+    el("div", {class: "card-content"},
+      box("lan_discovery", "Find Fizgig on my other computers"),
+      el("div", {class: "field-hint", text: "While the Helpers or Pods tab is open, this computer asks the local network " +
+        "which computers run Fizgig, and it answers theirs (with a web password set). Nothing leaves your network. " +
+        "Off: no asking and no answering."}),
+      box("update_check", "Check for new releases"),
+      el("div", {class: "field-hint", text: "Once at start-up, Fizgig asks GitHub for its newest release tag (the About " +
+        "box says when one is out). Off: no check unless you press Check for updates in the About box."})));
 }
 
 // the web UI's port: saved by the first launch (8081, or the next free port if 8081 was taken)
@@ -3580,6 +3604,60 @@ async function loadPrep() {
   await prepSummary();
   pollPrep();
   lookPoll();
+  maskInfo();
+}
+
+// Image Prep's Make masks (fizgig/dataset/automask.py through prep_jobs.start_masks): the same job and log as a prep run
+const MASK_HINTS = {
+  person: "For a person LoRA: the room and the background count far less.",
+  no_clothes: "For a person LoRA that shouldn't learn their outfits: their clothes and the background both count far less.",
+  body: "For a body or skin LoRA (skin texture, tattoos) that shouldn't learn the face: face, hair, clothes and background count far less.",
+  body_clothes: "For an outfit or body LoRA that shouldn't learn the face: face, hair and background count far less.",
+  head: "For likeness only: the body, clothes and background all count far less.",
+  clothes: "For an outfit LoRA: the person wearing it and the background count far less.",
+  not_faces: "For an outfit, a body or a style LoRA that shouldn't learn anyone's face.",
+  background: "For a place or scene LoRA: the people in the pictures count far less."};
+async function maskInfo() {
+  if (!S.imageFolder) { $("maskInfo").textContent = ""; return; }
+  const r = await api("/api/masks/info?folder=" + encodeURIComponent(S.imageFolder)).catch(() => null);
+  if (!r) return;
+  if (!$("maskKinds").childElementCount) {
+    const saved = (S.prepSaved || {}).maskKind || "person";
+    for (const [k, label] of Object.entries(r.kinds)) {
+      $("maskKinds").append(el("label", {class: "radio-label"}, el("input", {type: "radio", name: "maskKind", value: k,
+        checked: k === saved, onchange: () => { S.prepSaved = {...(S.prepSaved || {}), maskKind: k};
+          api("/api/state", {prep: S.prepSaved}).catch(() => {}); maskShow(r); }}), " " + label),
+        el("div", {class: "field-hint radio-hint", text: MASK_HINTS[k] || ""}));
+    }
+  }
+  S.prep.maskOpts = r;
+  maskShow(r);
+}
+function maskShow(r) {
+  const kind = (document.querySelector('input[name="maskKind"]:checked') || {}).value || "person";
+  $("maskInfo").textContent = !r.available ? "Making masks needs an update: run update_fizgig to add its one new " +
+    "package (ai-edge-litert)." : r.pictures ? `${r.with_mask} of ${r.pictures} pictures have a mask.` : "";
+  const subj = $("maskSubject");
+  subj.disabled = !r.baselines || !r.faces || kind === "not_faces" || kind === "background";
+  if (subj.disabled) subj.checked = false;
+  $("maskSubjectHint").textContent = kind === "not_faces" ? "Not for Everything but the faces: every face is left out." :
+    kind === "background" ? "Not for Just the background: every person is left out." :
+    !r.faces ? "Needs face detection, which isn't installed here (run install_fizgig.py)." :
+    r.baselines ? "Finds your subject by their face, with the Look Filter's 3 baselines; everyone else counts as background." :
+    "Needs the Look Filter's 3 baselines: choose them and scan the folder (the last card on this tab), then come back.";
+  $("maskRun").disabled = !r.available || !r.pictures || S.prep.running;
+}
+async function maskRun() {
+  if (!S.imageFolder) { $("maskState").textContent = "Choose the training folder on the Start tab first."; return; }
+  const kind = (document.querySelector('input[name="maskKind"]:checked') || {}).value || "person";
+  try {
+    await api("/api/masks/make", {folder: S.imageFolder, kind, subject_only: $("maskSubject").checked,
+      overwrite: $("maskReplace").checked});
+    S.prep.masking = true;
+    $("maskLog").textContent = ""; $("maskLog").style.display = "";
+    $("prepLog").textContent = ""; S.prep.logSize = 0;
+    pollPrep();
+  } catch (e) { $("maskState").textContent = e.message; }
 }
 
 async function prepSummary() {
@@ -3604,6 +3682,7 @@ async function pollPrep() {
   if (r) {
     if (r.size < S.prep.logSize) { $("prepLog").textContent = ""; S.prep.logSize = 0; }
     if (r.log) { $("prepLog").textContent += r.log; $("prepLog").scrollTop = $("prepLog").scrollHeight; }
+    if (r.log && S.prep.masking) { $("maskLog").textContent += r.log; $("maskLog").scrollTop = $("maskLog").scrollHeight; }
     S.prep.logSize = r.size;
     const was = S.prep.running;
     S.prep.running = r.state === "running";
@@ -3611,7 +3690,12 @@ async function pollPrep() {
     if (S.prep.running) $("prepRun").textContent = "Preparing…";
     $("prepState").textContent = S.prep.running ? "Working on the Fizgig computer: you can leave this page." :
       r.state === "done" ? "Done." : r.state === "failed" ? "It stopped with an error: see the log." : "";
-    if (was && !S.prep.running) { prepSummary(); loadDatasets(); }
+    if (S.prep.masking) {
+      $("maskState").textContent = S.prep.running ? "Making masks on the Fizgig computer: you can leave this page." :
+        r.state === "done" ? "Done." : r.state === "failed" ? "It stopped with an error: see below." : "";
+      $("maskRun").disabled = S.prep.running;
+    }
+    if (was && !S.prep.running) { prepSummary(); loadDatasets(); maskInfo(); S.prep.masking = false; }
   }
   if (S.prep.running) S.prep.timer = setTimeout(pollPrep, 1000);
 }
@@ -3865,6 +3949,7 @@ function wirePrep() {
     r.addEventListener("change", () => { prepSummary(); savePrepSoon(); }));
   for (const id of ["prepMp", "prepFace", "prepPadding"]) $(id).addEventListener("change", () => { prepSummary(); savePrepSoon(); });
   $("prepRun").addEventListener("click", prepRun);
+  $("maskRun").addEventListener("click", maskRun);
   $("prepTest").addEventListener("click", prepTest);
   faceSettingsWire();
   $("lookPick").addEventListener("click", lookPickOpen);
@@ -5878,10 +5963,20 @@ function renderCaptions() {
       title: "Take it out of the training set: it and its caption move into the folder's removed subfolder (nothing is deleted).",
       onclick: () => capRemove(it, card, status)});
     const size = it.size ? `${it.size[0]}×${it.size[1]} · ${(it.size[0] * it.size[1] / 1e6).toFixed(1)} MP` : "";
+    // masked training: the picture's mask (photo-masklabel.png), shown in its place on a click
+    const pic = it.mask ? media.querySelector("img") || (media.tagName === "IMG" ? media : null) : null;
+    const maskBtn = pic ? el("button", {class: "btn btn-sm", text: "Show mask",
+      title: `${it.mask}: white trains fully, black only as much as the Training tab's Masked training card says.`,
+      onclick: () => {
+        const on = maskBtn.textContent === "Show mask";
+        if (on && !pic.dataset.picture) pic.dataset.picture = pic.src;
+        pic.src = on ? `/api/media?path=${encodeURIComponent(it.path.slice(0, it.path.length - it.name.length) + it.mask)}&t=${encodeURIComponent(TOKEN)}` : pic.dataset.picture;
+        maskBtn.textContent = on ? "Show picture" : "Show mask";
+      }}) : null;
     card.append(media, el("div", {class: "caption-card-body"},
       el("div", {class: "caption-card-title", text: mediaLabel(it)}),
-      size ? el("div", {class: "field-hint caption-card-size", text: size}) : null, ta,
-      el("div", {class: "field-row"}, save, recap, speech, remove, status)));
+      size ? el("div", {class: "field-hint caption-card-size", text: size + (it.mask ? " · has a mask" : "")}) : null, ta,
+      el("div", {class: "field-row"}, save, recap, speech, maskBtn, remove, status)));
     host.append(card);
   }
 }
@@ -6820,8 +6915,8 @@ const svgEl = (s) => { const t = document.createElement("template"); t.innerHTML
 
 async function helpLoad(quiet) {
   if (!quiet) $("helpNote").textContent = "Checking your helpers...";
-  try { S.help.data = await api("/api/helpers"); } catch (e) { $("helpNote").textContent = e.message; return; }
-  const open = $("tab-helpers").classList.contains("active");
+  const open = $("tab-helpers").classList.contains("active");   // open: the network is searched too (off it, nothing)
+  try { S.help.data = await api("/api/helpers" + (open ? "?look=1" : "")); } catch (e) { $("helpNote").textContent = e.message; return; }
   if (!open) helpStrips();                // off the tab only its strips and the run card's line show
   else if (!S.help.typing) helpDraw();    // not while speeds are being typed: a redraw would empty the boxes
   clearTimeout(S.help.timer);           // every 3 s while one works, else every 15 s on the tab and 30 s off it

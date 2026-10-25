@@ -51,7 +51,7 @@ DEFAULTS = {
     "FAMILY_DOP_TRIGGER3": "", "FAMILY_DOP_CLASS3": "", "FAMILY_DOP_TRIGGER4": "", "FAMILY_DOP_CLASS4": "",
     "COMPILE_BLOCKS": "Auto", "SAVE_STATE": True,
     "FAMILY_SUBJECTS": "1 subject", "FAMILY_PEOPLE_MODE": "Off - a normal LoRA", "FAMILY_SUBJECT_FIX": False,
-    "FAMILY_MP_MANUAL": False, "FAMILY_SUBJECT_KIND": "From its captions", "FAMILY_SUBJECT_KIND2": "From its captions",
+    "FAMILY_MP_MANUAL": False, "FAMILY_MP_FACECROPS_FIRST": True, "FAMILY_SUBJECT_KIND": "From its captions", "FAMILY_SUBJECT_KIND2": "From its captions",
     "FAMILY_SUBJECT_KIND3": "From its captions", "FAMILY_SUBJECT_KIND4": "From its captions",
     "SAVE_STATE_ON_TRAIN_END": True, "KEEP_LAST_N_STATES": "2", "KREA2_LOSS_WATCH": False,
     "KREA2_PER_IMAGE_LR": False, "KREA2_AUTO_RECAPTION": False, "CAPTION_TRIGGER_WORD": "", "KREA2_WARMUP_LOOK": False,
@@ -66,7 +66,7 @@ DEFAULTS = {
     "FAMILY_FT_ROTATIONS": "10", "FAMILY_FT_SAVE_EVERY": "1", "FAMILY_FT_ROTATE_EVERY": "1",
     "FAMILY_FT_FUSED": True, "FAMILY_FT_REG_DIR": "", "FAMILY_FT_REG_MULT": "0.2",
     "DATASET_MEGAPIXELS": "0.25", "DATASET_CAPTION_EXT": ".txt", "ENABLE_BUCKET": True, "BUCKET_NO_UPSCALE": True,
-    "ENABLE_CACHE": True,
+    "ENABLE_CACHE": True, "MASKED_TRAINING": False, "MASK_FLOOR": "0.1 (recommended)",
     "METADATA_TITLE": "", "METADATA_AUTHOR": "", "METADATA_DESCRIPTION": "", "METADATA_LICENSE": "",
     "METADATA_TAGS": "", "METADATA_TRIGGER_PHRASE": "", "METADATA_THUMBNAIL": "",
     "SAMPLE_ENABLED": True, "SAMPLE_PROMPT": "A high quality photo", "SAMPLE_SEED": "1234",
@@ -193,6 +193,7 @@ PEOPLE_HINT = ("Off: your subject's face can leak onto other people, even in pro
                "each subject, e.g. zwxemwoman.")
 VIDEO = "https://youtu.be/8uW5NdL5b20"          # the Subjects card video: setting up Fizgig LoRA Isolation
 GUIDE = "https://github.com/shootthesound/Fizgig/blob/master/docs/MULTI_PERSON.md"     # the multi-person captioning guide (docs/MULTI_PERSON.md)
+GUIDE_MASKS = "https://github.com/shootthesound/Fizgig/blob/master/docs/MASKED_TRAINING.md"   # making and using masks
 from fizgig.families.multi_person import KINDS as SUBJECT_KINDS  # noqa: E402
 KIND_HINT = ("What each subject is decides what Fizgig adds to its training.\n"
              "From its captions: Fizgig decides - a person if the captions say woman, man, girl or boy, otherwise an "
@@ -344,9 +345,7 @@ def form(desc):
            _row("FAMILY_SUBJECT_KIND3", "Subject 3 is", "choice", choices=SUBJECT_KINDS, default=SUBJECT_KINDS[0]),
            _row("FAMILY_CONCEPT_DIR4", "Subject 4", "folder", upload=True, start="data"),
            _row("FAMILY_SUBJECT_KIND4", "Subject 4 is", "choice", choices=SUBJECT_KINDS, default=SUBJECT_KINDS[0]),
-           _row("FAMILY_CONCEPT_BALANCE", "Balance the subjects (optional)", "check", "Repeats the smaller folders "
-                "so each subject gets about as many steps an epoch as the largest. Epochs get longer by the repeats.")]
-          if desc.multi_concept else []),
+           ] if desc.multi_concept else []),
         _row("FAMILY_PEOPLE_MODE", "Your subject and other people", "radio", PEOPLE_HINT, PEOPLE_MODES,
              default=PEOPLE_MODES[0], hint_labels=True,           # one line per choice, its name in bold
              sets={PEOPLE_MODES[0]: {"FAMILY_DOP": False, "FAMILY_MULTI_PERSON": False},
@@ -356,9 +355,17 @@ def form(desc):
              "No joining or guessing: Fizgig trains on your captions as they are. Write each subject's joined word "
              "(zwxemwoman) into the captions yourself. The side-by-side pictures and the training recipe stay on.",
              link={"href": GUIDE + "#captioning-it-yourself", "text": "How to caption for this"}),
+        _row("FAMILY_MP_FACECROPS_FIRST", "Side-by-side pictures: face crops first", "check",
+             "The 16 pictures of your subject beside a stranger use Image Prep's face crops (FaceCrop_ files) "
+             "first, then photos where a face is found. Untick to pick from every photo, e.g. for more body "
+             "shape. A face crop is never cropped further; other photos are framed on the face, never zoomed."),
         _row("FAMILY_SUBJECT_FIX", "Correct a trigger word, or what a subject is", "check",
              "Fizgig reads each subject's trigger word, and what they are, from their captions. Tick this only if "
              "the line under a subject shows the wrong word."),
+        # beside the card's other ticks (the tiles flow together): Use my captions, face crops first, Correct a trigger
+        *([_row("FAMILY_CONCEPT_BALANCE", "Balance the subjects (optional)", "check", "Repeats the smaller folders "
+                "so each subject gets about as many steps an epoch as the largest. Epochs get longer by the repeats.")]
+          if desc.multi_concept else []),
         *[r for n in (1, 2, 3, 4) for r in (
             _row("FAMILY_DOP_TRIGGER" + ("" if n == 1 else str(n)), f"Subject {n} - trigger word",
                  hint="The word your captions use for this subject, e.g. zwxem.\n"
@@ -382,6 +389,19 @@ def form(desc):
              "FAMILY_TRAINING_ADAPTER")
     params = [r for r in params if not (r and r["key"] in TILES)] + [r for r in params if r and r["key"] in TILES]
     add("params", "Training Parameters", "training", params)
+    if desc.masked_training:
+        add("masks", "Masked training", "training", [
+            _row("MASKED_TRAINING", "Train on the parts your masks show", "check",
+                 "For pictures where only part of the frame matters - the person, not the room around them.\n\n"
+                 "Save a black-and-white mask beside a picture, named after it with -masklabel added: photo.jpg -> "
+                 "photo-masklabel.png. White is trained fully, grey partly, black only as much as the setting "
+                 "below. The picture itself still trains whole.\n\n"
+                 "Pictures without a mask train as normal. Masks made in OneTrainer work as they are.",
+                 link={"href": GUIDE_MASKS, "text": "How to make masks"}),
+            _row("MASK_FLOOR", "How much outside the mask counts", "choice",
+                 "0.1 keeps a little of the background, so the LoRA still knows your subject sits in a scene. "
+                 "0 ignores it completely - then a very small mask trains hard on a few spots.", launch.MASK_FLOORS),
+        ])
     add("subjects", "Subjects", "training", subjects,
         help={"href": VIDEO, "text": "How to set up Fizgig LoRA Isolation",
               "sub": "A step-by-step video of this card · Watch on YouTube"})
@@ -778,6 +798,18 @@ def state(desc, values, image_folder="", captioner="", speed_file=False, checkpo
     if not captioner:
         hidden |= {"KREA2_AUTO_RECAPTION", "CAPTION_TRIGGER_WORD"}
     kind = _kind(desc, values)
+    if desc.masked_training:
+        prompt_slider = kind == "slider" and launch.slider_on(desc, {"FAMILY_SLIDER": True, "FAMILY_SLIDER_SOURCE": (
+            "prompts" if values.get("FAMILY_SLIDER_SOURCE") == "Prompts" else "pairs")}, "prompts")
+        media = launch.dataset_media(image_folder) if image_folder else {"photo"}
+        if prompt_slider or (media and "photo" not in media):
+            hidden.add("masks")             # a prompt slider makes its own pictures; a folder of clips has none to mask
+        elif not values.get("MASKED_TRAINING"):
+            hidden.add("MASK_FLOOR")
+        else:
+            note = _mask_note(desc, values, image_folder)
+            if note:
+                notes["MASKED_TRAINING"] = note
     lokr = str(values.get("NETWORK_TYPE", "")).startswith("LoKR") and kind not in ("slider", "finetune")
     hidden |= {"NETWORK_DIM", "NETWORK_ALPHA"} if lokr else {"LOKR_FACTOR"}
     if lokr:
@@ -868,7 +900,7 @@ def state(desc, values, image_folder="", captioner="", speed_file=False, checkpo
     if not dop:
         hidden.add("FAMILY_SUBJECT_FIX")
     if not (kind == "standard" and values.get("FAMILY_MULTI_PERSON")):
-        hidden.add("FAMILY_MP_MANUAL")
+        hidden |= {"FAMILY_MP_MANUAL", "FAMILY_MP_FACECROPS_FIRST"}
         hidden |= set(KIND_ROWS)            # what a subject is only changes the group-picture recipe
     if not (dop and values.get("FAMILY_SUBJECT_FIX")):
         hidden |= {"FAMILY_DOP_TRIGGER", "FAMILY_DOP_CLASS"} | DOP_EXTRA_ROWS
@@ -1040,7 +1072,8 @@ def _extras_found(desc, values, image_folder):
     try:
         found, orphans, misnamed = launch.edit_extras(image_folder, xdir,
                                                       test_photo=str(values.get("FAMILY_EDIT_REF") or ""))
-        total = sum(1 for f in os.listdir(image_folder) if os.path.splitext(f)[1].lower() in launch.PAIR_EXTS)
+        total = sum(1 for f in os.listdir(image_folder) if os.path.splitext(f)[1].lower() in launch.PAIR_EXTS
+                    and not launch.is_mask_file(f))
     except OSError:
         return ""
     counts = sorted(len(v) for v in found.values())
@@ -1075,6 +1108,26 @@ def _timestep_note(values):
 _lr_counts = {}                     # folder -> (modified time, pictures)
 
 
+def _mask_note(desc, values, image_folder):
+    """The line under Masked training: how many pictures have a mask, and any mask that won't be used."""
+    rep = launch.mask_report(desc, {**values, "image_folder": image_folder,
+                                    "extra_folders": [values.get(d) for d, _t, _c in CONCEPT_ROWS[:concept_count(values) - 1]]
+                                    if values.get("FAMILY_MULTICONCEPT") and _kind(desc, values) not in ("edit", "slider")
+                                    else []})
+    if not rep["total"]:
+        return ""
+    if not rep["with"] and not rep["bad"]:
+        line = ("No masks found in the training folder yet. Save one beside a picture as photo-masklabel.png "
+                "(for photo.jpg). Start won't run with this ticked and no masks.")
+    else:
+        line = f"Masks found for {rep['with']} of {rep['total']} pictures. The rest train as normal."
+    if rep["bad"]:
+        shown = rep["bad"][:5]
+        line += (f"\n\n{len(rep['bad'])} mask(s) won't be used, so their pictures train without one:\n"
+                 + "\n".join(shown) + (f"\n... and {len(rep['bad']) - 5} more" if len(rep["bad"]) > 5 else ""))
+    return line
+
+
 def _picture_count(image_folder):
     """The pictures in a training folder, cached until the folder changes; None when it can't be read."""
     try:
@@ -1086,7 +1139,8 @@ def _picture_count(image_folder):
         from fizgig.dataset.image_dataset import IMAGE_EXTENSIONS
         exts = {e.lower() for e in IMAGE_EXTENSIONS}
         try:
-            n = sum(1 for e in os.scandir(image_folder) if e.is_file() and os.path.splitext(e.name)[1].lower() in exts)
+            n = sum(1 for e in os.scandir(image_folder) if e.is_file() and os.path.splitext(e.name)[1].lower() in exts
+                    and not launch.is_mask_file(e.name))
         except OSError:
             n = 0
         hit = _lr_counts[image_folder] = (mt, n)
@@ -1161,6 +1215,7 @@ def inputs(desc, values, *, models, python, repo_dir, image_folder, cache_root, 
         FAMILY_TRAINING_ADAPTER=b("FAMILY_TRAINING_ADAPTER"),
         FAMILY_TURBO_STRENGTH=s("FAMILY_TURBO_STRENGTH"), FAMILY_TURBO_STEPS=s("FAMILY_TURBO_STEPS"),
         FAMILY_TURBO_PACE=s("FAMILY_TURBO_PACE"), FAMILY_PREVIEW_LOOK=b("FAMILY_PREVIEW_LOOK"),
+        MASKED_TRAINING=b("MASKED_TRAINING") and desc.masked_training, MASK_FLOOR=s("MASK_FLOOR"),
         python=python, repo_dir=repo_dir, models=models, image_folder=image_folder,
         caption_ext=s("DATASET_CAPTION_EXT") or ".txt", batch_size=1, megapixels=s("DATASET_MEGAPIXELS"),
         clip_megapixels=s("CLIP_MEGAPIXELS") if "clip" in desc.media else "",

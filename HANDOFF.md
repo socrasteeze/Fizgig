@@ -1,9 +1,10 @@
 # HANDOFF
 
-**Updated:** 2026-10-22 · **Branch:** master · **Upstream:** 70757c5f (v8.9.3) · **Delivery target:** fork/master
+**Updated:** 2026-10-24 · **Branch:** master · **Upstream:** 416fa635 (v8.9.6) · **Delivery target:** fork/master
 
 ## State
-Merged 16 upstream commits from 29abb42a through 70757c5f into master (merge a5c7857f), then capped the helpers' raw-body routes (6bafc99f). Upstream is contained in HEAD. Not pushed: fork/master is at dd087af1.
+Merged 32 upstream commits from adac6d8f through 416fa635 (v8.9.5-v8.9.6: masked training and Make masks, Auto plan checkpointing from 40 GB, MiniMax H3 cache scan, small-card simulator, Network tab switch #236) into master. One conflict, `server.py` serve(): kept the fork's `OSError` guard around `_lan_announce` inside upstream's `lan.enabled()` gate. New dependency: `ai-edge-litert` (Make masks); not installed in the venv. Not pushed. Checks after: pytest 1 failed (test_page, same four ids as before) / 230 passed; unittest 100 run, same single failure.
+Before that: Merged 16 upstream commits from 29abb42a through 70757c5f into master (merge a5c7857f), then capped the helpers' raw-body routes (6bafc99f). Upstream is contained in HEAD. Not pushed: fork/master is at dd087af1.
 Tests ran before and after (pytest from a temp `--target` folder; the venv has no pytest). pytest: 2 failed / 201 passed before (test_page and a WinError 10053 flake), 1 failed / 214 passed after. unittest: 98 run, 1 failure before; 100 run, 1 failure after. The only lasting failure is `test_page` (see Open 1), same four ids.
 
 ## Done this session

@@ -984,7 +984,7 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                  resume_state_dir=None, adaptive_lr=False, adaptive_lr_min=1e-4, adaptive_lr_max=2e-4,
                  max_grad_norm=1.0, ema_decay=0.0, optimizer_type="adamw", optimizer_args="",
                  lr_scheduler="constant", lr_warmup_steps=0, lr_scheduler_num_cycles=1, lr_scheduler_power=1.0,
-                 gradient_accumulation_steps=1, compile_blocks="auto", gradient_checkpointing=True, blocks_to_swap=0, network_type="lora", lokr_factor=8,
+                 gradient_accumulation_steps=1, compile_blocks="auto", gradient_checkpointing="auto", blocks_to_swap=0, network_type="lora", lokr_factor=8,
                  log_per_image_loss=False, per_image_lr=False, auto_recaption=False, warmup_look_outliers=False,
                  trigger_word=None, trigger_position="start", recaption_instruction=None,
                  recaption_instruction_detailed=None, captioner=None,
@@ -993,7 +993,7 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                  ft_epochs_done=0, ft_fused_backward=False, reg_lr_multiplier=0.2, preview_checkpoint=None,
                  preview_checkpoint_cache="auto", preview_int8=False, family_options=None,
                  dop=False, dop_trigger=None, dop_class="", dop_weight=1.0, dop_every=1, dop_ft_samples=8,
-                 lr_boost=None, share_worker=None):
+                 lr_boost=None, share_worker=None, masked_training=False, mask_floor=0.1):
     desc = get_family(family)
     if desc is None or not desc.training_ready:
         raise RuntimeError(f"unknown or untrainable family {family!r}")
@@ -1103,10 +1103,32 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
         user_config = load_user_config(dataset_config)
         blueprint = BlueprintGenerator(ConfigSanitizer()).generate(user_config, argparse.Namespace(),
                                                                    architecture=arch)
+        if masked_training:
+            if not desc.masked_training:
+                raise RuntimeError(f"{desc.display_name} has no masked training - drop --masked_training")
+            from fizgig.dataset.image_dataset import ImageDataset
+            ImageDataset.loss_masks = True      # each still with a photo-masklabel.png gets its mask (dataset/masks.py)
         group = generate_dataset_group_by_blueprint(blueprint.dataset_group, training=True,
                                                     num_timestep_buckets=None, shared_epoch=shared_epoch)
     if group.num_train_items == 0:
         raise RuntimeError("No training items - run the cache stages (families/cache.py) first.")
+    masked_images = 0
+    if masked_training and slider_prompts:
+        logger.info("[masks] a prompt-pair slider trains on pictures it makes itself: masked training is off")
+        masked_training = False
+    elif masked_training:
+        masked_images = len({str(getattr(it, "mask_path", "")) for ds in group.datasets
+                             for b in ds.batch_manager.buckets.values() for it in b if getattr(it, "mask_path", None)})
+        logger.info(f"[masks] masked training: {masked_images} picture(s) with a mask, outside the mask counts "
+                    f"x{float(mask_floor):g}")
+
+    def _loss_mask(batch):
+        """The step's per-cell loss weights (masked training), or None: a picture without a mask trains as normal."""
+        m = batch.get("loss_mask") if masked_training else None
+        if m is None:
+            return None
+        from fizgig.dataset.masks import mask_weight
+        return mask_weight(m.to(device).float(), mask_floor)
     if slider_pairs:
         shared = _pair_slider_caption(user_config)
         if shared:                           # the dial is shown on what both ends of a pair have in common
@@ -1178,6 +1200,14 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
         else:
             precision, blocks_to_swap, why = quant.plan(desc, driver, precision, blocks_to_swap, megapixels=mp)
             why += f" at {mp:.2f} MP"
+            if share_worker is not None:
+                # a helper's share trains at the lead's precision (the same base numbers): say so plainly, before the
+                # model loads, when this card can't hold it even with the most blocks swapped (the lead trains on)
+                short = quant.share_shortfall(desc, driver, precision, blocks_to_swap, mp)
+                if short:
+                    raise SystemExit(f"[share] This GPU can't train the lead's {desc.precision_labels.get(precision, precision)} "
+                                     f"base: {short}. The lead trains every image itself. To share with this GPU, "
+                                     "train on the lead with a smaller base (Auto, int8 or 4-bit).")
         logger.info(f"[precision] Auto plan: {precision}, block swap {blocks_to_swap} ({why}); asked {req}")
 
     # ---- torch.compile (Krea 2's rule), decided here on the empty card as the original does - the free VRAM its
@@ -1204,6 +1234,32 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
             logger.info(f"[precision] Auto: {desc.precision_labels.get(alt, alt)} instead of {precision} - this run "
                         "is not compiled, and uncompiled that is the faster base for this file")
             precision = alt
+
+    # ---- gradient checkpointing: "auto" goes without it when the measured figure fits the empty card (LoRA only -
+    # LoKR without checkpointing measured 3-16 GB over a LoRA at 1 MP, Qwen edit pairs ~26 GB; fine-tunes, sliders, edit pairs and
+    # the mid-run captioner carry memory the figures don't cover)
+    gc_off_blocks = 0
+    if gradient_checkpointing == "auto":
+        paired = any(d.get("control_directory") for d in user_config.get("datasets", []))
+        if (quant.card_gb() < quant.NOGC_MIN_CARD_GB or finetune or slider or paired or auto_recaption
+                or str(network_type).lower() != "lora"
+                or gradient_accumulation_steps > 1):
+            gradient_checkpointing = True
+        else:
+            kind, mp_ck = driver.nogc_load(group)
+            gradient_checkpointing, why = quant.plan_checkpointing(
+                desc, precision, max(0, blocks_to_swap) if precision != "nf4" else 0, mp_ck, compiled=bool(do_compile),
+                kind=kind, rank=int(network_dim))
+            logger.info(f"[checkpointing] gradient checkpointing {why}")
+            if gradient_checkpointing:
+                gc_off_blocks, why = quant.plan_partial_checkpointing(
+                    desc, precision, max(0, blocks_to_swap) if precision != "nf4" else 0, mp_ck,
+                    compiled=bool(do_compile), kind=kind, rank=int(network_dim))
+                if gc_off_blocks:
+                    logger.info(f"[checkpointing] gradient checkpointing {why}")
+                    if do_compile:          # the partial figures are compiled with the checkpoint outside the graph
+                        do_compile = "outside"
+    gradient_checkpointing = bool(gradient_checkpointing)
 
     # ---- previews: encode prompts once, keep the VAE ---------------------------------------------
     encoded = neg = vae = ref_imgs = ref_latents = None
@@ -1332,6 +1388,7 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
     dit, swapped = quant.load_base(driver, dit_path, device, precision, blocks_to_swap)
     if gradient_checkpointing:
         driver.enable_gradient_checkpointing(dit, True)
+        dit.gc_off_blocks = gc_off_blocks       # the compiled blocks / H3's loop leave the last ones un-checkpointed
     net = FamilyLoRA(dit, driver, device=device)
     driver.prepare_training(dit, group, net)
     if training_adapter:
@@ -1662,6 +1719,9 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                 md.update({"ss_slider_diff_weight": f"{float(slider_diff_weight):g}"})
         if train_blocks:
             md.update({"ss_train_blocks": ",".join(train_blocks)})
+        if masked_training:
+            md.update({"ss_masked_training": "True", "ss_mask_floor": f"{float(mask_floor):g}",
+                       "ss_masked_images": str(masked_images)})
         md.update(driver.run_metadata())
         return md
 
@@ -2120,6 +2180,7 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
     _share_keys = sorted({str(it.item_key) for ds in getattr(group, "datasets", [])
                           for b in getattr(getattr(ds, "batch_manager", None), "buckets", {}).values() for it in b})
     share_skip = [0]
+    share_off_said = [False]
     catching = [False]       # training a round's images the helper didn't bring back (counted once already)
 
     def _epoch_batches(epoch):
@@ -2162,7 +2223,10 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
             progress.refresh()
 
     def _share_ok():
-        return not (slider or ftr is not None or dop_cond) and watch.watch is None and optimizer is not None
+        # gradient_checkpointing off (or partly): a big card planned this run without it, and a helper trains with it - the halves
+        # would differ, so no share (set a helper to share before the run starts and it keeps checkpointing)
+        return (not (slider or ftr is not None or dop_cond) and watch.watch is None and optimizer is not None
+                and gradient_checkpointing and not gc_off_blocks)
 
     def _worker_epochs():
         """--share_worker: each epoch the lead hands over (its job file: the start LoRA, the share, the LR), in turn;
@@ -2238,6 +2302,12 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
             if share_now[0] is not None and epoch + 1 > share_now[0]["last"]:
                 share_now[0] = None
             _hs = _helper_share(output_dir, output_name) if share_now[0] is None and _share_ok() else None
+            if ((not gradient_checkpointing or gc_off_blocks) and not share_off_said[0] and share_now[0] is None
+                    and _helper_share(output_dir, output_name)):
+                share_off_said[0] = True
+                logger.info("[share] a helper is ready to share, but this run trains without (all of) gradient checkpointing "
+                            "(a big card's plan) and a helper trains with it - the halves would differ, so this GPU "
+                            "trains every image. Set the helper to share before starting a run and both keep it on.")
             if _hs:                  # a helper trains its share of this round's epochs, from the same start
                 # the round: up to `every` epochs, ending early at any epoch that previews or saves (so the pictures
                 # and files hold both halves), at a pause, and at the run's end
@@ -2340,13 +2410,15 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                         raise RuntimeError("[slider] this item has no pair image - an image-pair slider needs one in "
                                            "the second folder for every training image, matched by file name")
                     _neg = _neg.to(device)
+                    _lm = _loss_mask(batch)
                     _l = 0.0
                     try:
                         for m, a, b in ((1.0, latents, _neg), (-1.0, _neg, latents)):
                             net.set_trainable_multiplier(m)
                             _pl, _info = driver.training_loss(dit, a, cond, gen, min_t=min_timestep,
                                                               max_t=max_timestep, diff_ref=b,
-                                                              diff_weight=slider_diff_weight)
+                                                              diff_weight=slider_diff_weight,
+                                                              **({"loss_mask": _lm} if _lm is not None else {}))
                             (0.5 * _pl).backward()
                             _l += 0.5 * _pl.item()
                     finally:
@@ -2362,8 +2434,10 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                 # per-step routing (a family's step_frozen_blocks): those blocks' trainable weights sit out this
                 # step's forward and backward, so the backward stops at the first trained block and they get no grad
                 _frozen_now = _step_freeze(driver.step_frozen_blocks(batch))
+                _lm = _loss_mask(batch)
                 loss, _info = driver.training_loss(dit, latents, cond, gen, min_t=min_timestep, max_t=max_timestep,
-                                                   **({"refs": refs} if refs else {}))
+                                                   **({"refs": refs} if refs else {}),
+                                                   **({"loss_mask": _lm} if _lm is not None else {}))
                 if "lr_mult" in _info and lr_acc:
                     lr_acc[-1] *= _info["lr_mult"]     # where the step landed (the H3 noise-band LR)
                 if pending == 0 and optimizer is not None:
@@ -2649,6 +2723,8 @@ def setup_parser():
                    help="step each weight as its gradient lands and free it (less VRAM; no clipping or accumulation)")
     p.add_argument("--reg_lr_multiplier", type=float, default=0.2,
                    help="fine-tune: LR multiplier for images in a dataset block marked is_reg = true")
+    p.add_argument("--gradient_checkpointing", default="auto", choices=("auto", "on"),
+                   help="auto: off for a compiled LoRA run with no block swap when the measured peak fits free VRAM")
     p.add_argument("--compile_blocks", default="auto", choices=("auto", "on", "outside", "off"),
                    help="torch.compile the DiT blocks (families with compiles=True); auto weighs warm-up vs run length")
     p.add_argument("--ema_decay", type=lambda v: v if str(v).lower().startswith("short") else float(v), default=0.0,
@@ -2674,6 +2750,11 @@ def setup_parser():
                    help="experimental: items whose name contains PATTERN train at MULT x the LR on their step")
     p.add_argument("--dop_ft_samples", type=int, default=8,
                    help="DOP on a fine-tune: the original model's predictions made per image before the first step")
+    p.add_argument("--masked_training", action="store_true",
+                   help="weight each picture's loss by its mask (photo-masklabel.png beside photo.png): white counts "
+                        "fully, grey partly, black at --mask_floor; pictures without a mask train as normal")
+    p.add_argument("--mask_floor", type=float, default=0.1,
+                   help="masked training: how much outside the mask counts (0 = nothing, 1 = as much as inside)")
     return p
 
 
@@ -2726,6 +2807,7 @@ def main():
         lr_scheduler=a.lr_scheduler, lr_warmup_steps=a.lr_warmup_steps,
         lr_scheduler_num_cycles=a.lr_scheduler_num_cycles, lr_scheduler_power=a.lr_scheduler_power,
         gradient_accumulation_steps=a.gradient_accumulation_steps, compile_blocks=a.compile_blocks,
+        gradient_checkpointing=True if a.gradient_checkpointing == "on" else "auto",
         finetune=a.finetune, ft_rotations=a.ft_rotations, ft_save_every_rotations=a.ft_save_every_rotations,
         ft_rotate_every=a.ft_rotate_every, ft_max_parts=a.ft_max_parts, ft_start_window=a.ft_start_window, ft_epochs_done=a.ft_epochs_done,
         ft_fused_backward=a.ft_fused_backward, reg_lr_multiplier=a.reg_lr_multiplier,
@@ -2735,7 +2817,7 @@ def main():
         dop=a.dop, dop_trigger=a.dop_trigger, dop_class=a.dop_class, dop_weight=a.dop_weight, dop_every=a.dop_every,
         dop_ft_samples=a.dop_ft_samples,
         lr_boost=[(x.split("=", 1)[0], float(x.split("=", 1)[1])) for x in a.lr_boost if "=" in x] or None,
-        share_worker=a.share_worker)
+        share_worker=a.share_worker, masked_training=a.masked_training, mask_floor=a.mask_floor)
 
 
 if __name__ == "__main__":

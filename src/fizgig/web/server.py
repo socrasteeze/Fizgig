@@ -31,6 +31,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+from fizgig.dataset.masks import is_mask_file, mask_for_stem
 from fizgig.families import form, launch
 from fizgig.families.registry import get as get_family, training_families
 from fizgig.web import captions, history
@@ -241,7 +242,7 @@ def _write_json(path, data):
 # the desktop's DEFAULT_PREFS that aren't empty: a web-only install starts where the desktop app would
 PREF_DEFAULTS = {"lora_output_dir": "output_loras", "profiles_dir": "user_data/profiles", "cache_dir": "user_data/cache",
                  "runpod_stop_when_done": "0", "inference_blocks_to_swap": "Auto (detect from GPU)",
-                 "inference_int8": "1"}
+                 "inference_int8": "1", "lan_discovery": "1", "update_check": "1"}
 
 
 LAST_USED_FILE = user_data.LAST_USED_FILE           # the training folder, each folder's trigger word
@@ -303,7 +304,7 @@ def set_folder_trigger(folder, word):
 
 # the Preferences settings Reset to defaults puts back (the model files are never reset)
 SETTING_PREFS = ("lora_output_dir", "profiles_dir", "cache_dir", "input_lora_dir", "input_ref_dir",
-                 "inference_blocks_to_swap", "inference_int8")
+                 "inference_blocks_to_swap", "inference_int8", "lan_discovery", "update_check")
 
 
 def load_prefs() -> dict:
@@ -378,7 +379,7 @@ def write_all_captions(text, folder, ext, overwrite=False):
     if not os.path.isdir(folder):
         raise ValueError("Set the training folder on the Start tab first.")
     photos = sorted(f for f in os.listdir(folder) if os.path.splitext(f)[1].lower() in
-                    (".png", ".jpg", ".jpeg", ".webp", ".bmp"))
+                    (".png", ".jpg", ".jpeg", ".webp", ".bmp") and not is_mask_file(f))
     if not photos:
         raise ValueError(f"No photos in {folder}.")
     if not ext.startswith("."):
@@ -901,6 +902,8 @@ def _plan(family_key, values, image_folder, resume="", ft_continue=None, models=
         inference_int8=str(prefs.get("inference_int8", "")).strip() in ("1", "True", "true"),
         captioner=captioner if captioner and os.path.isfile(captioner) else "",
         caption_overrides=dict(raw_ovr) if isinstance(raw_ovr, dict) else {})
+    # a helper set to train a share: both halves keep gradient checkpointing, so they train with the same options
+    inputs["keep_checkpointing"] = any(h.get("share") for h in (prefs.get("helpers") or []))
     if ft_continue:          # a paused fine-tune: from its checkpoint, for the rotations left (the cache is built)
         inputs.update(FAMILY_FT_CONTINUE=ft_continue["continue"], FAMILY_FT_ROTATIONS=str(ft_continue["rotations"]),
                       resuming=True)
@@ -1857,6 +1860,9 @@ def remove_from_dataset(folder, name, ext):
             names.append(stem + cext)
     if fext.lower() in _AUDIO:
         names += [f for f in os.listdir(folder) if os.path.splitext(f)[0] == stem and os.path.splitext(f)[1].lower() in _IMAGES]
+    mask = mask_for_stem(folder, stem)                # masked training: a picture's mask goes with it
+    if mask:
+        names.append(os.path.basename(mask))
     dest = os.path.join(folder, REMOVED_DIR)
     os.makedirs(dest, exist_ok=True)
     moved = []
@@ -2069,7 +2075,7 @@ def list_datasets() -> dict:
                     waves.append(e.path)
                 continue
             kind = "pic" if ext in _PIC else "clip" if ext == ".mp4" else "song" if ext in _SONG else ""
-            if not kind:
+            if not kind or is_mask_file(e.name):          # photo-masklabel.png: photo.png's mask, not a picture
                 continue
             pics += kind == "pic"
             clips += kind == "clip"
@@ -2612,7 +2618,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 if path == "/api/helpers":
                     helpers.ensure_lead()
-                    return self.json(helpers.listing())
+                    return self.json(helpers.listing(look=g("look") == "1"))
                 if path == "/api/helper/info":
                     return self.json(helpers.info())
                 if path == "/api/helper/checkpoint_sha":   # a computer that brought a checkpoint home checks it
@@ -2835,6 +2841,16 @@ class Handler(BaseHTTPRequestHandler):
             return self.json({"modes": list(_prep.MODES), "megapixels": _prep.MEGAPIXELS,
                               "faces": _prep.FACE_TARGETS, "face_tools": prep_jobs.faces_available(),
                               "face_settings": prep_jobs.face_settings()})
+        if path == "/api/masks/info":              # Image Prep's Make masks card: what's there for this folder
+            from fizgig.dataset import automask
+            folder = (qs.get("folder") or [""])[0]
+            pics = automask.pictures(folder) if folder and os.path.isdir(folder) else []
+            have = sum(1 for p in pics if mask_for_stem(folder, os.path.splitext(os.path.basename(p))[0]))
+            return self.json({"kinds": automask.KINDS, "available": automask.available(),
+                              "model_here": os.path.isfile(automask.model_path(user_data.MODELS_DIR)),
+                              "model_mb": automask.MODEL_MB, "pictures": len(pics), "with_mask": have,
+                              "baselines": bool(prep_jobs.look_baselines(folder)) if folder else False,
+                              "faces": prep_jobs.faces_available()})
         if path == "/api/prep/summary":            # the What will happen card
             from fizgig.dataset import prep as _prep
             g = lambda k, d="": (qs.get(k) or [d])[0]
@@ -3148,9 +3164,10 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             return self.json({"items": []})
         keep = _caption_media_filter(names, family)
+        lower = {n.lower(): n for n in names}
         for n in names:
             stem, e = os.path.splitext(n)
-            if e.lower() not in MEDIA or not keep(n):
+            if e.lower() not in MEDIA or not keep(n) or is_mask_file(n):
                 continue
             cap = os.path.join(folder, stem + ext)
             try:
@@ -3158,7 +3175,9 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 text = None
             p = os.path.join(folder, n)
-            out.append((n, p, {"caption": text, "size": _media_size(p)}))
+            mask = mask_for_stem(folder, stem, lower)        # masked training: the picture's mask, shown on its row
+            out.append((n, p, {"caption": text, "size": _media_size(p),
+                               **({"mask": os.path.basename(mask)} if mask else {})}))
         return self.json({"items": pair_songs(out)})
 
     # -- POST
@@ -3677,6 +3696,9 @@ class Handler(BaseHTTPRequestHandler):
                                                                   if k in SETTING_PREFS}}
                 if "inference_int8" in ch:
                     ch["inference_int8"] = "1" if ch["inference_int8"] in (True, "1", 1) else "0"
+                for k in ("lan_discovery", "update_check"):
+                    if k in ch:
+                        ch[k] = "1" if ch[k] in (True, "1", 1) else "0"
                 upd = {k: str(v) for k, v in ch.items() if k in allowed}
                 if "cuda_device" in ch:
                     v = str(ch["cuda_device"] or "").strip()
@@ -3693,6 +3715,12 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError("The port must be between 1024 and 65535.")
                     upd["web_port"] = str(port)
                 update_prefs(upd)
+                if "lan_discovery" in upd:              # Preferences > Network: answering other computers, now
+                    from fizgig.web import lan
+                    if upd["lan_discovery"] == "0":
+                        lan.stop()
+                    elif _LAN_PORT[0]:
+                        _lan_announce(_LAN_PORT[0])
                 return self.json({"ok": True})
             if path == "/api/state":
                 one = b.get("model_values")
@@ -3816,7 +3844,7 @@ class Handler(BaseHTTPRequestHandler):
                         str(b.get("dir") or ""), str(b.get("dataset") or ""), b.get("baselines") or [])})
                 except ValueError as e:
                     return self.json({"error": str(e)}, 400)
-            if path in ("/api/prep/run", "/api/look/scan", "/api/look/move"):
+            if path in ("/api/prep/run", "/api/look/scan", "/api/look/move", "/api/masks/make"):
                 folder = str(b.get("folder") or "")
                 norm = lambda p: os.path.normcase(os.path.abspath(p or "."))
                 with _lock:
@@ -3832,6 +3860,9 @@ class Handler(BaseHTTPRequestHandler):
                                                          b.get("padding") or 20, bool(b.get("replace"))))
                     if path == "/api/look/scan":
                         return self.json(prep_jobs.look_scan(folder, b.get("baselines") or []))
+                    if path == "/api/masks/make":
+                        return self.json(prep_jobs.start_masks(folder, str(b.get("kind") or ""),
+                                                               bool(b.get("subject_only")), bool(b.get("overwrite"))))
                     return self.json(prep_jobs.look_move(folder, b.get("paths") or [],
                                                          captions.caption_ext(b.get("ext"))))
                 except ValueError as e:
@@ -4233,6 +4264,9 @@ def _follow_parent(pid):
             os._exit(0)
 
 
+_LAN_PORT = [0]          # the port other computers are told, when this Fizgig can be found at all (a password, not local)
+
+
 def _lan_announce(port):
     """What this Fizgig tells another computer's Pods tab: its name, GPU, port, build and whether it's training."""
     from fizgig.web import lan
@@ -4288,11 +4322,14 @@ def run_server(host, port=None, password=None, password_arg=False, open_browser=
     __import__("fizgig.web.helpers", fromlist=["x"]).local_restore()  # this computer's other GPU, as a helper
     if os.environ.get("FIZGIG_PARENT_PID"):          # this is that second Fizgig: it goes when the first does
         threading.Thread(target=_follow_first, daemon=True).start()
-    __import__("fizgig.web.update_check", fromlist=["x"]).start()   # a newer release? (the About button says)
+    if str(load_prefs().get("update_check", "1")) != "0":     # Preferences > Network: Check for new releases
+        __import__("fizgig.web.update_check", fromlist=["x"]).start()   # a newer release? (the About button says)
     threading.Thread(target=_poll_stats_loop, daemon=True).start()
     if password and not on_pod() and host not in ("127.0.0.1", "localhost", "::1"):
+        _LAN_PORT[0] = port                    # Preferences > Network can switch the answering on and off
         try:
-            _lan_announce(port)                # other computers' Pods tabs find this one by themselves
+            if __import__("fizgig.web.lan", fromlist=["x"]).enabled(load_prefs()):
+                _lan_announce(port)            # other computers' Pods tabs find this one by themselves
         except OSError as e:                   # an unreadable prefs.json: no lasting id to announce
             logger.warning(str(e))
     shown = "localhost" if host in ("127.0.0.1", "::1") else host

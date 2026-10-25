@@ -30,6 +30,8 @@ import threading
 import time
 import urllib.parse
 
+from fizgig.dataset.masks import folder_masks, is_mask_file
+
 logger = logging.getLogger("fizgig.web.helpers")
 
 PIECE = 8 << 20                                     # bytes per put (a 300 MB LoRA = 38 pieces)
@@ -582,8 +584,9 @@ def _check(h, mine):
             "training": i.get("training")}
 
 
-def listing():
-    """The Helpers tab: each helper with its state and jobs, computers it could add, pods this one could help."""
+def listing(look=False):
+    """The Helpers tab: each helper with its state and jobs, computers it could add, pods this one could help. `look`:
+    the tab is open, so the network is searched for Fizgigs to add."""
     rows = []
     for h in _helpers():
         lv = _live.get(h["id"]) or {"state": "away"}
@@ -636,7 +639,7 @@ def listing():
                                                                     "Getting ready for the share"))
             if i.get("activity"):
                 row["activity"] = i["activity"]
-    found = _found()                     # first: it refreshes what's on the network, which the help list reads
+    found = _found(look)                 # first: it refreshes what's on the network, which the help list reads
     out = _pods_to_help()
     for o in out:
         o.update(link=_link_line(_link(o.get("url"))), link_mbps=_link_mbps(_link(o.get("url"))),
@@ -729,16 +732,19 @@ def _account_rows(key):
     return _acct["rows"] if _acct["key"] == key else None
 
 
-def _found():
-    """The Fizgigs that could be added: on this network (as the Pods tab finds them, asked at most every 10 s), the
-    pods running on your RunPod account (else the Pods tab's saved ones), and the Pods tab's saved addresses out on
-    the internet (a Vast.ai instance), leaving out the helpers already added."""
+def _found(look=False):
+    """The Fizgigs that could be added: on this network (as the Pods tab finds them, asked at most every 10 s and only
+    while the Helpers tab is open - `look` - so a page in the background sends nothing), the pods running on your
+    RunPod account (else the Pods tab's saved ones), and the Pods tab's saved addresses out on the internet (a Vast.ai
+    instance), leaving out the helpers already added."""
     mine = {_norm(h["url"]) for h in _helpers()}
     out = []
     seen = lambda u: _norm(u) in mine or _norm(u) in {_norm(x["url"]) for x in out}
     try:
         from fizgig.web import lan
-        if time.time() - _lan_seen["at"] > 10:
+        if not lan.enabled(_srv().load_prefs()):
+            _lan_seen.update(rows=[], at=0.0)
+        elif look and time.time() - _lan_seen["at"] > 10:
             _lan_seen.update(rows=lan.discover(0.6), at=time.time())
         out += [{"name": f.get("name"), "url": f.get("url"), "where": "lan",
                  "gpu": str(f.get("gpu") or "").replace("NVIDIA GeForce ", ""), "vram": f.get("vram_gb")}
@@ -1843,7 +1849,8 @@ HELPER_SHARE, SHARE_DIR = ".helper_share.json", ".helper_share"     # fizgig.fam
 HELPER_SHARE_WAIT = ".helper_share_wait.json"
 _DROP = ("--sample", "--speed_lora", "--preview", "--save_state", "--keep_last", "--ema", "--adaptive", "--metadata",
          "--log_per_image", "--per_image", "--auto_recaption", "--warmup_look", "--trigger", "--recaption",
-         "--captioner", "--resume", "--text_encoder", "--save_every", "--save_until", "--share_worker")
+         "--captioner", "--resume", "--text_encoder", "--save_every", "--save_until", "--share_worker",
+         "--gradient_checkpointing")
 _sw = {}               # tag -> {proc, dir, log}: this computer's share workers
 
 
@@ -2047,6 +2054,20 @@ def _share_cache_files(setup, prep):
             if os.path.isfile(p):
                 t = os.path.join(prep["trim"], str(i), os.path.basename(p)) if prep.get("trim") else ""
                 out.append((i, t if t and os.path.isfile(t) else p))
+        if "--masked_training" in (setup.get("args") or []) and d and os.path.isdir(d):
+            # masked training: the pictures' masks go with the cache (the helper has no training folder)
+            # (only those this computer uses, so both halves train the same pictures masked)
+            from PIL import Image
+            from fizgig.dataset.masks import mask_problem
+            from fizgig.utils.upright import upright_size
+            for pic, m in sorted(folder_masks(d, _media_exts()).items()):
+                try:
+                    with Image.open(os.path.join(d, pic)) as im:
+                        ok = not mask_problem(m, upright_size(im), os.path.join(d, pic))
+                except Exception:
+                    ok = False
+                if ok:
+                    out.append((f"k{i}", m))
     return out
 
 
@@ -2074,7 +2095,7 @@ def _unbundle(tag):
         with tarfile.open(bp) as tf:
             for m in tf.getmembers():
                 i, _, base = m.name.partition("/")
-                if not (m.isfile() and re.fullmatch(r"m?\d+", i) and base and os.path.basename(base) == base
+                if not (m.isfile() and re.fullmatch(r"[mk]?\d+", i) and base and os.path.basename(base) == base
                         and not base.startswith(".")):
                     continue
                 with tf.extractfile(m) as src, open(_dir("files", f"sh{tag}-{i}-{base}"), "wb") as dst:
@@ -2375,6 +2396,9 @@ def _share_start(body):
             take(i, os.path.join(d, f"cache{i}"), _untrim)
             ds["cache_directory"] = os.path.join(d, f"cache{i}").replace("\\", "/")
             ds["image_directory"] = os.path.join(d, "no_images").replace("\\", "/")
+            if glob.glob(_dir("files", f"sh{tag}-k{i}-*")):        # masked training: the masks came with the cache
+                take(f"k{i}", os.path.join(d, f"masks{i}"))
+                ds["mask_directory"] = os.path.join(d, f"masks{i}").replace("\\", "/")
     jobs = os.path.join(d, "jobs")
     shutil.rmtree(jobs, ignore_errors=True)
     os.makedirs(jobs)
@@ -2412,7 +2436,7 @@ def _share_start(body):
         args += ["--blocks_to_swap", "-1"]
     if setup.get("precision") and "--precision" not in args:
         args += ["--precision", setup["precision"]]
-    args += ["--share_worker", jobs]
+    args += ["--gradient_checkpointing", "on", "--share_worker", jobs]   # as the lead trains when it shares
     env = os.environ.copy()
     env.update(PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1", PYTHONPATH=os.path.join(s.BASE_DIR, "src"))
     log = open(os.path.join(d, "worker.log"), "w", encoding="utf-8")
@@ -2612,7 +2636,8 @@ def _setup_guess(out_dir, run, setup, link):
         p = _prep.get(_share_tag(out_dir, run, setup)) or {}
         folder = (p.get("bundles") or {}).get("folder")
         mb = os.path.getsize(folder) / 1e6 if folder and os.path.isfile(folder) else 0
-        n = sum(1 for _i, f in _share_folder_files(setup) if not f.lower().endswith(".txt")) if mb else 0
+        n = sum(1 for _i, f in _share_folder_files(setup) if not f.lower().endswith(".txt")
+                and not is_mask_file(f)) if mb else 0
         if not (mb and n and link.get("up")):
             return ""
         send = mb / link["up"]

@@ -18,6 +18,7 @@ FAMILY_EDIT, ...) plus the values the app reads from its other tabs, all lower c
     recache                     unless its picture size changed (Target Megapixels): then they run, and keep what fits
     loss_watch                  {"detect", "per_image_lr", "warmup", "recaption": bool}
     captioner, caption_trigger, caption_overrides   auto-recaption: model path, trigger word, edited instructions
+    keep_checkpointing          a helper is set to train a share: gradient checkpointing stays on (both halves match)
     samples                     {"enabled", "every", "width", "height", "steps", "cfg", "negative", "seed",
                                  "at_first": ..., "prompts": [lines as typed on the Samples tab]}
     samples_dir                 where preview prompt files go (the output folder's sample/)
@@ -41,6 +42,8 @@ import os
 import re
 from dataclasses import dataclass, field
 from fizgig.utils.upright import upright_size
+
+from fizgig.dataset.masks import is_mask_file
 
 PRECISION_LABELS = {"auto": "Auto (fits your free VRAM)", "bf16": "bf16 (full precision)",
                     "int8": "INT8 (8-bit, fastest)", "nf4": "4-bit NF4 (smallest)",
@@ -263,7 +266,7 @@ def uncached_pictures(toml_text):
         te = {"_".join(f[:-len(".safetensors")].split("_")[:-2]) for f in names if f.endswith("_te.safetensors")}
         lat = {"_".join(f.split("_")[:-2]) for f in names
                if f.endswith(".safetensors") and not f.endswith("_te.safetensors")}
-        n += sum(1 for f in os.listdir(img) if os.path.splitext(f)[1].lower() in exts
+        n += sum(1 for f in os.listdir(img) if os.path.splitext(f)[1].lower() in exts and not is_mask_file(f)
                  and (os.path.splitext(f)[0] not in lat or os.path.splitext(f)[0] not in te))
     return n
 
@@ -296,11 +299,12 @@ def pairs(after_dir, before_dir, exts=PAIR_EXTS, limit=1):
     two folders, matched the way the dataset loader matches them: a partner of photo.png is photo.<ext> or
     photo_<anything>.<ext>, ignoring case. exts: what counts as an item (a clip family's sliders add .mp4). limit:
     partners a photo may have (a multi-reference edit: the family's edit_references)."""
-    befores = sorted(f for f in os.listdir(before_dir) if os.path.splitext(f)[1].lower() in exts)
+    befores = sorted(f for f in os.listdir(before_dir) if os.path.splitext(f)[1].lower() in exts
+                     and not is_mask_file(f))
     missing, multiple, first = [], [], None
     for f in sorted(os.listdir(after_dir)):
         b, e = os.path.splitext(f)
-        if e.lower() not in exts:
+        if e.lower() not in exts or is_mask_file(f):
             continue
         m = [x for x in befores if x.casefold().startswith(b.casefold() + ".")    # IMG_1 pairs with img_1
              or x.casefold().startswith(b.casefold() + "_")]
@@ -316,11 +320,12 @@ def pair_problems(after_dir, before_dir, caption_ext=".txt", exts=PAIR_EXTS):
     """(photos in after_dir without a caption, pairs whose shapes differ - photos only; a clip pair's size and
     length are checked when it is cached)."""
     from PIL import Image
-    befores = sorted(f for f in os.listdir(before_dir) if os.path.splitext(f)[1].lower() in exts)
+    befores = sorted(f for f in os.listdir(before_dir) if os.path.splitext(f)[1].lower() in exts
+                     and not is_mask_file(f))
     uncaptioned, shapes = [], []
     for f in sorted(os.listdir(after_dir)):
         b, e = os.path.splitext(f)
-        if e.lower() not in exts:
+        if e.lower() not in exts or is_mask_file(f):
             continue
         if not os.path.exists(os.path.join(after_dir, b + caption_ext)):
             uncaptioned.append(f)
@@ -482,7 +487,7 @@ def _media_count(folder):
     from fizgig.dataset.image_dataset import AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
     exts = {e.lower() for e in (*IMAGE_EXTENSIONS, *VIDEO_EXTENSIONS, *AUDIO_EXTENSIONS)}
     try:
-        return sum(1 for n in os.listdir(folder) if os.path.splitext(n)[1].lower() in exts)
+        return sum(1 for n in os.listdir(folder) if os.path.splitext(n)[1].lower() in exts and not is_mask_file(n))
     except OSError:
         return 0
 
@@ -505,6 +510,8 @@ def dataset_media(folder):
     img, vid, aud = ({e.lower() for e in x} for x in (IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, AUDIO_EXTENSIONS))
     for n in names:
         ext = os.path.splitext(n)[1].lower()
+        if is_mask_file(n):
+            continue
         kinds |= {"photo"} if ext in img else {"clip"} if ext in vid else {"voice"} if ext in aud else set()
     return kinds
 
@@ -656,6 +663,8 @@ def train_command(desc, inputs, plan):
         cmd += ["--context_lora_path", ctx,
                 "--context_lora_strength", _s(st.get("CONTEXT_LORA_STRENGTH") or "1.0") or "1.0"]
     mp_subs = [x[1] for x in multi_person_subjects(desc, st) if x[1]] if multi_person_on(desc, st) else []
+    if masked_on(desc, st):
+        cmd += ["--masked_training", "--mask_floor", f"{mask_floor(st):g}"]
     if dop_on(desc, st) or mp_subs:
         trig, cls = dop_rules(st)
         if mp_subs:          # the captions are read fused: DOP swaps "zwxemwoman" for "a woman"
@@ -684,6 +693,8 @@ def train_command(desc, inputs, plan):
         cb = str(st.get("COMPILE_BLOCKS", "auto") or "auto").lower()
         if cb in ("auto", "on", "off", "outside"):
             cmd += ["--compile_blocks", cb]
+    if st.get("keep_checkpointing"):
+        cmd += ["--gradient_checkpointing", "on"]
     try:
         if int(float(str(st.get("GRADIENT_ACCUMULATION", "") or 1))) > 1:
             cmd += ["--gradient_accumulation_steps", str(int(float(st["GRADIENT_ACCUMULATION"])))]
@@ -1110,6 +1121,36 @@ def dop_on(desc, st):
     return bool(st.get("FAMILY_DOP")) and desc.subject_isolation and not (slider_on(desc, st) or edit_on(desc, st))
 
 
+MASK_FLOORS = ("0 - not at all", "0.05", "0.1 (recommended)", "0.2", "0.3", "0.5")
+
+
+def masked_on(desc, st):
+    """Masked training (fizgig/dataset/masks.py): the tick on, a family whose driver takes masks, a run that trains on
+    pictures (a prompt slider makes its own)."""
+    return bool(st.get("MASKED_TRAINING")) and desc.masked_training and not slider_on(desc, st, "prompts")
+
+
+def mask_floor(st):
+    """How much outside a mask counts, from the Training tab's choice (0.1 unless it reads as a number 0-1)."""
+    try:
+        v = float(str(st.get("MASK_FLOOR") or "0.1").split()[0])
+    except ValueError:
+        return 0.1
+    return min(1.0, max(0.0, v))
+
+
+def mask_folders(desc, st):
+    """The folders whose pictures train (and so whose masks count): the training folder and Multi Concept's others."""
+    extra = [_s(f) for f in (st.get("extra_folders") or []) if _s(f)] if desc.multi_concept else []
+    return [f for f in [_s(st.get("image_folder"))] + extra if f]
+
+
+def mask_report(desc, st):
+    from fizgig.dataset.image_dataset import IMAGE_EXTENSIONS
+    from fizgig.dataset.masks import folder_report
+    return folder_report(mask_folders(desc, st), IMAGE_EXTENSIONS)
+
+
 def multi_person_on(desc, st):
     """Fizgig LoRA Isolation (multi-person mode, families/multi_person.py): a standard LoRA run with the tick on, on a
     family that offers it."""
@@ -1236,6 +1277,10 @@ def start_problems(desc, inputs):
     out += checks.training_folder(_s(v.get("image_folder")), _s(v.get("caption_ext", ".txt")),
                                   check_captions=not slider_on(desc, inputs, "prompts"), media_exts=exts)
     out += clip_problems(desc, _s(v.get("image_folder")))
+    if masked_on(desc, v) and not mask_report(desc, v)["with"]:
+        out.append("Masked training is on, but no picture in the training folder has a mask it can use. Save each "
+                   "mask beside its picture with -masklabel added to the name (photo.jpg -> photo-masklabel.png: "
+                   "white = train, black = mostly ignore), or untick Masked training.")
     return out
 
 
@@ -1302,6 +1347,8 @@ def plan(desc, inputs):
     if people:                          # the side-by-side pictures: people only (an animal or a style has none)
         cmd = [inputs["python"], os.path.join(inputs["repo_dir"], "src", "fizgig", "scripts", "multi_person.py"),
                "--ext", _s(inputs.get("caption_ext")) or ".txt"]
+        if not inputs.get("FAMILY_MP_FACECROPS_FIRST", True):
+            cmd.append("--no_face_first")
         for f, s, w in people:
             cmd += ["--subject", f, s["fused"], w]
         p.stages.append(Stage("Multi-person composites", cmd))
