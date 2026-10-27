@@ -612,6 +612,11 @@ input[type="checkbox"], input[type="radio"] {
   background: var(--accent-hover);
   border-color: var(--accent-hover);
 }
+/* Per-image loss (the run card and Runs & outputs): lilac, the loss watch's colour */
+.btn-lilac { background: var(--lilac); border-color: var(--lilac); color: var(--bg-deep); }
+.btn-lilac:hover { filter: brightness(1.08); border-color: var(--lilac); }
+.btn-lilac.is-off { opacity: .4; cursor: help; filter: none; }   /* greyed: its hover says which ticks turn it on */
+
 .btn-warning {
   background: var(--warning);
   border-color: var(--warning);
@@ -1345,6 +1350,9 @@ body { font-size: 13.5px; background: var(--bg-deep); }
 .side-queue-held { font-size: 11.5px; color: var(--warning); }
 .side-queue-held:empty { display: none; }
 .side-queue .btn { align-self: flex-start; }
+.side-queue-open { font-size: 11.5px; color: var(--accent); }
+.side-queue-empty { font-size: 12px; color: var(--text-secondary); }
+.side-run .side-queue-title { align-self: flex-start; }
 .run-upnext { font-size: 12.5px; color: var(--text-secondary); margin: 4px 0 8px; display: flex; flex-wrap: wrap;
   align-items: center; gap: 6px 10px; }
 .run-upnext.held { color: var(--warning); }
@@ -1567,6 +1575,7 @@ input[type="radio"] { accent-color: var(--accent); width: 16px; height: 16px; ma
 .dataset-meta .ok { color: #6EE7B7; }
 .dataset-meta .warn { color: #FCD34D; }
 .dataset-when { color: var(--text-muted); }
+.dataset-subs { color: var(--text-secondary); }
 @media (max-width: 760px) { .dataset-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; } }
 .dataset-more { grid-column: 1 / -1; justify-self: center; }
 
@@ -2044,6 +2053,13 @@ input[type="radio"] { accent-color: var(--accent); width: 16px; height: 16px; ma
 
 /* a pod's auto-stop countdown, over every tab */
 .pod-stop-bar { position: sticky; top: 0; z-index: 20; }
+/* editing a queued run: fixed to the bottom of the window, on every tab, until Save to queue or Cancel edit */
+.queue-edit-bar { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 40;
+  width: min(900px, calc(100vw - 32px)); display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 12px 16px; border-radius: 10px; background: var(--bg-surface); border: 1px solid var(--accent);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, .45); color: var(--text-primary); font-size: 13px; }
+.queue-edit-bar #queueEditText { flex: 1 1 300px; }
+.queue-edit-actions { display: flex; gap: 8px; margin-left: auto; }
 .pod-stop-bar .btn { margin-left: 12px; }
 
 /* ACE: one song player under the two waveform pictures (the desktop's) */
@@ -2312,3 +2328,42 @@ a.pick-pill-vast:hover { border-color: var(--success); }
 .mask-step { margin: 18px 0 6px; color: var(--text-primary); font-weight: 600; font-size: 10.5pt; }
 #maskMethod { margin-bottom: 4px; }
 .mask-sam-state { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 10px 0 2px; }
+
+/* the masks card's Edit masks: a picture at a time with its mask, painted on a canvas */
+.mask-edit { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 12px; }
+/* its heading: a bar that reads as something to open */
+.mask-edit > summary { list-style: none; cursor: pointer; display: flex; flex-wrap: wrap; align-items: baseline;
+  gap: 4px 12px; padding: 12px 16px 12px 40px; position: relative; border: 1px solid var(--border);
+  border-left: 4px solid var(--accent); border-radius: var(--radius-sm); background: var(--bg-raised); }
+.mask-edit > summary::-webkit-details-marker { display: none; }
+.mask-edit > summary::before { content: "▶"; position: absolute; left: 16px; top: 13px; color: var(--accent);
+  font-size: 10pt; }
+.mask-edit[open] > summary::before { content: "▼"; }
+.mask-edit > summary:hover { background: var(--bg-hover); }
+.mask-edit[open] > summary { margin-bottom: 8px; }
+.me-sum-title { font-weight: 600; color: var(--text-primary); font-size: 11pt; }
+.me-sum-sub { color: var(--text-secondary); font-size: 9.5pt; }
+.me-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 8px 0; }
+.me-count { min-width: 64px; text-align: center; color: var(--text-secondary); font-size: 9.5pt; }
+.me-name { color: var(--text-muted); font-size: 9pt; overflow-wrap: anywhere; }
+.me-slider { display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 9pt; }
+.me-slider input[type="range"] { width: 110px; }
+.me-stage { position: relative; width: 100%; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  overflow: hidden; background: var(--bg-inset); }
+.me-busy { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); display: flex; align-items: center;
+  gap: 8px; padding: 6px 12px; border-radius: 999px; background: rgba(10, 14, 20, .85); border: 1px solid var(--border);
+  color: var(--text-primary); font-size: 9.5pt; pointer-events: none; }
+.me-spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--border); border-top-color: var(--accent);
+  animation: me-spin .8s linear infinite; }
+@keyframes me-spin { to { transform: rotate(360deg); } }
+/* the start-up cover: over the page until boot() has built it; the login box sits above it */
+.boot-cover { position: fixed; inset: 0; z-index: 1500; background: var(--bg-deep); display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 14px; color: var(--text-secondary); font-size: 11pt; }
+.boot-cover.done { display: none; }
+.boot-spin { width: 28px; height: 28px; border-width: 3px; }
+.me-stage canvas { display: block; width: 100%; touch-action: none; cursor: none; }
+
+.me-saved { font-size: 9.5pt; font-weight: 600; }
+.me-saved[data-state="unsaved"] { color: var(--warning); }
+.me-saved[data-state="saved"] { color: var(--success); }
+.me-saved[data-state="none"] { color: var(--text-muted); font-weight: 400; }

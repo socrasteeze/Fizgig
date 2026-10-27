@@ -54,7 +54,8 @@ DEFAULTS = {
     "FAMILY_MP_MANUAL": False, "FAMILY_MP_FACECROPS_FIRST": True, "FAMILY_SUBJECT_KIND": "From its captions", "FAMILY_SUBJECT_KIND2": "From its captions",
     "FAMILY_SUBJECT_KIND3": "From its captions", "FAMILY_SUBJECT_KIND4": "From its captions",
     "SAVE_STATE_ON_TRAIN_END": True, "KEEP_LAST_N_STATES": "2", "KREA2_LOSS_WATCH": False,
-    "KREA2_PER_IMAGE_LR": False, "KREA2_AUTO_RECAPTION": False, "CAPTION_TRIGGER_WORD": "", "KREA2_WARMUP_LOOK": False,
+    "KREA2_PER_IMAGE_LR": False, "KREA2_AUTO_RECAPTION": False, "TRAIN_SUBFOLDERS": False, "CAPTION_TRIGGER_WORD": "",
+    "RECAPTION_FIRST": "Training caption (viewpoint-aware)", "RECAPTION_SECOND": "Exhaustive detail", "KREA2_WARMUP_LOOK": False,
     "FAMILY_PRECISION": launch.PRECISION_LABELS["auto"], "FAMILY_EMA": "0.98 (recommended)",
     "FAMILY_TRAINING_ADAPTER": True, "FAMILY_KIND": "standard", "FAMILY_FAST_ID": False,
     "FAMILY_MULTICONCEPT": False, "FAMILY_CONCEPT_DIR": "", "FAMILY_CONCEPT_COUNT": "2 subjects",
@@ -83,6 +84,15 @@ TRAINING_OPEN = ("output", "params")         # the Training tab's cards open whe
 def _row(key, label, kind="entry", hint="", choices=(), default=None, **extra):
     return {"key": key, "label": label, "kind": kind, "hint": hint, "choices": list(choices),
             "default": DEFAULTS.get(key, "") if default is None else default, **extra}
+
+
+def _recaption_choices():
+    from fizgig.krea2.caption_text import RECAPTION_CHOICES      # text only: no torch to load
+    return RECAPTION_CHOICES
+
+
+def _recaption_key(label, default):
+    return next((k for k, lab in _recaption_choices() if lab == label), default)
 
 
 def _optimizers():
@@ -247,6 +257,7 @@ def form(desc):
              "note"),
         _row("FAMILY_KIND", "Kind of training", "radio", choices=[label for _, label in ks], default=ks[0][1],
              sets={label: kind_sets(desc, k) for k, label in ks if kind_sets(desc, k)}) if len(ks) > 1 else None,
+        _row("TRAIN_SUBFOLDERS", "Also train on its sub-folders", "check", SUBFOLDERS_HINT, default=False),
         _row("LEARNING_RATE", "Learning Rate", default=DEFAULTS["LEARNING_RATE"]),
     ]
     if desc.adaptive_lr:
@@ -322,6 +333,14 @@ def form(desc):
                  "epochs)", "check", "A stuck image gets a new caption written from what is in it, and a fresh start; "
                  "a second try goes into more detail. Still stuck after that, it is left out of training - edit its "
                  "caption to bring it back. Needs the Krea 2 text encoder set in Preferences."),
+            _row("RECAPTION_FIRST", "First try uses", "choice",
+                 "The Captions tab's instruction for that task, as you've edited it there. The defaults are written "
+                 "for a person (viewpoint, whether the face shows): for a style or a concept, set both tries to suit "
+                 "your LoRA, e.g. Style, or Custom with your own instruction.",
+                 [label for _key, label in _recaption_choices()]),
+            _row("RECAPTION_SECOND", "Second try uses", "choice",
+                 "Used when the first new caption didn't help. Set separately from the first try.",
+                 [label for _key, label in _recaption_choices()]),
             _row("CAPTION_TRIGGER_WORD", "Trigger word", hint="Used by Auto-recaption (below): it adds this word at the "
                  "end of a new caption. The training folder's word, the same as the Captions tab's."),
         ]
@@ -394,7 +413,9 @@ def form(desc):
     # the on/off tiles together at the bottom of the card, under every plain box (Adaptive LR stays beside its Min/Max)
     TILES = ("KREA2_LOSS_WATCH", "KREA2_PER_IMAGE_LR", "KREA2_WARMUP_LOOK", "KREA2_AUTO_RECAPTION", "FAMILY_FAST_ID",
              "FAMILY_TRAINING_ADAPTER")
-    params = [r for r in params if not (r and r["key"] in TILES)] + [r for r in params if r and r["key"] in TILES]
+    UNDER = ("RECAPTION_FIRST", "RECAPTION_SECOND")      # Auto-recaption's pickers, straight under the tiles
+    params = ([r for r in params if not (r and r["key"] in TILES + UNDER)] + [r for r in params if r and r["key"] in TILES]
+              + [r for r in params if r and r["key"] in UNDER])
     add("params", "Training Parameters", "training", params)
     if desc.masked_training:
         add("masks", "Masked training", "training", [
@@ -546,10 +567,11 @@ def form(desc):
              [labels[p] for p in precisions], default=labels["auto"]) if len(desc.precisions) > 1 else None,
         _row("COMPILE_BLOCKS", "Compile Blocks", "choice", desc.compile_hint, ["Auto", "On", "Off"])
         if desc.compiles else None,
-        _row("RESUME_TRAINING", "Resume Training", "folder", "Empty for a normal run. A state folder "
-             "(myLora-000012-state) continues that run, with its optimizer, learning rate and seed as they were. To "
-             "train a finished LoRA further, pick its last state and raise Max Train Epochs first, or it ends at once. "
-             "Pause and Resume fill this in for you."),
+        _row("RESUME_TRAINING", "Resume Training", "folder", "Empty for a normal run. The easy way to carry "
+             "a run on is Continue on Runs & outputs: from its newest save, with its own settings (a run that trained "
+             "all its epochs asks how far to go). Here, a state folder (myLora-000012-state) continues that run with "
+             "the settings on this tab, so keep them as the run had them - its Optimizer Type especially - and raise "
+             "Max Train Epochs to train a finished LoRA further, or it ends at once."),
         _row("SAVE_STATE", "Save state at each checkpoint", "check"),
         _row("SAVE_STATE_ON_TRAIN_END", "Save state at the end of training", "check"),
         _row("KEEP_LAST_N_STATES", "Keep last N states", hint="States are big (a LoRA plus its optimizer)."),
@@ -798,6 +820,62 @@ def _kind(desc, values):
     return next((k for k, lab in kinds(desc) if lab == label or k == label), "standard")
 
 
+SUBFOLDERS_HINT = ("Off: only the pictures directly in the training folder are used.\nOn: the pictures in its "
+                   "sub-folders are trained on too, at any depth, each sub-folder as its own set with its own captions "
+                   "and cache, so a big dataset can stay organised. Every picture trains once an epoch, wherever it "
+                   "is. Image Prep and Captions work on one folder at a time: to caption or mask a sub-folder, choose "
+                   "it as the training folder on the Start tab.")
+
+
+def subfolders_note(desc, values, image_folder):
+    """(the tick's line, its Show all folders / Hide the folders button or None): what it will train and which
+    folders still need captions (on), or what it is leaving out (off)."""
+    if not image_folder or not os.path.isdir(image_folder):
+        return "", None
+    # the form's values name the kind of training (a label), not FAMILY_FT: a fine-tune's regularisation folder
+    reg = _str(values.get("FAMILY_FT_REG_DIR")) if desc.finetune and _kind(desc, values) == "finetune" else ""
+    subs = launch.subfolders(image_folder, (_str(values.get("LORA_OUTPUT_DIR")), reg))
+    if not subs:
+        return ("This training folder has no sub-folders with pictures." if values.get("TRAIN_SUBFOLDERS") else ""), None
+    ext = _str(values.get("DATASET_CAPTION_EXT")) or ".txt"
+    counts = [(rel, launch._media_count(f), _uncaptioned(f, ext)) for rel, f in subs]
+    more = sum(n for _r, n, _u in counts)
+    if not values.get("TRAIN_SUBFOLDERS"):
+        return (f"{len(subs)} sub-folder{'s' if len(subs) != 1 else ''} with {more:,} more picture"
+                f"{'s' if more != 1 else ''} {'is' if more == 1 else 'are'} not trained on. Tick this to include "
+                f"them."), None
+    own = launch._media_count(image_folder)
+    rows = ([("the training folder", own, _uncaptioned(image_folder, ext))] if own else []) + counts
+    line = f"Training on {len(rows)} folders, {own + more:,} pictures."
+    bare = [(rel, u) for rel, _n, u in rows if u]
+    if bare:      # Start refuses a run with uncaptioned pictures: these come first
+        line += (" Not captioned yet, so Start will refuse them: "
+                 + " · ".join(f"{rel} ({u:,})" for rel, u in bare[:8])
+                 + (f" · and {len(bare) - 8} more folders" if len(bare) > 8 else "") + ".")
+    show = bool(values.get("_SUBFOLDER_LIST"))
+    if show:
+        line += " All folders: " + " · ".join(f"{rel} {n:,}" for rel, n, _u in rows) + "."
+    return line, {"label": "Hide the folders" if show else "Show all folders", "values": {"_SUBFOLDER_LIST": not show}}
+
+
+def _str(x):
+    return "" if x is None else str(x).strip()
+
+
+def _uncaptioned(folder, ext):
+    """Training items in a folder with no caption beside them."""
+    from fizgig.dataset.image_dataset import AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
+    from fizgig.dataset.masks import is_mask_file
+    exts = {e.lower() for e in (*IMAGE_EXTENSIONS, *VIDEO_EXTENSIONS, *AUDIO_EXTENSIONS)}
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return 0
+    caps = {os.path.splitext(n)[0] for n in names if n.lower().endswith(ext.lower())}
+    return sum(1 for n in names if os.path.splitext(n)[1].lower() in exts and not is_mask_file(n)
+               and os.path.splitext(n)[0] not in caps)
+
+
 def state(desc, values, image_folder="", captioner="", speed_file=False, checkpoint_file=False, base_file="",
           checkpoint_path="", look_file=False, look_fetch=("", None)):
     """What the current values hide, grey out or note (see the module docstring), and force: values the page sets
@@ -819,7 +897,17 @@ def state(desc, values, image_folder="", captioner="", speed_file=False, checkpo
             hidden.add("SAMPLE_STEPS")
     if not captioner:
         hidden |= {"KREA2_AUTO_RECAPTION", "CAPTION_TRIGGER_WORD"}
+    if not captioner or not values.get("KREA2_AUTO_RECAPTION"):
+        hidden |= {"RECAPTION_FIRST", "RECAPTION_SECOND"}
     kind = _kind(desc, values)
+    # Also train on its sub-folders: a plain LoRA or a fine-tune (Subjects 2-4, DOP and Isolation keep one folder per
+    # subject; an edit or a slider pairs files)
+    if kind in ("edit", "slider") or values.get("FAMILY_MULTICONCEPT") or values.get("FAMILY_DOP")             or values.get("FAMILY_MULTI_PERSON"):
+        hidden.add("TRAIN_SUBFOLDERS")
+    else:
+        notes["TRAIN_SUBFOLDERS"], act = subfolders_note(desc, values, image_folder)
+        if act:
+            actions["TRAIN_SUBFOLDERS"] = act
     if desc.masked_training:
         prompt_slider = kind == "slider" and launch.slider_on(desc, {"FAMILY_SLIDER": True, "FAMILY_SLIDER_SOURCE": (
             "prompts" if values.get("FAMILY_SLIDER_SOURCE") == "Prompts" else "pairs")}, "prompts")
@@ -995,7 +1083,8 @@ def state(desc, values, image_folder="", captioner="", speed_file=False, checkpo
         hidden |= {"TARGET_LAYERS", "TRAINING_BLOCKS", "NETWORK_TYPE", "LOKR_FACTOR"}   # a slider is always a LoRA
     if kind == "slider":         # the trainer turns these off for a slider: a slider step has two targets, not one
         hidden |= {"ADAPTIVE_LR", "ADAPTIVE_LR_MIN", "ADAPTIVE_LR_MAX", "FAMILY_EMA", "KREA2_LOSS_WATCH",
-                   "KREA2_PER_IMAGE_LR", "KREA2_WARMUP_LOOK", "KREA2_AUTO_RECAPTION", "CAPTION_TRIGGER_WORD"}
+                   "KREA2_PER_IMAGE_LR", "KREA2_WARMUP_LOOK", "KREA2_AUTO_RECAPTION", "CAPTION_TRIGGER_WORD",
+                   "RECAPTION_FIRST", "RECAPTION_SECOND"}
     if kind == "finetune":       # the model itself trains: no LoRA (rank, alpha), every noise level, its own continue
         hidden |= {"MIN_TIMESTEP", "MAX_TIMESTEP", "NETWORK_DIM", "NETWORK_ALPHA", "RESUME_TRAINING"}
     if str(values.get("TARGET_LAYERS") or "") != "Custom":   # the block picker is Model Area's Custom
@@ -1253,6 +1342,8 @@ def inputs(desc, values, *, models, python, repo_dir, image_folder, cache_root, 
                     "recaption": b("KREA2_AUTO_RECAPTION") and desc.loss_watch},
         captioner=captioner, caption_trigger=s("CAPTION_TRIGGER_WORD"),
         caption_overrides=caption_overrides,
+        recaption_tasks=(_recaption_key(s("RECAPTION_FIRST"), "training"),
+                         _recaption_key(s("RECAPTION_SECOND"), "exhaustive")),
         samples={"enabled": b("SAMPLE_ENABLED"), "every": s("SAMPLE_EVERY_N_EPOCHS"), "later": b("SAMPLE_LATER"),
                  "until": s("SAMPLE_UNTIL_EPOCH"), "after": s("SAMPLE_EVERY_AFTER"), "width": s("SAMPLE_WIDTH"),
                  "height": s("SAMPLE_HEIGHT"), "steps": s("SAMPLE_STEPS"), "cfg": s("SAMPLE_CFG_SCALE") or
@@ -1268,6 +1359,7 @@ def inputs(desc, values, *, models, python, repo_dir, image_folder, cache_root, 
         extra_folders=([s(d) for d, _t, _c in CONCEPT_ROWS[:concept_count(v) - 1]]
                        if b("FAMILY_MULTICONCEPT") and desc.multi_concept and kind not in ("edit", "slider") else []),
         concept_balance=b("FAMILY_CONCEPT_BALANCE"),
+        subfolders=b("TRAIN_SUBFOLDERS"),
         FAMILY_OPTIONS=_option_values(desc, v),
     )
     return d

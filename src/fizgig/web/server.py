@@ -953,6 +953,13 @@ def _plan(family_key, values, image_folder, resume="", ft_continue=None, models=
         inference_int8=str(prefs.get("inference_int8", "")).strip() in ("1", "True", "true"),
         captioner=captioner if captioner and os.path.isfile(captioner) else "",
         caption_overrides=dict(raw_ovr) if isinstance(raw_ovr, dict) else {})
+    # auto-recaption's trigger word per folder: a sub-folder's or another subject's own (the Captions tab's for it, else
+    # the word its captions open with), never the training folder's
+    trig = {f"{rel}/": subject_trigger(f, ext) for rel, f in launch.run_subfolders(desc, inputs)}
+    if inputs.get("multiconcept"):
+        trig.update({f"s{i}:": str(values.get(f"DOP_FOLDER_TRIGGER{i}") or "")
+                     for i, f in enumerate(inputs.get("extra_folders") or [], start=2) if f})
+    inputs["recaption_triggers"] = trig
     # a helper set to train a share: both halves keep gradient checkpointing, so they train with the same options
     inputs["keep_checkpointing"] = any(h.get("share") for h in (prefs.get("helpers") or []))
     if ft_continue:          # a paused fine-tune: from its checkpoint, for the rotations left (the cache is built)
@@ -1365,6 +1372,78 @@ def _restore_pause():
     webqueue.hold("The last run is paused. Resume it: the queue carries on after it finishes.", for_pause=True)
 
 
+def _continue_point(rec):
+    """Where Continue on a run's card carries on from: {kind "state" | "ft", path, done, of, key, unit} - a LoRA's
+    newest saved state (its epoch, of Max Train Epochs) or a fine-tune's newest checkpoint (its rotations, of Train
+    for) - or None when there's nothing to continue from (no save left, a run training or moved away)."""
+    if not rec or rec.get("source") != "web" or rec.get("result") in ("running", "moved"):
+        return None
+    desc = get_family(rec.get("family") or "")
+    values, name, out = rec.get("values") or {}, rec.get("lora") or "", rec.get("output_dir") or ""
+    if desc is None or not name or not out:
+        return None
+    if desc.finetune and form._kind(desc, values) == "finetune":
+        path = launch.latest_ft_checkpoint(out, name)
+        if not path:
+            return None
+        left, done, _c = launch.ft_rotations_left(path, values.get("FAMILY_FT_ROTATIONS"),
+                                                  values.get("FAMILY_FT_ROTATE_EVERY"))
+        return {"kind": "ft", "path": path, "done": done, "of": done + left, "key": "FAMILY_FT_ROTATIONS",
+                "unit": "rotation"}
+    path = launch.latest_state(out, name)
+    m = re.search(r"-(\d{6})-state$", path)
+    if not m:
+        return None
+    try:
+        of = int(str(values.get("MAX_TRAIN_EPOCHS") or "0").strip())
+    except ValueError:
+        of = 0
+    return {"kind": "state", "path": path, "done": int(m.group(1)), "of": of, "key": "MAX_TRAIN_EPOCHS",
+            "unit": "epoch"}
+
+
+def _continue_run(run_id, more="", queue_ok=True, values=None):
+    """Continue on Runs & outputs: the run trains on from its newest save, with its own settings and into its own
+    record. more: the epochs (a fine-tune: rotations) to train to, for a run that already trained all it was set to.
+    values: the settings to carry on with in place of the run's (a queued Continue edited on the queue). A run
+    training here now: it goes on the queue instead, and continues when its turn comes."""
+    rec = history.get(run_id)
+    pt = _continue_point(rec)
+    if pt is None:
+        return {"error": "Nothing to continue from: this run's saved state isn't there any more."}
+    values = {k: v for k, v in (values or rec.get("values") or {}).items() if not str(k).startswith("__")}
+    if str(more or "").strip():
+        try:
+            values[pt["key"]] = str(int(str(more).strip()))
+        except ValueError:
+            return {"error": f"Train to: a whole number of {pt['unit']}s, please."}
+    unit = pt["unit"] + "s"
+    if pt["kind"] == "ft":
+        left, done, cont = launch.ft_rotations_left(pt["path"], values.get("FAMILY_FT_ROTATIONS"),
+                                                    values.get("FAMILY_FT_ROTATE_EVERY"))
+        target = done + left
+    else:
+        done, target = pt["done"], int(str(values.get("MAX_TRAIN_EPOCHS") or "0").strip() or 0)
+    if done >= target:
+        return {"need": pt["key"], "done": done, "unit": pt["unit"],
+                "error": f"This run has trained all {target} {unit}. Choose how many {unit} to train to, then "
+                         f"Continue."}
+    with _lock:
+        busy = _run["proc"] is not None and _run["proc"].poll() is None or _run["state"] in ("starting", "running")
+    if busy:
+        if not queue_ok:
+            return {"error": "A run is already going. Stop or pause it first."}
+        webqueue.add(rec["family"], {**values, "__continue": run_id, "__more": str(more or "")},
+                     rec.get("image_folder") or "", rec.get("lora") or "", rec.get("output_dir") or "")
+        return {"ok": True, "queued": True}
+    note = f"=== Continuing {rec.get('lora')} from {os.path.basename(pt['path'])}: to {target} {unit} ==="
+    if pt["kind"] == "ft":
+        return _resumed(_start(rec["family"], values, rec.get("image_folder") or "", ft_continue={
+            "continue": cont, "rotations": left}, note=note, carry=run_id))
+    return _resumed(_start(rec["family"], values, rec.get("image_folder") or "", resume=pt["path"], note=note,
+                           carry=run_id))
+
+
 LOG_CLEAR = "\x00clear\n"      # in the log where a run starts: the page's console begins again from there
 
 
@@ -1431,7 +1510,19 @@ def _resumed(result):
     return result
 
 
-def _start(family_key, values, image_folder, resume="", ft_continue=None, note="", models=None, confirm=()):
+_claim = threading.Lock()                   # only one caller may check and plan a Start
+
+
+def _start(family_key, values, image_folder, resume="", ft_continue=None, note="", models=None, confirm=(), carry=""):
+    if not _claim.acquire(blocking=False):
+        return {"error": "A run is already going. Stop or pause it first."}
+    try:
+        return _start_one(family_key, values, image_folder, resume, ft_continue, note, models, carry, confirm)
+    finally:
+        _claim.release()
+
+
+def _start_one(family_key, values, image_folder, resume, ft_continue, note, models, carry, confirm):
     from fizgig.web import tools
     if tools.holding_gpu():                     # as Studio, Royale and RefMod: the run would run out of VRAM
         return {"error": "The Profiler is rendering on the GPU - wait for it, or Stop it, then start the run."}
@@ -1442,7 +1533,7 @@ def _start(family_key, values, image_folder, resume="", ft_continue=None, note="
         if _run["proc"] is not None and _run["proc"].poll() is None or _run["state"] in ("starting", "running"):
             return {"error": "A run is already going. Stop or pause it first."}
         prev = _run["state"]
-        _run["state"] = "starting"          # claimed in the same hold: a second Start (another tab, the queue) waits
+        _run["state"] = "starting"          # preserve the fork's claim/unclaim and warning paths
     if captions.status()["state"] in ("loading", "running", "translating"):
         return _unclaim(prev, {"error": "Captions are being made (Captions tab). Stop that first, then start the run."})
     try:
@@ -1493,7 +1584,7 @@ def _start(family_key, values, image_folder, resume="", ft_continue=None, note="
                     values=dict(values), image_folder=image_folder, pause=False, resume="", resume_mode="")
     save_state({"last_run": {"family": family_key, "values": values, "image_folder": image_folder}})
     hid = history.start("web", family_key, inputs["LORA_NAME"], out_dir, image_folder, dict(values),
-                        resume=bool(resume or ft_continue))
+                        resume=bool(resume or ft_continue), carry=carry)
     with _lock:
         _run["history_id"] = hid
     append_log(LOG_CLEAR)                    # this run's log on a clean console
@@ -1515,7 +1606,9 @@ def _queue_starter(item):
     if captions.status()["state"] in ("loading", "running", "translating"):
         return False, "wait: captions are being made - the next run starts when they finish"
     try:
-        r = _start(item["family"], item["values"], item.get("image_folder") or "")
+        cid = (item.get("values") or {}).get("__continue")
+        r = (_continue_run(cid, item["values"].get("__more") or "", queue_ok=False, values=item["values"]) if cid else
+             _start(item["family"], item["values"], item.get("image_folder") or ""))
     except Exception as e:
         return False, str(e)
     if r.get("ok"):
@@ -1597,6 +1690,8 @@ def _run_stages(stages, out_dir):
                 webqueue.on_run_ended("stopped", _run.get("lora"), _queue_starter)
                 return
             _run["stage"] = stage.name
+            if str((_run.get("progress") or {}).get("note") or "").startswith("Caching"):
+                _run["progress"] = None          # the last stage's cache count isn't this stage's
         append_log(f"\n▶ {stage.name}\n")
         try:
             proc = _popen(stage.cmd)
@@ -1617,7 +1712,11 @@ def _run_stages(stages, out_dir):
                 upd = None
             if upd:
                 with _lock:
-                    if upd.get("kind") == "preview":
+                    if upd.get("kind") == "cache":      # a cache stage's count: its own bar and line
+                        n, total = upd["n"], upd["total"]
+                        _run["progress"] = {**_progress_dict({}), "percent": 100.0 * n / total if total else 0.0,
+                                            "note": f"Caching {upd['what']}: {n} of {total}"}
+                    elif upd.get("kind") == "preview":
                         p = dict(_run.get("progress") or _progress_dict({}))
                         p["note"] = {"start": "Making previews…", "complete": ""}.get(upd.get("phase"), "")
                         _run["progress"] = p
@@ -2141,11 +2240,24 @@ def list_datasets() -> dict:
                 thumbs.append(e.path)
         if not elsewhere:
             _sweep_parts(path, entries)
-        if pics + clips + songs:
+        # its sub-folders' pictures: trained on only with the Training tab's Also train on its sub-folders
+        subs = launch.subfolders(path) if any(e.is_dir() and not e.name.startswith(".") for e in entries) else []
+        sub_items = sum(launch._media_count(f) for _r, f in subs)
+        if pics + clips + songs + sub_items:
             out.append({"name": name, "path": path, "pictures": pics, "clips": clips, "songs": songs,
-                        "captioned": captioned, "time": newest, "thumbs": thumbs or waves, "elsewhere": elsewhere})
+                        "captioned": captioned, "time": newest, "thumbs": thumbs or waves, "elsewhere": elsewhere,
+                        "sub_items": sub_items, "sub_folders": len(subs)})
     out.sort(key=lambda x: -x["time"])
     return {"root": root, "datasets": out[:300], "total": len(out)}
+
+
+def _upload_top(dest, single):
+    """The training folder an upload went into: its top folder when a file went into one of its sub-folders."""
+    if single:
+        return dest
+    root = uploads_root()
+    rel = os.path.relpath(dest, root)
+    return os.path.join(root, rel.split(os.sep)[0]) if not rel.startswith("..") else dest
 
 
 def _upload_target(folder, name, single):
@@ -2157,11 +2269,12 @@ def _upload_target(folder, name, single):
             raise ValueError(f"{name}: not a LoRA (.safetensors), face model (.onnx), picture, clip or song.")
         dest = UPLOAD_FILES
     else:
-        folder = _upload_name(folder, "Folder name")
+        # "name/sub/folder": a folder upload that keeps its sub-folders (Also train on its sub-folders)
+        folder = "/".join(_upload_name(p, "Folder name") for p in str(folder or "").split("/"))
         if ext not in UPLOAD_EXTS:
             raise ValueError(f"{name}: Fizgig doesn't train on {ext or 'this'} files. It takes pictures, .mp4 clips, "
                              f"songs (.wav .mp3 .flac .m4a), caption .txt files, .json song details and .zip files.")
-        dest = os.path.join(uploads_root(), folder)
+        dest = os.path.join(uploads_root(), *folder.split("/"))
     return name, ext, dest, os.path.join(dest, f".{name}.part")
 
 
@@ -2173,7 +2286,7 @@ def upload_status(folder, name, single, size, mtime=None):
     final = os.path.join(dest, name)
     same_time = mtime is not None and os.path.isfile(final) and abs(os.path.getmtime(final) - mtime) < 2
     if ext != ".zip" and os.path.isfile(final) and os.path.getsize(final) == size and same_time:
-        return {"have": size, "done": True, "path": final, "folder": dest}
+        return {"have": size, "done": True, "path": final, "folder": _upload_top(dest, single)}
     have = os.path.getsize(tmp) if os.path.isfile(tmp) else 0
     return {"have": have if have <= size else 0, "done": False}
 
@@ -2269,7 +2382,8 @@ def _finish_upload(name, ext, dest, tmp, single):
             replaced.append(name)
         os.replace(tmp, os.path.join(dest, name))
         saved.append(name)
-    return {"folder": dest, "saved": sorted(set(saved)), "skipped": skipped, "replaced": replaced,
+    return {"folder": _upload_top(dest, single), "saved": sorted(set(saved)), "skipped": skipped,
+            "replaced": replaced,
             "badname": badname}
 
 
@@ -2893,6 +3007,20 @@ class Handler(BaseHTTPRequestHandler):
             return self.json({"modes": list(_prep.MODES), "megapixels": _prep.MEGAPIXELS,
                               "faces": _prep.FACE_TARGETS, "face_tools": prep_jobs.faces_available(),
                               "face_settings": prep_jobs.face_settings()})
+        if path in ("/api/masks/edit/list", "/api/masks/edit/picture", "/api/masks/edit/mask"):   # the mask editor
+            from fizgig.web import mask_edit
+            folder, name = (qs.get("folder") or [""])[0], (qs.get("name") or [""])[0]
+            if not folder or not os.path.isdir(folder):
+                return self.json({"error": "Choose the training folder on the Start tab first."}, 400)
+            try:
+                if path == "/api/masks/edit/list":
+                    return self.json({"pictures": mask_edit.listing(folder)})
+                if path == "/api/masks/edit/picture":
+                    return self._send(200, mask_edit.picture_jpeg(folder, name), "image/jpeg")
+                data = mask_edit.mask_png(folder, name)
+                return self.json({"error": "no mask"}, 404) if data is None else self._send(200, data, "image/png")
+            except ValueError as e:
+                return self.json({"error": str(e)}, 400)
         if path == "/api/masks/info":              # Image Prep's Make masks card: what's there for this folder
             from fizgig.dataset import automask
             folder = (qs.get("folder") or [""])[0]
@@ -2939,13 +3067,17 @@ class Handler(BaseHTTPRequestHandler):
                 r["image_loss"] = bool(owners.get(r.get("id")) and d is not None and getattr(d, "loss_watch", False))
                 r["loss_graph"] = key not in newest and os.path.isfile(
                     step_log.loss_path(r.get("output_dir") or "", r.get("lora") or ""))
+                # Continue: the newest run with its name and folder owns its saves (an older one's are overwritten)
+                r["continue"] = _continue_point(r) if key not in newest else None
                 newest.add(key)
             return self.json({"runs": runs})
         if path == "/api/queue/item":                # a queued run's settings, for Edit
             it = webqueue.get((qs.get("id") or [""])[0])
             if it is None:
                 return self.json({"error": "That run has left the queue."}, 404)
-            return self.json({k: it.get(k) for k in ("id", "family", "values", "image_folder", "lora")})
+            return self.json({**{k: it.get(k) for k in ("id", "family", "image_folder", "lora")},
+                              "values": {k: v for k, v in (it.get("values") or {}).items() if not str(k).startswith("__")},
+                              "continues": bool((it.get("values") or {}).get("__continue"))})
         if path == "/api/runs/loss":                 # a run's loss by step (the loss graph); live=1: the run going now
             from fizgig.training import step_log
             if (qs.get("live") or [""])[0] == "1":
@@ -2963,7 +3095,7 @@ class Handler(BaseHTTPRequestHandler):
             res = image_loss.residuals(run.get("output_dir")) if run and d is not None and d.loss_watch else None
             if res is None:
                 return self.json({"error": "This run has no per-image loss log."}, 404)
-            pics = image_loss.image_paths(run.get("image_folder"), [im["key"] for im in res["images"]])
+            pics = image_loss.image_paths(run, [im["key"] for im in res["images"]])
             queued, applied = image_loss.caption_state(run.get("output_dir"))
             return self.json({**res, "live": run.get("result") in ("running", "paused"),
                               "images": [{**im, "path": pics.get(im["key"], ""), "queued": im["key"] in queued,
@@ -2972,7 +3104,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/runs/caption":              # one training image's caption, for the per-image editor
             from fizgig.web import image_loss
             run = history.get((qs.get("id") or [""])[0]) or {}
-            text, ok = image_loss.read_caption(run.get("image_folder"), (qs.get("key") or [""])[0],
+            text, ok = image_loss.read_caption(run, (qs.get("key") or [""])[0],
                                                captions.caption_ext((qs.get("ext") or [""])[0]))
             return self.json({"caption": text, "folder_ok": ok})
         if path == "/api/about":                     # ?check=1: look for a newer release again (the About box's)
@@ -3534,6 +3666,27 @@ class Handler(BaseHTTPRequestHandler):
                                       f"The run going now saves as {lora} in that folder - give this one another LoRA "
                                       "name."}, 400)
                 if editing:
+                    was = (webqueue.get(editing) or {}).get("values") or {}
+                    if was.get("__continue"):            # a queued Continue stays one: on from the same run's save
+                        rec = history.get(was["__continue"])
+                        pt = _continue_point(rec)
+                        if pt is None:
+                            return self.json({"error": "That run's saved state isn't there any more, so it can't "
+                                                       "continue. Remove it from the queue."}, 400)
+                        if (fam != rec.get("family") or lora.lower() != str(rec.get("lora") or "").lower()
+                                or os.path.normcase(os.path.abspath(out_dir)) !=
+                                os.path.normcase(os.path.abspath(rec.get("output_dir") or "."))):
+                            return self.json({"error": "This queued run continues " + str(rec.get("lora")) + ": keep "
+                                              "its model, LoRA name and output folder. For a new run, use Add to "
+                                              "queue instead."}, 400)
+                        try:
+                            to = int(str(vals.get(pt["key"]) or "0").strip())
+                        except ValueError:
+                            to = 0
+                        if pt["kind"] == "state" and to <= pt["done"]:
+                            return self.json({"error": f"It's saved at epoch {pt['done']}: set Max Train Epochs above "
+                                                       f"{pt['done']} for it to train on."}, 400)
+                        vals = {**vals, "__continue": was["__continue"]}
                     if not webqueue.update(editing, fam, vals, folder, lora, out_dir):
                         return self.json({"error": "That run has left the queue - add this as a new one instead."},
                                          400)
@@ -3574,6 +3727,12 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/runs/delete":              # Delete run: asks first (confirm false = what it'd delete)
                 r = delete_run(str(b.get("id") or ""), confirm=bool(b.get("confirm")))
                 return self.json(r, 400 if r.get("error") else 200)
+            if path == "/api/runs/continue":            # Continue: on from the run's newest save
+                from fizgig.web import helpers as _helpers
+                if _helpers.move_busy():                # a run of this computer's is moving
+                    return self.json({"error": _helpers.move_busy()}, 400)
+                r = _continue_run(str(b.get("id") or ""), str(b.get("more") or ""))
+                return self.json(r, 400 if r.get("error") and not r.get("need") else 200)
             if path == "/api/runs/settings":            # Start again with these settings
                 rec = history.get(str(b.get("id") or ""))
                 if rec and rec.get("family") in (refmod.KEY, refmod.LABEL):
@@ -3900,6 +4059,22 @@ class Handler(BaseHTTPRequestHandler):
                 from fizgig.dataset import sammask
                 sammask.download(user_data.MODELS_DIR)
                 return self.json({"ok": True, "sam": _sam_info()})
+            if path == "/api/masks/edit/sam_click":  # the mask editor: the object SAM 3.1 finds where you clicked
+                from fizgig.web import mask_edit
+                import base64
+                where = _sam_info()["path"]
+                if not where:
+                    return self.json({"error": "SAM 3.1 isn't here yet: choose SAM 3.1 on this card and press "
+                                               "Download first."}, 400)
+                try:
+                    png = mask_edit.sam_click(str(b.get("folder") or ""), str(b.get("name") or ""),
+                                              float(b.get("x") or 0), float(b.get("y") or 0), where)
+                except ValueError as e:
+                    return self.json({"error": str(e)}, 400)
+                except Exception as e:
+                    logger.exception("SAM click")
+                    return self.json({"error": f"SAM 3.1 couldn't run: {type(e).__name__}: {e}"}, 400)
+                return self.json({"ok": True, "png": "data:image/png;base64," + base64.b64encode(png).decode()})
             if path == "/api/masks/sam_preview":    # the first two pictures with their SAM masks, nothing written
                 from fizgig.dataset import sammask
                 import base64
@@ -3924,7 +4099,7 @@ class Handler(BaseHTTPRequestHandler):
                     pics.append({"name": name, "cover": round(cover, 3),
                                  "src": "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()})
                 return self.json({"ok": True, "pictures": pics, "fresh": fresh, "of": len(sammask.pictures(folder))})
-            if path in ("/api/prep/run", "/api/look/scan", "/api/look/move", "/api/masks/make"):
+            if path in ("/api/prep/run", "/api/look/scan", "/api/look/move", "/api/masks/make", "/api/masks/edit/save"):
                 folder = str(b.get("folder") or "")
                 norm = lambda p: os.path.normcase(os.path.abspath(p or "."))
                 with _lock:
@@ -3940,6 +4115,9 @@ class Handler(BaseHTTPRequestHandler):
                                                          b.get("padding") or 20, bool(b.get("replace"))))
                     if path == "/api/look/scan":
                         return self.json(prep_jobs.look_scan(folder, b.get("baselines") or []))
+                    if path == "/api/masks/edit/save":
+                        from fizgig.web import mask_edit
+                        return self.json(mask_edit.save(folder, str(b.get("name") or ""), str(b.get("png") or "")))
                     if path == "/api/masks/make":
                         sam = None
                         if b.get("sam"):
@@ -4411,6 +4589,14 @@ def run_server(host, port=None, password=None, password_arg=False, open_browser=
     if str(load_prefs().get("update_check", "1")) != "0":     # Preferences > Network: Check for new releases
         __import__("fizgig.web.update_check", fromlist=["x"]).start()   # a newer release? (the About button says)
     threading.Thread(target=_poll_stats_loop, daemon=True).start()
+    # the page's first ask is the schema, and its first build imports torch (block maps, the optimizer list): seconds,
+    # more on a slow disk. Built now, while the window or browser opens, the page has it sooner (#249)
+    def _warm():
+        try:
+            get_schema(ref_dit_set=False)
+        except Exception:                      # the page's own ask says what's wrong
+            pass
+    threading.Thread(target=_warm, daemon=True).start()
     if password and not on_pod() and host not in ("127.0.0.1", "localhost", "::1"):
         _LAN_PORT[0] = port                    # Preferences > Network can switch the answering on and off
         try:

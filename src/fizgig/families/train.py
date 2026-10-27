@@ -100,7 +100,8 @@ def _save_state(output_dir, output_name, net, optimizer, *, epoch, global_step, 
         rng["cuda"] = torch.cuda.get_rng_state_all()
     torch.save(rng, os.path.join(state_dir, "rng.pt"))
     with open(os.path.join(state_dir, "training_state.json"), "w", encoding="utf-8") as f:   # commit marker, last
-        json.dump({"epoch": epoch, "global_step": global_step, "architecture": arch_id, **(extra or {})}, f)
+        json.dump({"epoch": epoch, "global_step": global_step, "architecture": arch_id,
+                   "optimizer": optimizer.__class__.__name__, **(extra or {})}, f)
     logger.info(f"[state] saved -> {state_dir}")
     return state_dir
 
@@ -189,7 +190,22 @@ def _load_state(state_dir, net, optimizer, device, arch, untagged_own=False, dri
             sd["state"] = {perm[int(k)]: v for k, v in sd["state"].items()}
             meta["legacy_perm"] = perm
             logger.info("[resume] an older trainer's state: optimizer moments remapped into this LoRA's order")
-        optimizer.load_state_dict(sd)
+        # another Optimizer Type than the run trained with (#246): its saved moments don't fit this one, so the LoRA's
+        # weights carry on with a fresh optimizer (a state from before the type was saved: as its groups tell)
+        was, now = meta.get("optimizer"), optimizer.__class__.__name__
+        if was and was != now:
+            why = f"it trained with {was}, and this resume uses {now}"
+        elif len(sd.get("param_groups") or []) != len(optimizer.param_groups):
+            why = "it trained with another Optimizer Type than this resume uses"
+        else:
+            why = ""
+        if why:
+            meta["fresh_optimizer"] = True
+            logger.info(f"[resume] {why}: continuing from the state's LoRA weights and epoch, with a fresh "
+                        f"optimizer (it settles within a few steps). To carry the optimizer on too, resume with "
+                        f"{was or 'the run' + chr(39) + 's own'} Optimizer Type.")
+        else:
+            optimizer.load_state_dict(sd)
     else:
         logger.info("[resume] this state was saved by another trainer: continuing from its LoRA weights, with a "
                     "fresh optimizer and weight average (they settle within a few steps)")
@@ -1009,9 +1025,9 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                  lr_scheduler="constant", lr_warmup_steps=0, lr_scheduler_num_cycles=1, lr_scheduler_power=1.0,
                  gradient_accumulation_steps=1, compile_blocks="auto", gradient_checkpointing="auto", blocks_to_swap=0, network_type="lora", lokr_factor=8,
                  log_per_image_loss=False, per_image_lr=False, auto_recaption=False, warmup_look_outliers=False,
-                 trigger_word=None, trigger_position="start", recaption_instruction=None,
-                 recaption_instruction_detailed=None, captioner=None,
-                 finetune=False, ft_rotations=10, ft_save_every_rotations=1, ft_rotate_every=1, ft_max_parts=0,
+                 trigger_word=None, trigger_position="start", recaption_triggers=None, recaption_instruction=None,
+                 recaption_instruction_detailed=None, recaption_task=None, recaption_task_detailed=None,
+                 captioner=None, finetune=False, ft_rotations=10, ft_save_every_rotations=1, ft_rotate_every=1, ft_max_parts=0,
                  ft_start_window=0,
                  ft_epochs_done=0, ft_fused_backward=False, reg_lr_multiplier=0.2, preview_checkpoint=None,
                  preview_checkpoint_cache="auto", preview_int8=False, family_options=None,
@@ -1627,7 +1643,8 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
             global_step = start_epoch * steps_per_epoch
         if adaptive:
             adaptive.load_state_dict(meta.get("adaptive_lr_state"))
-        if optimizer is not None and meta.get("own_state") and not owns_its_rate(optimizer):
+        if (optimizer is not None and meta.get("own_state") and not meta.get("fresh_optimizer")
+                and not owns_its_rate(optimizer)):
             resume_lr(optimizer, _fresh_lrs, meta, box_learning_rate, adaptive)
         if ema is not None and meta["own_state"] and os.path.exists(os.path.join(resume_state_dir, "ema.pt")):
             _esd = torch.load(os.path.join(resume_state_dir, "ema.pt"), map_location="cpu")
@@ -1643,8 +1660,10 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                   auto_recaption=auto_recaption, warmup_look=warmup_look_outliers,
                   resume=bool(resume_state_dir), start_epoch=start_epoch, te_path=te_path,
                   trigger_word=trigger_word, trigger_position=trigger_position,
+                  recaption_triggers=json.loads(recaption_triggers) if recaption_triggers else None,
                   recaption_instruction=recaption_instruction,
-                  recaption_instruction_detailed=recaption_instruction_detailed, captioner_path=captioner)
+                  recaption_instruction_detailed=recaption_instruction_detailed, captioner_path=captioner,
+                  recaption_task=recaption_task, recaption_task_detailed=recaption_task_detailed)
     # Gradient accumulation (Krea 2's rule): N micro-batches average into one update - each loss is divided by N, the
     # optimizer steps every N and at every epoch end (a partial group is flushed), so updates per epoch are
     # ceil(steps / N) and the schedule runs in those updates. Sliders already backpropagate two poles per step: 1.
@@ -2668,8 +2687,12 @@ def setup_parser():
     p.add_argument("--auto_recaption", action="store_true", help="recaption stuck images (needs --captioner)")
     p.add_argument("--warmup_look_outliers", action="store_true", help="LR warm-up for Look Filter outliers")
     p.add_argument("--trigger_position", default="start", choices=("start", "end"))
+    p.add_argument("--recaption_triggers", default=None,
+                   help="auto-recaption's trigger word per other folder, as JSON {key prefix: word}")
     p.add_argument("--recaption_instruction", default=None)
     p.add_argument("--recaption_instruction_detailed", default=None)
+    p.add_argument("--recaption_task", default=None, help="the first try's Captions tab task, for the log")
+    p.add_argument("--recaption_task_detailed", default=None, help="the second try's Captions tab task, for the log")
     p.add_argument("--captioner", default=None,
                    help="auto-recaption's captioner: the Krea 2 Qwen3-VL-4B text encoder file (as the Captions tab)")
     p.add_argument("--lokr_factor", type=int, default=8, help="LoKR only: w1 is about factor x factor")
@@ -2816,8 +2839,10 @@ def main():
         blocks_to_swap=a.blocks_to_swap, speed_lora_strength=a.speed_lora_strength, network_type=a.network_type, lokr_factor=a.lokr_factor,
         log_per_image_loss=a.log_per_image_loss, per_image_lr=a.per_image_lr, auto_recaption=a.auto_recaption,
         warmup_look_outliers=a.warmup_look_outliers, trigger_word=a.trigger_word, trigger_position=a.trigger_position,
+        recaption_triggers=a.recaption_triggers,
         recaption_instruction=a.recaption_instruction,
         recaption_instruction_detailed=a.recaption_instruction_detailed, captioner=a.captioner,
+        recaption_task=a.recaption_task, recaption_task_detailed=a.recaption_task_detailed,
         network_dim=a.network_dim, network_alpha=a.network_alpha, learning_rate=a.learning_rate,
         max_train_epochs=a.max_train_epochs, save_every_n_epochs=a.save_every_n_epochs,
         save_until_epoch=a.save_until_epoch, save_every_n_epochs_after=a.save_every_n_epochs_after, save_state=a.save_state,
