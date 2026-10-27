@@ -1,63 +1,57 @@
 # HANDOFF
 
-**Updated:** 2026-10-25 · **Branch:** master · **Upstream:** 5d535dab (v8.9.8) · **Delivery target:** fork/master
+**Updated:** 2026-10-26 | **Branch:** master | **Upstream:** e8f89bcf | **Delivery target:** fork/master
 
 ## State
-Merged 29 upstream commits from 416fa635 through 5d535dab (v8.9.7-v8.9.8: masked prior preservation, run log files in `user_data/logs/` #240, ArcFace peak line, Profiler's Open in Studio removed, numbered sample prompts #238, Training tab card order, Extract any rank #237, SAM 3.1 masks from words #239) into master. All adopted. One conflict, `server.py`: kept both the fork's `_prefs_unreadable()` and upstream's `_sam_info()`. No new pip dependencies. New upstream files: `src/fizgig/sam3/` (GPL-3.0, ported from ComfyUI), `assets/clip_tokenizer/` (MIT), `LICENSES/GPL-3.0.txt`; the project license is unchanged. Not pushed. Checks before/after: pytest 1 failed / 230 passed -> 1 failed / 237 passed (test_page, same four ids; +7 are upstream's new `test_sammask`/`test_mask_prior`); unittest 100 run, same single failure; pyflakes 103 -> 104 lines (new: redefined `detect_fn` in upstream's `sam3/detector.py`).
-Before that: merged 32 upstream commits through 416fa635 (v8.9.5-v8.9.6, merge efa02bf5), pushed to fork/master.
+Merged five upstream commits after 13db3b3b through e8f89bcf onto the prior local merge e52cff51. All adopted; no conflicts or new dependencies. CPU verification: pytest 272 passed with 63 subtests; unittest 99 passed with one inherited Windows socket abort. All 282 Python files compile; both JavaScript files parse; no new pyflakes diagnostics.
+The prior merge includes v8.9.9-v8.9.92: mask editing, subfolder training, Continue, queue editing, cache progress and the retired v8 workflow removal. The published fork was 3cc3a981 before this delivery.
 
 ## Done this session
-- Adopted v8.9.0-v8.9.3: helpers (a second PC, a second GPU, a RunPod pod or Vast.ai instance renders previews, trains a share of each epoch, or takes over a run with Move to...; a pod's checkpoints come home), Move a run for every LoRA kind with clips and songs, MOSS-Image workbench Render with choice, release notes and docs (HELPERS, MOVE_RUN, TRAINING_SHARE, HELPER_PREVIEWS).
-- One conflict, `server.py` `_start`: kept the fork's Profiler guard, `confirm` warnings and one-Start claim; upstream's `models=`, `share_stop_all()`, `_plan(..., models)` and the look fetch now sit inside the claim's `_unclaim`-on-error path. The fork's own diff against upstream is otherwise line-for-line the same.
-- New fork fix: `/api/helpers/deliver`, `/api/helpers/share_deliver`, `/api/helper/speed` and `/api/helper/put` read Content-Length straight into memory, past the 16 MB cap. They read through `Handler._raw()` now, capped the same way; `checks/test_limits.py` RawCap covers it.
-- Checked: every helper route sits after `_api_ok()` (token + login); helpers write prefs only through `update_prefs` (the unreadable-prefs refusal holds). pyflakes: one new upstream finding (unused `pods` import in helpers.py).
-- Preserved the untracked audit document unchanged.
+- Adopted MOSS-Image Fast as the first/default preset, prompt-slider anchors and live editing, the SDXL practice-picture negative-prompt device fix, and matching model/CLI guidance.
+- Corrected `checks/test_page.py` to recognise the dock's ID-forwarding button factory. Missing-ID and broken-factory mutations still fail the check.
+- Retained Start confirmation warnings, the Profiler guard, immediate duplicate-Start refusal, claim cleanup and successful-resume-only queue release.
+- Preserved and sanitised the existing recovery notes. No live service restart, model download, cache deletion or change to the live environment was performed.
+- Delivery scrub: zero unresolved findings, no untracked candidate files or key files. Existing upstream metadata is retained under the repository rules.
+- QA tools were installed into a scratch folder with `pip install --target`; the live environment still lacks pytest and pyflakes.
 
 ## Fork changes on top of upstream
-- `.gitignore`: ignores both `AGENTS.md` and upstream's `.cursor/`.
-- `checks/`: `isolate.py` must be imported before `fizgig.web`. It moves every `user_data/` path into a temp folder and turns off `user_data.migrate()`. Tests cover serving, access, every preset's plan, Start, prefs, captions, Studio, the page, the route contract, uploads and file routes, the queue, `st_meta` writes, Delete run / Remove, and the body caps.
-- Fixes, one commit each: run notifications (Notify me), low-disk and resume-at-max-epochs warnings, no save over an unreadable `prefs.json`, caption jobs that can't run end with `DONE`, Studio Save refuses a swapped LoRA, Studio unloaded after its worker stops, Start waits for the Profiler, one Start at a time, a Fizgig restarted banner with Reload, Studio unload after 10 minutes unused, queue saves retried on Windows, a 16 MB cap on JSON bodies and on helpers' raw pieces, and caption files limited to caption extensions (`.txt .caption .cap .tags .tag .text`).
+- `.gitignore` ignores `AGENTS.md` and upstream's `.cursor/`. Upstream release notes remain in `docs/RELEASE_NOTES_vX.Y.Z.md`; do not create CHANGELOG.md.
+- `checks/isolate.py` redirects data paths to temporary storage and disables migration before web imports. Both unittest and pytest are required: unittest alone misses upstream's function-based checks.
+- Keep run notifications, low-disk and resume-at-max-epochs warnings, unreadable-preferences refusal, caption-job termination, Studio save/load/unload safety, the restart banner, Windows queue-save retries, 16 MB JSON/helper body caps and caption-extension limits.
 
 ## Open
-1. `checks/test_page.py::test_every_looked_up_element_exists` fails before and after: `stDockClose/Fold/Pin/Play` are made by a `btn("id", ...)` helper the test's regexes don't read. CI goes red on it once pushed without `[skip ci]`. Needs a decision.
-2. Moves and the fork's Start warnings: helpers' `move_in` and move-back call `_start` and read only `ok`/`error`/`problems`. A low-disk or resume-at-max-epochs warning there fails the move with "it couldn't start" (move back: stays paused, Resume asks). Decide: show the warning text, or let moves skip it.
-3. Move back writes the file names a helper lists into the dataset and output folders; `_SAFE_FILE` blocks paths, not extensions. The helper is one the user added with its password. Decide whether to limit the lead side to media + caption extensions.
-4. `local_start` writes `user_data/other_gpu_N/prefs.json` (the second Fizgig's own, rebuilt each start) with `_write`, not the guard; the main `prefs.json` is untouched.
-5. The venv still lacks `pywebview`, `soundfile` and `pytest`.
-6. Preserve the local leftovers: ignored `webui/`, the excluded pre-v8 preferences backup, and untracked `WEBUI_ADOPTION_AUDIT.md`.
-7. The audit's slate theme (Tier 2 #11) remains unfinished.
-8. Previously recorded: training Start while Studio loads can leave Studio on "loading". Not rechecked.
-9. `test_files.py` and `test_access.py` socket tests fail now and then with WinError 10053 (connection aborted) and pass on rerun: a Windows flake. This sync: `test_only_training_kinds` before, `test_bad_names_refused` once after; both clean on rerun / the final run.
-10. `checks/test_face_backends.py` (upstream) ends with an extra blank line, so `git diff --check` flags it.
+1. Prior recovery note: preferences, run history, queue, presets and logs were lost on 2026-10-25 after a broad ignored-file cache cleanup. The environment and model paths were rebuilt; set the web password and RunPod key again if still needed. This session did not inspect credentials or rerun recovery.
+2. Helpers' move-in/move-back callers read only `ok`/`error`/`problems` from Start. Fork warning responses can fail a move or leave it paused. Decide whether to display the warning or bypass it for moves.
+3. Move-back accepts helper-listed filenames after path checks without extension limits. Decide whether lead-side writes should accept only media and caption extensions.
+4. `local_start` writes the disposable second-GPU preferences with `_write`, outside the main preferences guard. The main preferences file is not affected.
+5. The former slate-theme audit remains unfinished; `webui/`, the preferences backup and the audit document were deleted in the prior recovery. Training Start while Studio loads was previously reported to leave Studio on loading; not rechecked here.
+6. Whole-tree pyflakes has inherited findings, including deferred type names, closures whose resources are deleted after use, unused imports and a delayed exception callback in Gizmo. Compare against the pre-merge report; do not claim whole-tree lint is clean.
+7. Windows socket tests can fail with WinError 10053 and pass on rerun. The baseline upload test did so this session; the final unittest run still hit one abort, while the full pytest run passed all tests. This Windows-only failure is an environment exception; CI runs on Linux. An existing upstream extra blank line in `checks/test_face_backends.py` can appear in broad historical whitespace checks.
 
 ## Decisions
-- Upstream's app replaces the fork's. Keep fork patches to upstream files minimal so syncs merge cleanly.
-- Never send anything upstream. No autostart of any kind.
-- A queued run does not ask the start warnings. The queue holds with the warning as its reason.
-- Upstream's new pytest checks coexist with the fork's isolated unittest checks. The unittest command does not discover the pytest-only checks.
-- The commit watcher compares the published fork with upstream every five minutes; a local-only merge does not clear its behind count.
-- Remote access: save a `web_password`, start with `--host 127.0.0.1`, then `tailscale serve --bg 8081`. The app window has no `--host`, so with a saved password it listens on `0.0.0.0`.
+- Keep upstream's app and minimal fork patches. Never send changes upstream. No autostart.
+- `origin` is upstream fetch-only, with its push URL disabled. Publish only with `git push fork master`; never force or bypass hooks.
+- A queued run does not confirm Start warnings; its warning remains the queue hold reason.
+- The commit watcher compares the published fork every five minutes; a local merge alone does not clear its behind count.
+- Remote access uses a saved `web_password`, `--host 127.0.0.1` and `tailscale serve --bg 8081`. The desktop app without `--host` binds all interfaces when a password is saved.
+- Prior recovery's model setup uses bf16 Klein DiTs with `flux2-vae.safetensors`, not FLUX.1 `ae.safetensors` or an NVFP4 Qwen3-8B encoder. Recovered models include Krea 2, Klein 9B, MiniMax H3, Anima and SDXL; the prior note records the missing captioner, full Qwen3-8B and MiniMax adapters as downloaded.
 
 ## Traps
-- `origin` is upstream, fetch only. Push only to `fork` master, via the clean workflow in `AGENTS.md`.
-- A test that imports `fizgig.web` before `isolate` writes the real `user_data/`. `test_isolation` fails if a web module holds a path in the Fizgig folder.
-- `checks/test_plan_presets.py` fills in the Edit and Slider folders and the prompt slider's prompts. A new kind of run needs its inputs added there.
-- A warning response from Start is not a successful resume. `_resumed()` must require `ok` before clearing a paused queue's hold.
-- `_start` takes `models=` (helpers) and `confirm=` (fork) by keyword; anything that can raise between its claim and launch must go through `_unclaim`, or every later Start says "A run is already going".
-- New raw-body routes must read through `_raw()`, never `self.rfile.read(n)`.
-- `FAMILY_PREVIEW_LOOK` can download its model through `/api/form/state`; do not exercise the live form as an incidental source check.
-- `/api/masks/sam_fetch` downloads the 1.75 GB SAM 3.1 file into the models folder; tests must not call it.
-- `_start` opens the run's log file (`_open_run_log`) after the state is "starting", outside `_unclaim`; it must stay non-raising.
-- Run Python with `-c` from outside the repo root: `fizgig.py` there shadows the `fizgig` package.
-- `fizgig.face_utils` holds `PREFS_FILE` from import time and is not a `fizgig.web` module, so `test_isolation` doesn't see it. Upstream's `test_face_backends.py` points it at `tmp_path` in an autouse fixture; a new test that uses it must too.
-- `FIZGIG_USER_DATA` (set for a second Fizgig on another GPU) moves `user_data.USER_DATA`; tests must not inherit it.
-- Upstream commit messages carry AI-session trailers and other authors' emails. The pre-push hook skips commits already on `origin/*` and merge commits; only the fork's own commits are scanned.
+- Never run broad `git clean -X` commands with cache pathspecs: ignored live data and environments can match whole directories. If cache removal is required, limit explicit inspection to source and checks. This session compiles Python in memory.
+- Import `isolate` before `fizgig.web`; do not inherit `FIZGIG_USER_DATA`. `fizgig.face_utils.PREFS_FILE` also needs an explicit temporary path in tests because web-module isolation does not inspect it. Run Python `-c` outside the repo root or insert source/check paths first: `fizgig.py` shadows the package.
+- `_start` takes `models=` and `confirm=` by keyword. Any exception between claim and launch must release the claim via `_unclaim`. `_resumed()` must require `ok` before releasing a queue hold; `_open_run_log` must remain non-raising after the starting state is set.
+- New raw-body routes must use `_raw()`, not direct `rfile.read(n)`. Helper routes must retain authentication and guarded preference writes.
+- `/api/form/state` can download `FAMILY_PREVIEW_LOOK`; `/api/masks/sam_fetch` downloads a large model. Do not exercise either against live preferences as an incidental smoke test.
+- `checks/test_plan_presets.py` supplies Edit/Slider folders and prompt-slider inputs; extend these for new run modes. The pre-push hook excludes upstream commits and merge commits; inspect the authored working-tree changes as well.
 
 ## Verify
-The venv has no pytest: install it with `pip install --target` into a temp folder and set `PYTHONPATH` to it, or add it to the venv.
+Install pytest and pyflakes into a scratch folder with `pip install --target`, then set `PYTHONPATH` to it. Use temporary `TEMP`/`TMP`, set `PYTHONDONTWRITEBYTECODE=1` and `CUDA_VISIBLE_DEVICES=-1`, and remove inherited `FIZGIG_USER_DATA`.
 ```powershell
 .\venv\Scripts\python.exe -m unittest discover -s checks -p "test_*.py" -v
-.\venv\Scripts\python.exe -m pytest checks -q
+.\venv\Scripts\python.exe -m pytest checks -q -p no:cacheprovider
+.\venv\Scripts\python.exe -m pyflakes src checks
+node --check src/fizgig/web/static/app.js
+node --check src/fizgig/web/static/qrcode.js
 git status --short
 git log fork/master..HEAD --oneline --first-parent
 git ls-remote fork refs/heads/master

@@ -29,6 +29,10 @@ class Page(unittest.TestCase):
         used = set(re.findall(r'\$\("([A-Za-z0-9_-]+)"\)', self.js))
         made = (set(re.findall(r'id="([A-Za-z0-9_-]+)"', self.html)) | set(re.findall(r'id="([A-Za-z0-9_-]+)"', self.js))
                 | set(re.findall(r'id:\s*"([A-Za-z0-9_-]+)"', self.js)))
+        # The dock's local button factory passes its first argument through as the id.
+        dock = re.search(r'^function studioDock\([^\n]*\n(.*?)^}', self.js, re.M | re.S).group(1)
+        self.assertRegex(dock, r'const btn = \(id, text, title\) => el\("button", \{[^}]*\bid, text, title\}\)')
+        made |= set(re.findall(r'\bbtn\("([A-Za-z0-9_-]+)"', dock))
         missing = sorted(i for i in used - made if not i.startswith(GENERATED))
         self.assertTrue(used)
         self.assertEqual(missing, [])
