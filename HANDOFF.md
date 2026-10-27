@@ -1,18 +1,17 @@
 # HANDOFF
 
-**Updated:** 2026-10-26 | **Branch:** master | **Upstream:** e8f89bcf | **Delivery target:** fork/master
+**Updated:** 2026-10-27 | **Branch:** master | **Upstream:** ee45a6aa | **Delivery target:** fork/master
 
 ## State
-Merged five upstream commits after 13db3b3b through e8f89bcf onto the prior local merge e52cff51. All adopted; no conflicts or new dependencies. CPU verification: pytest 272 passed with 63 subtests; unittest 99 passed with one inherited Windows socket abort. All 282 Python files compile; both JavaScript files parse; no new pyflakes diagnostics.
-The prior merge includes v8.9.9-v8.9.92: mask editing, subfolder training, Continue, queue editing, cache progress and the retired v8 workflow removal. The published fork was 3cc3a981 before this delivery.
+Merged 17 upstream commits after e8f89bcf through ee45a6aa onto the prior merge d760f486. All adopted; no conflicts, no new dependencies, no fork divergence work needed. CPU verification: pytest 272 passed with 63 subtests and unittest 100 passed, both identical to the pre-merge baseline. All 282 tracked Python files compile; both JavaScript files parse; pyflakes output is unchanged from the baseline.
+The published fork was d760f486 before this delivery.
 
 ## Done this session
-- Adopted MOSS-Image Fast as the first/default preset, prompt-slider anchors and live editing, the SDXL practice-picture negative-prompt device fix, and matching model/CLI guidance.
-- Corrected `checks/test_page.py` to recognise the dock's ID-forwarding button factory. Missing-ID and broken-factory mutations still fail the check.
-- Retained Start confirmation warnings, the Profiler guard, immediate duplicate-Start refusal, claim cleanup and successful-resume-only queue release.
-- Preserved and sanitised the existing recovery notes. No live service restart, model download, cache deletion or change to the live environment was performed.
-- Delivery scrub: zero unresolved findings, no untracked candidate files or key files. Existing upstream metadata is retained under the repository rules.
-- QA tools were installed into a scratch folder with `pip install --target`; the live environment still lacks pytest and pyflakes.
+- Adopted the Web UI colour-token refactor: every `style.css` rule and the `app.js` canvases and inline styles read `:root` tokens, the app window's bars use them with the old colours as fallbacks, and Studio's block colours are `--data-*` tokens.
+- Adopted the themes (Fizgig, Light n' Orange, Seventies, Synthwave, Graphite, Colour-blind safe, High contrast, Dim) with the Theme card at the top of Preferences. Each device keeps its choice in browser storage.
+- Adopted the loading-screen tips, the masked-training "(prior preservation)" label and the GPU out-of-memory guidance appended to a failed run's log (#258).
+- The fork had no colour or `style.css` changes, so nothing needed re-expressing as tokens. Every `var(--...)` and `themeColor()` name in the web files resolves to a `style.css` definition or a value set at runtime. The restart banner's `.warning-card` and the Notify button's `.btn-sm` rules remain.
+- The themes were not checked visually.
 
 ## Fork changes on top of upstream
 - `.gitignore` ignores `AGENTS.md` and upstream's `.cursor/`. Upstream release notes remain in `docs/RELEASE_NOTES_vX.Y.Z.md`; do not create CHANGELOG.md.
@@ -24,9 +23,9 @@ The prior merge includes v8.9.9-v8.9.92: mask editing, subfolder training, Conti
 2. Helpers' move-in/move-back callers read only `ok`/`error`/`problems` from Start. Fork warning responses can fail a move or leave it paused. Decide whether to display the warning or bypass it for moves.
 3. Move-back accepts helper-listed filenames after path checks without extension limits. Decide whether lead-side writes should accept only media and caption extensions.
 4. `local_start` writes the disposable second-GPU preferences with `_write`, outside the main preferences guard. The main preferences file is not affected.
-5. The former slate-theme audit remains unfinished; `webui/`, the preferences backup and the audit document were deleted in the prior recovery. Training Start while Studio loads was previously reported to leave Studio on loading; not rechecked here.
+5. The former slate-theme audit remains unfinished; upstream's theme system (this sync) may supersede it; `webui/`, the preferences backup and the audit document were deleted in the prior recovery. Training Start while Studio loads was previously reported to leave Studio on loading; not rechecked here.
 6. Whole-tree pyflakes has inherited findings, including deferred type names, closures whose resources are deleted after use, unused imports and a delayed exception callback in Gizmo. Compare against the pre-merge report; do not claim whole-tree lint is clean.
-7. Windows socket tests can fail with WinError 10053 and pass on rerun. The baseline upload test did so this session; the final unittest run still hit one abort, while the full pytest run passed all tests. This Windows-only failure is an environment exception; CI runs on Linux. An existing upstream extra blank line in `checks/test_face_backends.py` can appear in broad historical whitespace checks.
+7. Windows socket tests can fail with WinError 10053 and pass on rerun. This session the first post-merge pytest run hit one abort in `test_files.py`; three reruns of that file and a second full run passed. This Windows-only failure is an environment exception; CI runs on Linux. An existing upstream extra blank line in `checks/test_face_backends.py` can appear in broad historical whitespace checks.
 
 ## Decisions
 - Keep upstream's app and minimal fork patches. Never send changes upstream. No autostart.
