@@ -1,17 +1,17 @@
 # HANDOFF
 
-**Updated:** 2026-10-27 | **Branch:** master | **Upstream:** ee45a6aa | **Delivery target:** fork/master
+**Updated:** 2026-10-27 | **Branch:** master | **Upstream:** 98de7a48 | **Delivery target:** fork/master
 
 ## State
-Merged 17 upstream commits after e8f89bcf through ee45a6aa onto the prior merge d760f486. All adopted; no conflicts, no new dependencies, no fork divergence work needed. CPU verification: pytest 272 passed with 63 subtests and unittest 100 passed, both identical to the pre-merge baseline. All 282 tracked Python files compile; both JavaScript files parse; pyflakes output is unchanged from the baseline.
-The published fork was d760f486 before this delivery.
+Merged 21 upstream commits after ee45a6aa through 98de7a48 onto the prior merge 649d93f8. All adopted. Two conflicts, both resolved by keeping both sides. `requirements.txt` is unchanged (a test comment and its revert); `checks/requirements.txt` adds CI pins only. CPU verification: pytest 308 passed with 63 subtests (272 before; the 36 new tests are upstream's three new check files); unittest 99 passed with the same inherited Windows socket abort as the baseline. All 287 tracked Python files compile; both JavaScript files parse; pyflakes reports the same findings as the baseline, only line numbers moved.
+The published fork was 649d93f8 before this delivery.
 
 ## Done this session
-- Adopted the Web UI colour-token refactor: every `style.css` rule and the `app.js` canvases and inline styles read `:root` tokens, the app window's bars use them with the old colours as fallbacks, and Studio's block colours are `--data-*` tokens.
-- Adopted the themes (Fizgig, Light n' Orange, Seventies, Synthwave, Graphite, Colour-blind safe, High contrast, Dim) with the Theme card at the top of Preferences. Each device keeps its choice in browser storage.
-- Adopted the loading-screen tips, the masked-training "(prior preservation)" label and the GPU out-of-memory guidance appended to a failed run's log (#258).
-- The fork had no colour or `style.css` changes, so nothing needed re-expressing as tokens. Every `var(--...)` and `themeColor()` name in the web files resolves to a `style.css` definition or a value set at runtime. The restart banner's `.warning-card` and the Notify button's `.btn-sm` rules remain.
-- The themes were not checked visually.
+- Adopted pods running this computer's Fizgig: `web/pod_version.py`, `/api/pod/match` and `/api/pod/newest`, the app window's switch cover, the Pods list asking a free pod on another build to switch, the pod About box's Use the newest Fizgig, Move's version-mismatch text, and the pod guide, README and Vast.ai notes.
+- Adopted PR #259: sub-folder runs leave out Fizgig's own folders (`originals_2`..., `removed`, any case) and name them in the run log; the app window ignores a minimized window's off-screen position (#205); public Hugging Face downloads retry once without an expired login (`utils/hf_public.py`).
+- Adopted the masked-training prior-preservation help text, release notes v8.9.93 with theme screenshots, and the checks' CI pins (tqdm, toml, voluptuous, einops, accelerate, transformers, OpenCV). CI's `checks.yml` installs them; nothing was installed locally.
+- Conflicts: `app_window._remember` runs upstream's off-screen check before the fork's strict preferences read; `run_server` keeps the fork's guarded `web_port` write, then upstream's `_SRV[0] = srv`.
+- `pod_version.busy()` sees a claimed Start because the fork's claim sets `_run["state"]` to `starting`. The new pod routes sit after the token check and read the capped `_body()`. Every server, captions, studio, helpers and prep_jobs name it reads exists in the fork.
 
 ## Fork changes on top of upstream
 - `.gitignore` ignores `AGENTS.md` and upstream's `.cursor/`. Upstream release notes remain in `docs/RELEASE_NOTES_vX.Y.Z.md`; do not create CHANGELOG.md.
@@ -25,7 +25,8 @@ The published fork was d760f486 before this delivery.
 4. `local_start` writes the disposable second-GPU preferences with `_write`, outside the main preferences guard. The main preferences file is not affected.
 5. The former slate-theme audit remains unfinished; upstream's theme system (this sync) may supersede it; `webui/`, the preferences backup and the audit document were deleted in the prior recovery. Training Start while Studio loads was previously reported to leave Studio on loading; not rechecked here.
 6. Whole-tree pyflakes has inherited findings, including deferred type names, closures whose resources are deleted after use, unused imports and a delayed exception callback in Gizmo. Compare against the pre-merge report; do not claim whole-tree lint is clean.
-7. Windows socket tests can fail with WinError 10053 and pass on rerun. This session the first post-merge pytest run hit one abort in `test_files.py`; three reruns of that file and a second full run passed. This Windows-only failure is an environment exception; CI runs on Linux. An existing upstream extra blank line in `checks/test_face_backends.py` can appear in broad historical whitespace checks.
+7. Windows socket tests can fail with WinError 10053 and pass on rerun. This session `test_files.Uploads.test_bad_names_refused` aborted in the baseline and both post-merge unittest runs, and `test_access` aborted once in the first; three reruns of `test_access.py` passed and two of three of `test_files.py` passed. Both pytest runs passed. This Windows-only failure is an environment exception; CI runs on Linux. An existing upstream extra blank line in `checks/test_face_backends.py` can appear in broad historical whitespace checks.
+8. A pod asked to run this computer's Fizgig fetches the commit from its own `origin` (shootthesound/Fizgig). This fork's merge commits are not there, so a pod on another build answers that the version isn't on GitHub, keeps the build note, and Move refuses with that text; the Pods list asks again every 90 s. Upstream handles this as an error, not a crash. Decide whether that is acceptable or pods should run from the fork. Not exercised against a pod.
 
 ## Decisions
 - Keep upstream's app and minimal fork patches. Never send changes upstream. No autostart.
@@ -41,6 +42,7 @@ The published fork was d760f486 before this delivery.
 - `_start` takes `models=` and `confirm=` by keyword. Any exception between claim and launch must release the claim via `_unclaim`. `_resumed()` must require `ok` before releasing a queue hold; `_open_run_log` must remain non-raising after the starting state is set.
 - New raw-body routes must use `_raw()`, not direct `rfile.read(n)`. Helper routes must retain authentication and guarded preference writes.
 - `/api/form/state` can download `FAMILY_PREVIEW_LOOK`; `/api/masks/sam_fetch` downloads a large model. Do not exercise either against live preferences as an incidental smoke test.
+- `pod_version.busy()` reads server `_lock`, `_run`, `_fetch` and helpers' `_out`, `_sw`, `_mvin` internals; a fork patch that renames them breaks pod switching only on a pod.
 - `checks/test_plan_presets.py` supplies Edit/Slider folders and prompt-slider inputs; extend these for new run modes. The pre-push hook excludes upstream commits and merge commits; inspect the authored working-tree changes as well.
 
 ## Verify
