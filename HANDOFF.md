@@ -1,18 +1,17 @@
 # HANDOFF
 
-**Updated:** 2026-10-28 | **Branch:** master | **Upstream:** 15c84479 | **Delivery target:** fork/master
+**Updated:** 2026-10-31 | **Branch:** master | **Upstream:** b211ed10 | **Delivery target:** fork/master
 
 ## State
-Merged 30 upstream commits after 98de7a48 through 15c84479 onto 45c5eb3f. All adopted, with one Continue success guard adapted for the fork; no conflicts. Local merge only; the cached published fork remains 45c5eb3f. Nothing fetched or pushed.
-Static verification: all 287 tracked Python files compile in memory; both JavaScript files parse; all 100 referenced theme tokens resolve across 30 UI files; no conflict markers, whitespace errors or unresolved merge-content scan findings. Tests, builds, imports and startup were not run by user choice; pyflakes is unavailable. Dependencies and CI are unchanged.
+Merged 66 upstream commits after 15c84479 through b211ed10 (release notes v9.0.1) onto 03b774da. All adopted; 2 files conflicted (`server.py`, `app.js`), resolved below. Local merge only; the published fork remains 03b774da. Nothing pushed.
+Static verification: all 292 tracked Python files compile in memory; both JavaScript files parse; an isolated import of `fizgig.web.server`, `gallery_style`, `captions` and the detail-crop modules succeeded; no conflict markers or whitespace errors. Tests, builds and startup were not run by user choice; pyflakes is unavailable. Dependencies and CI files are unchanged.
 
 ## Done this session
-- Adopted Z-Image Base, Turbo previews, shared model-file paths, preview settings fixes and the timestep-LoRA render fix; Base workbench renders leave int8 attention off.
-- Adopted the optional secondary captioning model, readable-build checks and layer streaming. Empty or invalid secondary paths fall back to the Krea 2 text encoder; no automatic secondary-model download.
-- Adopted MOSS-Image rotation-based Clean-end schedules, distinct LoRA/fine-tune defaults and reduced learning rates on lower-share refresh epochs; adopted the MiniMax H3 picture-distillation shape fix.
-- Adopted shared prompt sets, persistent training-folder hiding, up to three Royale likeness photos, Continue form loading and upstream release notes v8.9.94/v8.9.95.
-- Sweep catch: `_continue_run` attaches its new form only when Start returns `ok`, as `_resumed` requires. A fork warning response must not load the form as a successful Continue.
-- All existing fork-added lines survived the merge; 25 fork-only files are unchanged. New prompt-set routes retain token authentication and the capped JSON reader. The supplied prior token-check script was missing; an in-memory check covers literal, inline and dynamically assembled tokens.
+- Adopted Detail crops (Image Prep, captions, "Train on the crops only"), the Style score in the Samples gallery, Start checks (warnings with Start anyway), Start that downloads a missing model first, the Run summary card, the sidebar meters, Table view and Add-to-captions, caption dropout, Start at a smaller size, concept caption tasks, Pods tab (Delete pod, auto-joined Helpers, found passwords), move-home fetching, the Krea 2 ComfyUI int8 builds, the auto-recaption fix, CLI docs and release notes v8.9.96 to v9.0.1.
+- Conflict 1, `_start_one`: kept the fork's version (claim/`_unclaim`, `prev`, its own Profiler refusal that already existed). Upstream's matching Profiler check is the same behaviour with different wording; the fork wording is kept and `checks/test_start.py` only asserts "Profiler".
+- Conflict 2, `/api/start` and the UI: both warning systems coexist. Upstream's Start checks (`launch.start_checks`, strings, `anyway: true`, `showWarnings`) run first; the fork's `{code, message}` warnings (low disk, resume at max epochs, `confirm` codes, `startAnyway`) are asked on the request that would start the run. `start()` in `app.js` tells them apart by `typeof warnings[0] === "string"`; `/api/start` passes `confirm` into `_start`. `_fetch_then_start` still launches `_start(*then)` with no `confirm`: if a fork warning stops that run after a download, the log now prints the warning text instead of "?".
+- Conflict 3, `pollRun`: kept `runNotify(...)` and upstream's `resumeMarks()`, `runSummary()` and Studio-button refresh.
+- Auto-merged files that both sides touched (`form.py`, `captions.py`, `index.html`) keep every fork-added line (script check: 0 missing). New routes `/api/style` and `/api/captions/add` sit in the authenticated handlers; `add` uses `caption_ext`. `gallery_style` writes `style.json` with a plain `open` in the samples folder (same shape as upstream's likeness scorer; not hardened).
 
 ## Fork changes on top of upstream
 - `.gitignore` ignores `AGENTS.md` and upstream's `.cursor/`. Upstream release notes remain in `docs/RELEASE_NOTES_vX.Y.Z.md`; do not create CHANGELOG.md.

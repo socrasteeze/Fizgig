@@ -461,6 +461,8 @@ class FamilyDescription:
     # the Captions tab's "Caption Every Song" card: every audio file gets "<trigger>, <common words>", no AI. The
     # string is the greyed example shown in the empty Common words box. "" = no card
     song_captions: str = ""
+    # the Samples tab's first preview prompt for this family; "" = form.DEFAULTS' "A high quality photo" (a photo model)
+    sample_prompt: str = ""
     # training previews may render on the preview checkpoint (the preview_dit file, sampled with
     # preview_checkpoint_sampling) instead of the training model - Klein's Distilled previews. The driver brings the
     # memory handoff (park_for_preview / load_preview_checkpoint / unpark_after_preview)
@@ -531,6 +533,21 @@ class FamilyDescription:
     # masked training (fizgig/dataset/masks.py): the driver's training_loss takes loss_mask; opt in, so a family added
     # later never gets a tick its driver can't honour
     masked_training: bool = False
+    # caption dropout (families/train.py): a share of steps trains on the empty caption's encoding, made once at the
+    # start with the family's own text encoder; off for a family with its own (H3) or no pictures (ACE-Step)
+    caption_dropout: bool = True
+    # the learning rates the Start checks call usual (launch.start_checks): ((kind, low, high), ...) for "lora",
+    # "finetune" and "slider" - a third of the lowest shipped preset to three times the highest; a rate outside is a
+    # warning at Start, never a block. A kind left out has no rule (an optimizer that sets its own rate has none)
+    start_lr_bands: tuple = ()
+    # Start at a smaller size (families/train.py): the first share of a standard LoRA's epochs at a smaller Target
+    # Megapixels, blended into the full size; its own cache folder (a latent file is named by the picture's size,
+    # not the training size). Off for clips (H3) and a family with no pictures (ACE-Step)
+    resolution_stages: bool = True
+    # Detail crops (dataset/detail_crops.py): a training folder switched to them in Image Prep also trains one square
+    # crop of each picture at its own scale (brushwork 1:1), at the size the run trains at; off for clips (H3) and a
+    # family with no pictures (ACE-Step)
+    detail_crops: bool = True
     network_hint: str = ""            # the line under Network Type in place of the LoRA / LoKR trade
     ema_hint: str = ""                # the line under Weight averaging (EMA) in place of the shared one
     ema_section: str = ""             # "other": the EMA row sits in Other Options (MiniMax H3's place)
