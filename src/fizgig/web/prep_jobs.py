@@ -11,6 +11,7 @@ import threading
 import time
 
 from fizgig.dataset import prep
+from fizgig.utils.image import flatten
 from fizgig.utils.upright import upright
 
 _lock = threading.Lock()
@@ -182,8 +183,7 @@ def test_faces(path, face_label):
     hi = faces.index(sel) if sel in faces else None
     with Image.open(path) as img:
         img = upright(img)
-        img = img.convert("RGB") if img.mode not in ("RGB", "RGBA") else img
-        shown = draw_face_boxes(img, faces, highlight_index=hi).convert("RGB")
+        shown = draw_face_boxes(flatten(img), faces, highlight_index=hi).convert("RGB")
     shown.thumbnail((1400, 1400))
     buf = io.BytesIO()
     shown.save(buf, "JPEG", quality=88)
@@ -223,10 +223,14 @@ def embed_face_box(path, embedder=None):
         if emb.name == "arcface":       # read as before (OpenCV, unicode-safe): the same pixels, the same numbers
             import cv2
             import numpy as np
-            bgr = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+            raw = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+            if raw is not None and raw.ndim == 3 and raw.shape[-1] == 4:     # see-through: on white
+                a = raw[..., 3:].astype(np.float32) / 255.0
+                raw = (raw[..., :3] * a + 255.0 * (1 - a)).round().astype(np.uint8)
+            bgr = None if raw is None else (cv2.cvtColor(raw, cv2.COLOR_GRAY2BGR) if raw.ndim == 2 else raw[..., :3])
             return (None, None) if bgr is None else emb.embed_bgr(bgr)
         with Image.open(path) as img:
-            return emb.embed_pil(upright(img).convert("RGB"))
+            return emb.embed_pil(flatten(upright(img)))
     except Exception:
         return None, None
 
@@ -396,4 +400,4 @@ def start_masks(folder, kind, subject_only=False, overwrite=False, sam=None):
 def _open_rgb(path):
     from PIL import Image
     with Image.open(path) as im:
-        return im.convert("RGB")
+        return flatten(im)

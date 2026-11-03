@@ -2504,6 +2504,7 @@ function rvDraw(g, im, fr, W, H) {
   // the video's own frames (shown here and exported): fixed colours, not the theme's
   g.fillStyle = "#000"; g.fillRect(0, 0, W, H);
   const sc = Math.min(W / im.naturalWidth, H / im.naturalHeight), dw = im.naturalWidth * sc, dh = im.naturalHeight * sc;
+  g.fillStyle = "#fff"; g.fillRect((W - dw) / 2, (H - dh) / 2, dw, dh);    // a transparent sample on white
   g.drawImage(im, (W - dw) / 2, (H - dh) / 2, dw, dh);
   if ($("rvTicker").checked) {
     const label = "Epoch " + fr.epoch;
@@ -8985,6 +8986,28 @@ function fullPicture(src) {
   } catch (e) { /* not a URL: as it is */ }
   return src;
 }
+
+// a see-through picture (Qwen Image 2.1 draws them) sits on a checkerboard wherever it shows, so its transparency
+// reads as transparency, not as the page behind it; JPEGs (thumbnails of ordinary photos) are never looked at
+const ALPHA_PROBE = document.createElement("canvas");
+ALPHA_PROBE.width = ALPHA_PROBE.height = 48;
+document.addEventListener("load", (e) => {
+  const img = e.target;
+  if (!(img instanceof HTMLImageElement)) return;
+  let see = false;
+  let src = img.currentSrc || img.src || "";
+  try { src = decodeURIComponent(src); } catch (err) { /* as it is */ }
+  if (/\.png|\.webp|image\/png|image\/webp|^blob:/i.test(src)) {
+    try {
+      const c = ALPHA_PROBE.getContext("2d", {willReadFrequently: true});
+      c.clearRect(0, 0, 48, 48);
+      c.drawImage(img, 0, 0, 48, 48);
+      const d = c.getImageData(0, 0, 48, 48).data;
+      for (let i = 3; i < d.length; i += 4) if (d[i] < 250) { see = true; break; }
+    } catch (err) { /* a picture the page can't read back: as it is */ }
+  }
+  img.classList.toggle("see-through", see);
+}, true);
 
 function wireLightbox() {
   document.addEventListener("click", (e) => {
