@@ -1,9 +1,13 @@
 """Image utilities for sample generation and display."""
 
+from __future__ import annotations
+
 import numpy as np
-import torch
 from PIL import Image
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
+
+if TYPE_CHECKING:
+    import torch
 
 
 def preprocess_image(
@@ -33,6 +37,7 @@ def preprocess_image(
     image_np = np.array(image)
     image_np = resize_image_to_bucket(image_np, (w, h))
 
+    import torch                      # not at the top: the web server imports flatten() and must come up without torch
     image_tensor = torch.from_numpy(image_np).float() / 127.5 - 1.0
     image_tensor = image_tensor.permute(2, 0, 1).unsqueeze(0)  # HWC -> NCHW
     return image_tensor, image_np, alpha
