@@ -33,6 +33,7 @@ Every script supports `--help` for the full argument list. This document covers 
 - [Preparing images and captions](#preparing-images-and-captions)
 - [Klein 9B training](#klein-9b-training)
 - [Flux 3 Image Klein training](#flux-3-image-klein-training)
+- [Fibo 2.0 training](#fibo-20-training)
 - [MOSS-Image training](#moss-image-training)
 - [Krea 2 training](#krea-2-training)
 - [MiniMax H3 training](#minimax-h3-training)
@@ -59,7 +60,7 @@ Every script supports `--help` for the full argument list. This document covers 
 
 ## Model files: where they come from, where they go
 
-Headless, there is no Preferences tab: **model locations are passed as flags on every command** (`--dit`, `--vae`, `--text_encoder`, for MiniMax H3 `--audio_vae`, `--turbo_lora_path` and `--training_adapter_path`, for Krea 2 and Qwen Image 2.1 `--speed_lora`, and for Qwen `--training_adapter`). The CLI does not read the GUI's `prefs.json` — put the paths in a shell script or Makefile once and forget about them. The files themselves are the same ones the GUI's Preferences tab links to:
+Headless, there is no Preferences tab: **model locations are passed as flags on every command** (`--dit`, `--vae`, `--text_encoder`, `--speed_lora` for a family's Turbo / speed LoRA, `--training_adapter` for a training adapter, and for MiniMax H3's audio VAE `--aux audio_vae=PATH` when caching and `--family_option audio_vae=PATH` when training). The CLI does not read the GUI's `prefs.json` — put the paths in a shell script or Makefile once and forget about them. The files themselves are the same ones the GUI's Preferences tab links to:
 
 **Klein 9B:**
 
@@ -81,6 +82,15 @@ Headless, there is no Preferences tab: **model locations are passed as flags on 
 | Distilled DiT `flux3_image_klein_sd_bf16.safetensors` | diffusion_models/ | 16-step previews (`--preview_checkpoint`) and the workbench tabs |
 | Autoencoder `flux2-vae.safetensors` | vae/ | `--vae` (cache step: `--model`) |
 | Text encoder `qwen3vl_4b_bf16.safetensors` | text_encoders/ | `--text_encoder` (cache step: `--model`) |
+
+**Fibo 2.0** (all in [Comfy-Org/Fibo-2.0](https://huggingface.co/Comfy-Org/Fibo-2.0/tree/main), none gated):
+
+| File | Download | Used for |
+|---|---|---|
+| Dev DiT `fibo2_dev_bf16.safetensors` | diffusion_models/ | training (`--dit`); quantised to INT8 or NF4 at load when `--precision` asks. The 8.4 GB `fibo2_dev_int8_convrot.safetensors` there loads too (decoded at load) |
+| Autoencoder `flux2-vae.safetensors` | vae/ | `--vae` (cache step: `--model`) |
+| Text encoder `qwen3vl_4b_bf16.safetensors` | text_encoders/ | `--text_encoder` (cache step: `--model`) |
+| Turbo LoRA `fibo_2.0_turbo_lora_avg_rank_270_bf16.safetensors` | loras/ | 4-step previews (`--speed_lora`, with `--sample_steps 4 --sample_cfg_scale 1`) |
 
 **MOSS-Image** (none gated):
 
@@ -107,13 +117,13 @@ Headless, there is no Preferences tab: **model locations are passed as flags on 
 | File | Download | Used for |
 |---|---|---|
 | DiT, pruned int8 (~21 GB) | [minimax_h3_fl2va_pruned_int8_convrot.safetensors](https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors) | training (`--dit`) — the same file ComfyUI runs |
-| DiT, reference build *(optional)* | [minimax_h3_ref2va_pruned_int8_convrot.safetensors](https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors) | `--dit` for LoRAs that live in the reference-to-video workflow, and for `--distill` |
+| DiT, reference build *(optional)* | [minimax_h3_ref2va_pruned_int8_convrot.safetensors](https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors) | `--dit` for LoRAs that live in the reference-to-video workflow, and for reference distillation (`--family_option distill=1`) |
 | Text encoder, nvfp4 (~15.7 GB) | [qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors](https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors) | `--text_encoder` (caching, and pre-encoding preview prompts) |
 | Video VAE | [minimax_h3_video_vae_fp16.safetensors](https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/vae/minimax_h3_video_vae_fp16.safetensors) | `--vae` |
-| Audio VAE *(optional)* | [minimax_h3_audio_vae_fp32.safetensors](https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/vae/minimax_h3_audio_vae_fp32.safetensors) | `--audio_vae` — sound in clips, voice recordings, previews with sound |
-| Turbo LoRA *(optional)* | [minimax_h3_turbo_v4_step600.safetensors](https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora/blob/main/minimax_h3_turbo_v4_step600.safetensors) | 6-step previews (`--turbo_lora_path`) |
-| Training adapter *(recommended)* | [minimax_h3_image_training_adapter.safetensors](https://huggingface.co/circlestone-labs/MiniMax-H3-Image-Training-Adapter/blob/main/minimax_h3_image_training_adapter.safetensors) (Circlestone, the GUI default — one file for both bases) | `--training_adapter_path` |
-| Training adapter, Ostris *(best for videos)* | [minimax_h3_training_adapter_v1.safetensors](https://huggingface.co/ostris/minimax_h3_training_adapter/blob/main/minimax_h3_training_adapter_v1.safetensors) (fl2va) · [ref2va file](https://huggingface.co/ostris/minimax_h3_training_adapter/blob/main/minimax_h3_ref2va_training_adapter_v1.safetensors) | `--training_adapter_path` — match it to `--dit` |
+| Audio VAE *(optional)* | [minimax_h3_audio_vae_fp32.safetensors](https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/vae/minimax_h3_audio_vae_fp32.safetensors) | `--aux audio_vae=` (caching) and `--family_option audio_vae=` (training) — sound in clips, voice recordings, previews with sound |
+| Turbo LoRA *(optional)* | [minimax_h3_turbo_v4_step600.safetensors](https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora/blob/main/minimax_h3_turbo_v4_step600.safetensors) | 6-step previews (`--speed_lora`) |
+| Training adapter *(recommended)* | [minimax_h3_image_training_adapter.safetensors](https://huggingface.co/circlestone-labs/MiniMax-H3-Image-Training-Adapter/blob/main/minimax_h3_image_training_adapter.safetensors) (Circlestone, the GUI default — one file for both bases) | `--training_adapter` |
+| Training adapter, Ostris *(best for videos)* | [minimax_h3_training_adapter_v1.safetensors](https://huggingface.co/ostris/minimax_h3_training_adapter/blob/main/minimax_h3_training_adapter_v1.safetensors) (fl2va) · [ref2va file](https://huggingface.co/ostris/minimax_h3_training_adapter/blob/main/minimax_h3_ref2va_training_adapter_v1.safetensors) | `--training_adapter` — match it to `--dit` |
 
 **Qwen Image 2.1:**
 
@@ -163,7 +173,7 @@ The quickest way to get every file is the fetcher the Preferences download butto
 
 ## What's family-specific at a glance
 
-Every family trains through the same two scripts — `src/fizgig/families/cache.py` and `src/fizgig/families/train.py`, selected with `--family` (`klein`, `flux3`, `moss_image`, `krea2`, `minimax`, `qwen_image21`, `zimage`, `zimage_base`, `sdxl`, `anima`, `acestep15xl`) — and shares the dataset format, pause/resume, Context LoRA, LoKR, sliders, fine-tuning and the memory planner. What differs:
+Every family trains through the same two scripts — `src/fizgig/families/cache.py` and `src/fizgig/families/train.py`, selected with `--family` (`klein`, `flux3`, `fibo2`, `moss_image`, `krea2`, `minimax`, `qwen_image21`, `zimage`, `zimage_base`, `sdxl`, `anima`, `acestep15xl`) — and shares the dataset format, pause/resume, Context LoRA, LoKR, sliders, fine-tuning and the memory planner. What differs:
 
 | Feature | Klein 9B | Flux 3 Image Klein | MiniMax H3 | Krea 2 | Qwen Image 2.1 |
 |---|---|---|---|---|---|
@@ -397,6 +407,47 @@ The saved LoRA loads in ComfyUI's standard LoRA loader.
 
 ---
 
+## Fibo 2.0 training
+
+Fibo 2.0 trains through the shared cache script and trainer with `--family fibo2`. The four files are in the [download table](#model-files-where-they-come-from-where-they-go); none needs a token. See [the Fibo 2.0 guide](FIBO2.md) for the presets, memory and ComfyUI.
+
+### Full example
+
+The GUI's **Fibo 2.0 (rank 32, full model)** preset, as it builds it: rank 32, 0.25 MP (`resolution = [512, 512]` in the TOML), Automagic from 1e-6, 40 epochs, with Turbo previews:
+
+```bash
+python src/fizgig/families/cache.py --family fibo2 --stage latents --dataset_config my_dataset.toml --model /models/flux2-vae.safetensors
+python src/fizgig/families/cache.py --family fibo2 --stage text    --dataset_config my_dataset.toml --model /models/qwen3vl_4b_bf16.safetensors
+
+python src/fizgig/families/train.py \
+  --family fibo2 \
+  --dataset_config my_dataset.toml \
+  --dit /models/fibo2_dev_bf16.safetensors \
+  --output_dir ./output_loras/my_subject \
+  --output_name my_subject \
+  --network_dim 32 --network_alpha 32 \
+  --optimizer_type automagic3 --learning_rate 1e-6 \
+  --max_train_epochs 40 --save_every_n_epochs 1 --seed 42 \
+  --precision auto --blocks_to_swap -1 --compile_blocks auto \
+  --ema_decay 0.98 --max_grad_norm 1.0 \
+  --vae /models/flux2-vae.safetensors \
+  --text_encoder /models/qwen3vl_4b_bf16.safetensors \
+  --speed_lora /models/fibo_2.0_turbo_lora_avg_rank_270_bf16.safetensors --speed_lora_strength 1 \
+  --sample_prompts sample_prompts.txt --sample_steps 4 --sample_cfg_scale 1 \
+  --sample_every_n_epochs 5 --sample_at_first --sample_width 1024 --sample_height 1024 --sample_seed 1234
+```
+
+Without `--speed_lora`, previews render on the Dev model: `--sample_steps 30 --sample_cfg_scale 5`.
+
+### The flags that matter
+
+- `--precision auto|bf16|int8|nf4` and `--blocks_to_swap -1`: as for Qwen Image 2.1 below.
+- **Edit LoRAs** (`control_directory` in the TOML; the caption is the edit instruction), **slider LoRAs** (`--slider_pairs`, `--slider_prompts`), **masked training** (`--masked_training`, `--mask_prior`) and **fine-tuning** (`--finetune` with `--ft_rotations`, `--ft_rotate_every`; the GUI's preset uses 1e-5, 3 rotations, 2 epochs a part) work as on [Qwen Image 2.1](#qwen-image-21-training).
+- `--train_blocks` takes the block map's ids (`layers.0` ... `layers.43`, `noise_refiner.0/1`, `perceiver.layers.0/1`, `x_embedder`, `t_embedder`, `final_layer`).
+- Every saved file (LoRA, Studio save, Extract, fine-tune checkpoint) is in ComfyUI's layout and loads there as it is.
+
+---
+
 ## MOSS-Image training
 
 MOSS-Image trains through the shared cache script and trainer with `--family moss_image`. You need the three files from the [download table](#model-files-where-they-come-from-where-they-go); the dataset TOML is the same as the other families'. Previews run res_multistep for 30 steps with CFG 4. The LoRA trains every Linear in all 42 blocks, block 22 included; with MOSS-Image SFT or a fine-tune of it as `--dit`, add `--family_option lora_sft=1` so it trains attention only (the GUI's Train attention only; it also lowers a fine-tune's VRAM on Base, at a possible cost in quality). `--family_option lownoise_pct=40` sets the clean-end share (a single value; leave it out for the model's own schedule, about 11%); `lownoise_pct=60:7:30:8:3` is the GUI's Slide (the default), 60% until epoch 7, then sliding in a straight line to 30% by epoch 8 (here one step), and after that 60% with every 3rd epoch at 30%, at half the learning rate (the every-N epochs take the lower share, whichever comes first; leave off `:3` for none); `60:7:30:15:2` slides over eight epochs instead; `lownoise_pct=75:5:40` drops at once, 75% for the first 5 epochs, then 40%. Train on the Base: a LoRA trained on Kromoss began to overbake after about 750 steps in our test. With SFT as `--preview_checkpoint`, `--speed_lora` (the Turbo LoRA) is left out of the previews; it joins previews on the Base.
@@ -532,7 +583,7 @@ Two warnings worth internalising before you reach for the dropdown. **Learning r
 
 MiniMax H3 (33B) trains on photos, video clips with their sound, and voice recordings, all from one dataset folder — the [dataset TOML](#dataset-config-toml) is the same, and clips and audio files sit beside the images with their own `.txt` captions. You need the files from the [download table](#model-files-where-they-come-from-where-they-go): the pruned int8 DiT, the nvfp4 text encoder, the video VAE, and, for sound and voice, the audio VAE. The Turbo LoRA and the training adapter are optional but both are in the default recipe.
 
-The cache steps are the ones in [the three-step pipeline](#the-three-step-pipeline). `--audio_vae` on the latent cache is what makes a clip's sound a training target (and is required by voice recordings); `--clip_still` picks each clip's sharpest face frame and caches it as a still, for `--clip_still_as_photo` at training time.
+The cache steps are the ones in [the three-step pipeline](#the-three-step-pipeline). `--aux audio_vae=PATH` on the latent cache is what makes a clip's sound a training target (and is required by voice recordings); `--aux clip_still=1` picks each clip's sharpest face frame and caches it as a still, for `--family_option clip_still_as_photo=1` at training time.
 
 ### Full example
 
@@ -627,7 +678,7 @@ The other two presets change only a few flags. **Standard** is `--network_dim 16
 
 - `--training_adapter FILE` — the Fizgig training adapter, frozen for every training step, off for previews and absent from the saved LoRA. Without it Qwen 2.1 LoRAs tend to collapse into texture or wobble part-way through.
 - `--ema_decay 0.98` — weight averaging: checkpoints and previews come from a smoothed average of the weights. `0` (the CLI default) turns it off.
-- `--optimizer_type adamw8bit|adamw|automagic3` — `automagic3` sets its own learning rate from `--learning_rate` as a start, and turns off `--adaptive_lr`, `--per_image_lr` and `--warmup_look_outliers`.
+- `--optimizer_type adamw8bit|adamw|automagic3|automagic4|prodigy|muon` — `automagic3` and `automagic4` set their own learning rate from `--learning_rate` as a start, and turn off `--adaptive_lr`, `--per_image_lr` and `--warmup_look_outliers`. `prodigy` finds its own rate too: give `--learning_rate 1.0` (a multiplier); Adaptive LR and the look warm-up stand down, per-image LR stays. `muon` takes AdamW's learning rates.
 - `--network_type lokr --lokr_factor 8` — LoKR instead of LoRA.
 - `--min_timestep` / `--max_timestep` — restrict training to a noise band, on a 0-1 scale.
 
@@ -864,7 +915,7 @@ How to caption for it: [People in group pictures](MULTI_PERSON.md).
 
 **Krea 2** and **Qwen Image 2.1** prompt files are plain prompts only; geometry and seed come from `--sample_width` / `--sample_height` / `--sample_seed`, and previews render on the training model, with the speed LoRA when `--speed_lora` is given (`--sample_steps`: 8 for Krea's Turbo LoRA, 6 for Qwen's). `--sample_cfg_scale` above 1 enables CFG on the previews — pair it with `--sample_negative` for a real uncond. `--sample_at_first` renders an epoch-0 preview (base + zero-init LoRA) before training. `--sample_until_epoch Y --sample_every_n_epochs_after Z` previews every `--sample_every_n_epochs` up to and including epoch Y, then on whole multiples of Z (1 / 10 / 5: epochs 1-10, then 15, 20, 25). `--save_until_epoch Y --save_every_n_epochs_after Z` does the same for checkpoints (not for a fine-tune, which saves at whole rotations). A reference picture: Krea 2's `--sample_image FILE` feeds it through the Qwen3-VL vision path (generate driven by a reference picture; works even with an empty prompt file), and Qwen's `--sample_reference FILE` makes every preview an edit of that photo. `--metadata_title/author/description/license/tags` are recorded in the saved LoRA as `modelspec.*` keys.
 
-**MiniMax H3** prompt files are plain prompts too. Previews are clips: `--sample_frames` sets the length on the model's 17n+5 frame grid (1 = a still, 56 ≈ 2.3 s, 124 = the trained minimum of ~5 s; off-grid values snap down), `--sample_audio` with `--audio_vae` decodes the clip's generated sound to a `.wav` beside the `.mp4`, and `--turbo_lora_path` with `--sample_steps 6` renders on the Turbo LoRA at `--turbo_lora_strength 0.75` (20 steps without it, matching ComfyUI's shipped template). `--sample_width/height` default to H3's native 768. The training adapter is switched off for previews; a Context LoRA stays on. Rendering a 56-frame clip every epoch costs more than the epoch's training on a small dataset — set `--sample_every_n_epochs` higher, or preview stills, when speed is the point.
+**MiniMax H3** prompt files are plain prompts too. Previews are clips: `--family_option preview_frames=N` sets the length on the model's 17n+5 frame grid (1 = a still, 56 ≈ 2.3 s, 124 = the trained minimum of ~5 s; off-grid values snap down), `--family_option preview_audio=1` with `--family_option audio_vae=PATH` decodes the clip's generated sound to a `.wav` beside the `.mp4`, and `--speed_lora` with `--sample_steps 6` renders on the Turbo LoRA at `--speed_lora_strength 0.75` (20 steps without it, matching ComfyUI's shipped template). `--sample_width/height` default to H3's native 768. The training adapter is switched off for previews; a Context LoRA stays on. Rendering a 56-frame clip every epoch costs more than the epoch's training on a small dataset — set `--sample_every_n_epochs` higher, or preview stills, when speed is the point.
 
 **Qwen Image 2.1** prompt files are plain prompts; `--sample_width/height/seed` set the rest. With `--speed_lora` the previews render with the Turbo LoRA at strength 1.0 for 8 steps at CFG 1, on the Turbo checkpoint's own schedule (`--speed_lora_strength` and `--sample_steps` override; other step counts use the model's standard schedule). `--preview_checkpoint <Turbo DiT>` renders them on the Turbo DiT instead (8 steps, CFG 1), with the training model parked beside it. Without either they render on the plain model at `--sample_steps 25 --sample_cfg_scale 3` with `--sample_negative`; `--sample_cfg_scale 1` turns CFG off, at roughly half the time per preview. The training adapter is off for previews and a Context LoRA stays on. `--sample_at_first` renders an epoch-0 preview.
 
@@ -970,7 +1021,7 @@ python -m fizgig.scripts.extract_finetune --base /models/base.safetensors --tune
   --out-dir ./output_loras --name my_finetune --ranks 32,64
 ```
 
-**Model files** — `python -m fizgig.scripts.fetch_models --family <key> --include-optional` downloads a family's files (`--all` for every family, `--dry-run` to list them first, `--token` for gated repos).
+**Model files** — `python -m fizgig.scripts.fetch_models --family <key> --include-optional` downloads a family's files (`--all` for every family, `--dry-run` to list them first, `--token` for gated repos, `--models-dir` to save somewhere other than `user_data/models`, `--choose PREF=alt` for a file offered in a second build).
 
 ---
 
