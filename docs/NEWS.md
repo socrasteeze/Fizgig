@@ -1,5 +1,23 @@
 # Fizgig news
 
+## 9 Nov 2026: Maps in Studio, for any LoRA
+
+**Studio draws heatmaps over its preview, for any LoRA it can load,** including ones you didn't train. Pick a map under the preview: **Where the LoRA acts** (as you've set it, against no LoRA), **What your tweaks change** (move a slider and see where it acts), **Trigger word** (where its attention goes, which on a made-up word often includes any lettering in the picture), and **Blocks** (where each group of the LoRA's blocks acts: on MOSS-Image the Identity group lights up the face, the last blocks edges and texture everywhere). It turns the Profiler's numbers into a picture, and shows which slider to pull down when a LoRA reaches into the background or clothes.
+
+**Two new themes** from @Murf-Code's Fizgig Advanced: Cosmic Pigeon and Deep Space, under Preferences → Theme.
+
+Update Fizgig on your computers; your pods follow. [Studio guide: Maps](https://github.com/shootthesound/Fizgig/blob/master/docs/STUDIO.md#maps) · [Fizgig v9.4.0 release notes](https://github.com/shootthesound/Fizgig/releases/tag/v9.4.0)
+
+## 9 Nov 2026: Training maps, and a much faster compile warm-up
+
+**See what training does to your pictures, epoch by epoch.** Tick **Training maps** under Training Parameters, and three of your training pictures are checked before training and after every epoch, for a few seconds an epoch. The **Training maps** button on the run card shows each with a heatmap over it: **Learned since the start** (green where the model now gets it right, magenta where it got worse), **Not learned yet**, and **Where the LoRA acts**: for a person it should gather on the face and body, and spreading over clothes or the background means the LoRA is learning those too. On every still-picture model except SDXL (since 9.3.2), a fourth map, **Trigger word**, shows how much of each area's attention goes to your trigger word inside the model. It works on every still-picture model.
+
+**Compiled runs warm up much faster.** The compiler now builds each block for any picture size and caption length from the start. With **Leave the rest of the model alone** or **Fizgig LoRA Isolation**, a MOSS-Image test with 25 picture sizes went from about 19 s a step at the start to a whole 2-epoch run in 84 s. Speed once warmed up is unchanged.
+
+**Full fine-tunes train with the optimizer you pick:** Adafactor by default, or AdamW8bit, AdamW, AdEMAMix8bit or Lion8bit (thanks @RitschRatsch666, #312).
+
+Update Fizgig on your computers; your pods follow. [Training maps guide](https://github.com/shootthesound/Fizgig/blob/master/docs/TRAINING_MAPS.md) · [Fizgig v9.3.0 release notes](https://github.com/shootthesound/Fizgig/releases/tag/v9.3.0)
+
 ## 8 Nov 2026: Faster MOSS-Image training and previews, faster training on every model, and a faster Studio
 
 **Training is much faster, uses far less memory, and likeness is unchanged.** On an RTX 5090, a MOSS-Image LoRA at batch 1 (94 pictures, Muon, 70 epochs) takes about 20 minutes instead of 49. At batch 3, MOSS-Image now matches OneTrainer's speed on the same card in less memory (1.07 s a step in 6.9 GB, against 1.07 s in 7.4 GB). Thanks to @tsk5cb-cmyk, whose logs in #221 showed where the time was going.

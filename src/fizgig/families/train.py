@@ -959,8 +959,9 @@ class _FineTune:
 
     def __init__(self, driver, desc, dit, net, dit_path, device, *, max_train_epochs, rotations, save_every_rotations,
                  rotate_every, start_window, epochs_done, fused, lr, master_dir, mp=None, group=None, max_parts=0,
-                 held_grads=False, batch_gb=0.0):
+                 held_grads=False, batch_gb=0.0, optimizer_type="adafactor"):
         from fizgig.families import ft
+        from fizgig.training.optimizers import FT_OPTIMIZERS, ft_optimizer
         from fizgig.utils.device import plannable_free_vram
         self.ft, self.driver, self.desc, self.dit, self.src, self.lr = ft, driver, desc, dit, dit_path, lr
         self.be = driver.ft_backend(dit, device, dit_path, group) or ft.SharedBackend(driver, dit, device, dit_path,
@@ -987,9 +988,30 @@ class _FineTune:
                     f"{plannable_free_vram():.2f} GB free")
         if batch_gb:                   # Batch size: the pictures past the first, planned off the free memory
             logger.info(f"[finetune] {batch_gb:.1f} GB kept for the batch's pictures past the first")
+        # the optimizer (#312): one a fine-tune can use, else Adafactor; a backend that plans its own windows
+        # (MiniMax H3's calibration) keeps Adafactor, the state its plan is measured with
+        opt = ft_optimizer(optimizer_type)
+        if opt != str(optimizer_type or "").strip().lower():
+            logger.warning(f"[finetune] {optimizer_type} is a LoRA optimizer - a fine-tune can't use it, so this one "
+                           f"trains with Adafactor")
+        if opt != "adafactor" and not getattr(self.be, "plans_optimizer_state", False):
+            logger.warning(f"[finetune] {desc.display_name}'s fine-tune plans its memory for Adafactor - training "
+                           f"with Adafactor, not {opt}")
+            opt = "adafactor"
+        if opt != "adafactor":
+            try:                               # built once here, so a missing package says so before the first step
+                ft.make_optimizer([torch.zeros(8, device=device, requires_grad=True)], lr, opt)
+            except Exception as e:
+                logger.warning(f"[finetune] {opt} could not be built ({type(e).__name__}: {e}) - training with "
+                               f"Adafactor")
+                opt = "adafactor"
+        self.opt = opt
+        if FT_OPTIMIZERS[opt]:
+            logger.info(f"[finetune] {opt}: windows planned with its optimizer state (+{FT_OPTIMIZERS[opt]:g} GB per "
+                        f"GB of trained weights)")
         windows, stream, why, usable = self.be.plan(
             plannable_free_vram() - batch_gb, allow_stream=os.environ.get("FIZGIG_NO_FT_STREAM") != "1", mp=mp,
-            max_parts=max_parts, held_grads=held_grads)
+            max_parts=max_parts, held_grads=held_grads, state_factor=FT_OPTIMIZERS[opt])
         for line in why:
             logger.info(f"[finetune] {line}")
         if windows is None:
@@ -1003,8 +1025,9 @@ class _FineTune:
         self.epochs_done = int(epochs_done)
         self.streamer = getattr(self.be, "streamer", None) or (True if stream else None)
         driver.ft_cycle(self.cycle, self.epochs_done, self.epochs)
-        self.fused = ft.FusedSteps(lr) if fused else None
-        self.opt_label = ("per-parameter " if fused else "") + ft.make_optimizer([torch.zeros(1)], lr)[1] + " (fine-tune)"
+        self.fused = ft.FusedSteps(lr, opt) if fused else None
+        self.opt_label = ("per-parameter " if fused else "") + (
+            opt if opt != "adafactor" else ft.make_optimizer([torch.zeros(1)], lr)[1]) + " (fine-tune)"
         logger.info(f"[finetune] FULL FINE-TUNE - {self.sched.describe()}")
         logger.info(f"[finetune] {rotations} rotation(s) of {self.cycle} epoch(s) = {self.epochs} epochs; checkpoint"
                     f" + preview every {save_every_rotations} rotation(s) = every {self.save_every} epochs "
@@ -1045,7 +1068,7 @@ class _FineTune:
         if self.fused is not None:
             self.fused.attach(params)
             return params, None
-        return params, self.ft.make_optimizer(params, self.lr)[0]
+        return params, self.ft.make_optimizer(params, self.lr, self.opt)[0]
 
     def park(self):
         """Everything back to NF4 with the master complete - before a save, a preview, or the end."""
@@ -1087,10 +1110,11 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                  metadata_title=None, metadata_author=None, metadata_description=None, metadata_license=None,
                  metadata_tags=None, metadata_trigger_phrase=None, metadata_thumbnail=None,
                  resume_state_dir=None, adaptive_lr=False, adaptive_lr_min=1e-4, adaptive_lr_max=2e-4,
-                 max_grad_norm=1.0, ema_decay=0.0, optimizer_type="adamw", optimizer_args="",
+                 max_grad_norm=1.0, ema_decay=0.0, optimizer_type=None, optimizer_args="",
                  lr_scheduler="constant", lr_warmup_steps=0, lr_scheduler_num_cycles=1, lr_scheduler_power=1.0,
                  gradient_accumulation_steps=1, compile_blocks="auto", gradient_checkpointing="auto", blocks_to_swap=0, network_type="lora", lokr_factor=8,
                  log_per_image_loss=False, per_image_lr=False, auto_recaption=False, warmup_look_outliers=False,
+                 training_maps=False, training_maps_images=3,
                  trigger_word=None, trigger_position="start", recaption_triggers=None, recaption_instruction=None,
                  recaption_instruction_detailed=None, recaption_task=None, recaption_task_detailed=None,
                  captioner=None, finetune=False, ft_rotations=10, ft_save_every_rotations=1, ft_rotate_every=1, ft_max_parts=0,
@@ -1105,6 +1129,8 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
     if desc is None or not desc.training_ready:
         raise RuntimeError(f"unknown or untrainable family {family!r}")
     validate_output_name(output_name)          # before any model loads, not at the first save an epoch in (#70)
+    # none given: a LoRA trains with AdamW, a fine-tune with Adafactor (#312)
+    ft_optimizer_type, optimizer_type = optimizer_type or "adafactor", optimizer_type or "adamw"
     if context_lora_path and finetune:
         raise RuntimeError("A Context LoRA trains a LoRA on top of another one; a fine-tune trains the base model "
                            "itself, so the two don't combine. Drop --context_lora_path.")
@@ -1724,7 +1750,7 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                         save_every_rotations=ft_save_every_rotations, rotate_every=ft_rotate_every,
                         start_window=ft_start_window, epochs_done=ft_epochs_done, fused=ft_fused_backward,
                         lr=learning_rate, master_dir=output_dir, mp=driver.ft_load_mp(group), group=group,
-                        max_parts=ft_max_parts, held_grads=bool(dop_cond),
+                        max_parts=ft_max_parts, held_grads=bool(dop_cond), optimizer_type=ft_optimizer_type,
                         batch_gb=quant.batch_extra(desc, _largest_bucket_mp(group) or 0.25, bsz))
         max_train_epochs, save_every_n_epochs = ftr.epochs, ftr.save_every
         if ftr.streamer is not None:
@@ -2445,6 +2471,16 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
     # one-step-behind loss read). Flushed at the epoch's end, before anything reads the records.
     lag = []
 
+    def _step_rate(raw=False):
+        """The rate the step applied: the optimizer's (raw: its group rate, as the bar shows it), or under a
+        fine-tune's free-each-gradient - one optimizer per weight, none to read (#312) - the stepper's rate times
+        this step's multiplier."""
+        if optimizer is not None:
+            return float(optimizer.param_groups[0]["lr"]) if raw else optimizer_lr(optimizer)
+        if ftr is not None and ftr.fused is not None:
+            return float(ftr.fused.lr) * float(ftr.fused.scale)
+        return float(learning_rate)
+
     def _later(fn, **vals):
         """Call fn(**vals as Python numbers / lists) one step from now, without waiting for the GPU now."""
         cpu = {k: (v.detach().to("cpu", non_blocking=True) if torch.is_tensor(v) and v.is_cuda else v)
@@ -2646,6 +2682,25 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                 _noted = time.time()
             time.sleep(2)
     prior = _MaskPrior(driver, dit, net, mask_prior, swapped) if mask_prior else None
+    # Training maps (training/train_maps.py): where a few fixed pictures are still wrong and where the LoRA acts
+    maps = None
+    if training_maps:
+        if not desc.training_maps or slider or ftr is not None or share_worker:
+            logger.info("[maps] training maps are off for this run (" + (
+                "sliders" if slider else "fine-tunes" if ftr is not None else "a helper's share" if share_worker
+                else f"{desc.display_name} doesn't have them") + ")")
+        else:
+            from fizgig.training.train_maps import TrainingMaps
+            maps = TrainingMaps(output_dir, output_name, getattr(group, "datasets", []), images=training_maps_images,
+                                driver=driver, desc=desc,
+                                trigger=str(dop_trigger or trigger_word or metadata_trigger_phrase or "").strip())
+            if maps.keys:
+                maps.start(resume=bool(resume_state_dir))
+                if not resume_state_dir:
+                    maps.capture(0, driver, dit, net, device, swapped=bool(swapped), ema=ema)
+            else:
+                logger.info("[maps] training maps: no picture could be read from the cache - off for this run")
+                maps = None
     for epoch in (_worker_epochs() if share_worker else range(start_epoch, max_train_epochs)):
         shared_epoch.value = epoch + 1
         driver.begin_epoch(epoch + 1 + (ftr.epochs_done if ftr is not None else 0))   # a continued fine-tune counts on
@@ -2866,7 +2921,7 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
             def _rec(lv, per=None, _e=epoch, _i=i, _g=global_step, _keys=batch.get("item_keys"), _ts=_info.get("ts"),
                      _t=_info.get("t", 0.5), _kept=(_kept if not slider and bsz > 1 and _wb is not None else None),
                      _rate=(None if global_step % 20 else      # the rate now and then (Automagic's averages it)
-                            learning_rate if optimizer is None else optimizer_lr(optimizer))):
+                            _step_rate())):
                 recorder.add(epoch=_e, step=_i, loss=lv)
                 steplog.add(step_off + _g, _e + 1 + (ftr.epochs_done if ftr is not None else 0), lv, _rate)
                 if per is not None:            # a batch: one record per picture
@@ -2887,7 +2942,7 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                     progress.start_t += time.time() - _tp
             # the run card's Learning: loss, the step's learning rate (Adaptive LR's, Automagic's) and grad norm
             progress.set_postfix(avr_loss=f"{recorder.moving_average:.4f}",
-                                 lr=f"{float(optimizer.param_groups[0]['lr']):.2e}" if optimizer is not None else "-",
+                                 lr=f"{_step_rate(raw=True):.2e}",
                                  **({"gn": f"{last_gn[0]:.3f}"} if last_gn[0] is not None else {}), refresh=False)
             progress.update(1)
 
@@ -2898,7 +2953,7 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
         _off = ftr.epochs_done if ftr is not None else 0
         logger.info(f"epoch {epoch + 1 + _off}/{max_train_epochs + _off}  avr_loss={recorder.moving_average:.4f}  "
                     f"step={global_step}  {(time.time() - t0) / max(1, steps_per_epoch):.2f}s/step  "
-                    f"lr={learning_rate if optimizer is None else optimizer_lr(optimizer):.3e}  "
+                    f"lr={_step_rate():.3e}  "
                     + (f"({group_rates(optimizer)})  " if optimizer is not None and group_rates(optimizer) else "") +
                     f"peak VRAM {torch.cuda.max_memory_reserved() / 1024 ** 3:.1f} GB")
         steplog.flush()
@@ -2965,6 +3020,8 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                 own = sample_for_epoch(output_dir, output_name, done)
                 if own:
                     refresh_checkpoint_thumbnail(os.path.join(output_dir, f"{output_name}-{done:06d}.safetensors"), own)
+        if maps is not None:           # epoch-end work: already left out of the bar's s/it (between)
+            maps.capture(done, driver, dit, net, device, swapped=bool(swapped), ema=ema)
         if (os.path.exists(pause_flag) and done < max_train_epochs
                 and not (share_now[0] is not None and done < share_now[0]["last"])):   # a share round ends first
             if state_saved:
@@ -3033,6 +3090,9 @@ def setup_parser():
     p.add_argument("--speed_lora_strength", type=float, default=None,
                    help="the preview speed LoRA's strength (default: the family's recommended value)")
     p.add_argument("--log_per_image_loss", action="store_true", help="detect problem images (Problem Images window)")
+    p.add_argument("--training_maps", action="store_true",
+                   help="training maps: where a few fixed pictures are still wrong and where the LoRA acts, each epoch")
+    p.add_argument("--training_maps_images", type=int, default=3, help="how many pictures the training maps follow")
     p.add_argument("--per_image_lr", action="store_true", help="scale each step by the image's loss-watch multiplier")
     p.add_argument("--auto_recaption", action="store_true", help="recaption stuck images (needs --captioner)")
     p.add_argument("--warmup_look_outliers", action="store_true", help="LR warm-up for Look Filter outliers")
@@ -3147,7 +3207,10 @@ def setup_parser():
                    help="torch.compile the DiT blocks (families with compiles=True); auto weighs warm-up vs run length")
     p.add_argument("--ema_decay", type=lambda v: v if str(v).lower().startswith("short") else float(v), default=0.0,
                    help="EMA decay (0.98), 0 = off, or 'short' (sized to the run)")
-    p.add_argument("--optimizer_type", default="adamw")
+    p.add_argument("--optimizer_type", default=None,
+                   help="default: adamw for a LoRA, adafactor for a fine-tune (which takes adafactor, adamw8bit, "
+                        "adamw, pagedadamw8bit, ademamix8bit, pagedademamix8bit or lion8bit; anything else trains "
+                        "it with adafactor)")
     p.add_argument("--optimizer_args", default="")
     p.add_argument("--lr_scheduler", default="constant",
                    choices=["constant", "constant_with_warmup", "cosine", "cosine_with_restarts", "linear",
@@ -3204,6 +3267,7 @@ def main():
         a.family, a.dit, a.dataset_config, a.output_dir, a.output_name, precision=a.precision,
         blocks_to_swap=a.blocks_to_swap, speed_lora_strength=a.speed_lora_strength, network_type=a.network_type, lokr_factor=a.lokr_factor,
         log_per_image_loss=a.log_per_image_loss, per_image_lr=a.per_image_lr, auto_recaption=a.auto_recaption,
+        training_maps=a.training_maps, training_maps_images=a.training_maps_images,
         warmup_look_outliers=a.warmup_look_outliers, trigger_word=a.trigger_word, trigger_position=a.trigger_position,
         recaption_triggers=a.recaption_triggers,
         recaption_instruction=a.recaption_instruction,

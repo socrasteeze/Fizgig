@@ -791,6 +791,8 @@ def _studio_post(what, b):
         return {"ok": True}
     if what == "keep":
         return {"path": studio.keep_tweaked()}
+    if what == "map":                        # maps over the Tweaked render (where the LoRA acts, the tweaks, the trigger)
+        return studio.map_request(b.get("state") or {}, b.get("trigger") or "", bool(b.get("blocks")))
     if what == "render":
         return studio.render(b.get("state") or {}, extra={k: b.get(k) for k in ("video", "audio", "keyframes", "ref_mode", "mix")
                                                           if b.get(k) is not None})
@@ -3278,6 +3280,8 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(d, dict) or not d.get("fizgig_repair_setup"):
                 return self.json({"error": "That file isn't a Studio setup."}, 404)
             return self.json(d)
+        if path == "/api/studio/map":                # the maps over the Tweaked render, once made
+            return self.json(studio.map_status())
         if path == "/api/studio/metrics":            # the pair on screen, measured (and likeness to a reference)
             return self.json(studio.metrics((qs.get("ref") or [""])[0]))
         if path == "/api/studio/epochs":             # the run a LoRA belongs to (the mix's Up to dial)
@@ -3374,6 +3378,7 @@ class Handler(BaseHTTPRequestHandler):
                 key = (os.path.normcase(os.path.abspath(r.get("output_dir") or ".")), (r.get("lora") or "").lower())
                 d = get_family(r.get("family") or "")
                 r["image_loss"] = bool(owners.get(r.get("id")) and d is not None and getattr(d, "loss_watch", False))
+                r["train_maps"] = key not in newest and _maps_has(r.get("output_dir"), r.get("lora"))
                 r["loss_graph"] = key not in newest and os.path.isfile(
                     step_log.loss_path(r.get("output_dir") or "", r.get("lora") or ""))
                 # Continue: the newest run with its name and folder owns its saves (an older one's are overwritten)
@@ -3410,6 +3415,21 @@ class Handler(BaseHTTPRequestHandler):
                               "images": [{**im, "path": pics.get(im["key"], ""), "queued": im["key"] in queued,
                                           "applied": (applied.get(im["key"]) or [{}])[-1].get("epoch")}
                                          for im in res["images"]]})
+        if path == "/api/runs/train_maps":           # one run's training maps (training/train_maps.py), by epoch
+            from fizgig.training import train_maps
+            from fizgig.web import image_loss
+            run = history.get((qs.get("id") or [""])[0])
+            k, t = (qs.get("key") or [None])[0], (qs.get("t") or [None])[0]
+            try:
+                res = train_maps.read(run.get("output_dir"), run.get("lora"), k, t) if run else None
+            except ValueError:
+                return self.json({"error": "bad noise level"}, 400)
+            if res is None:
+                return self.json({"error": "This run has no training maps."}, 404)
+            if k is None:                            # the first ask: the pictures and epochs, no maps yet
+                res["epochs"] = [{"epoch": e["epoch"], "maps": {}} for e in res["epochs"]]
+            return self.json({**res, "live": run.get("result") in ("running", "paused"),
+                              "images": image_loss.image_paths(run, res["keys"])})
         if path == "/api/runs/caption":              # one training image's caption, for the per-image editor
             from fizgig.web import image_loss
             run = history.get((qs.get("id") or [""])[0]) or {}
@@ -5057,6 +5077,11 @@ def run_server(host, port=None, password=None, password_arg=False, open_browser=
             logging.shutdown()
             os._exit(0)
 
+
+
+def _maps_has(output_dir, lora):
+    from fizgig.training import train_maps
+    return train_maps.has_maps(output_dir, lora)
 
 _RESTART = [False]
 _SWITCH = [False]

@@ -187,8 +187,8 @@ def kind_sets(desc, kind):
     """What picking a kind of training also sets (the desktop's _family_kind_chosen): Fine-tune takes the family's
     fine-tune learning rate with Adaptive LR off; a family's kind_values come too."""
     out = dict(dict(getattr(desc, "kind_values", ()) or ()).get(kind, ()))
-    if kind == "finetune":
-        out.update(LEARNING_RATE=f"{desc.ft_learning_rate:g}", ADAPTIVE_LR=False)
+    if kind == "finetune":                   # Adafactor: what every fine-tune is tested on (#312)
+        out.update(LEARNING_RATE=f"{desc.ft_learning_rate:g}", ADAPTIVE_LR=False, OPTIMIZER_TYPE="adafactor")
     return out
 
 
@@ -383,6 +383,12 @@ def form(desc):
             _row("CAPTION_TRIGGER_WORD", "Trigger word", hint="Used by Auto-recaption (below): it adds this word at the "
                  "end of a new caption. The training folder's word, the same as the Captions tab's."),
         ]
+    if desc.training_maps:
+        params.append(_row("TRAINING_MAPS", "Training maps (watch what your LoRA is learning)",
+                           "check", "Heatmaps over three of your own pictures, updated every epoch: which parts the "
+                           "LoRA has learned, which it hasn't yet, and where it's changing things it shouldn't, like "
+                           "the background or clothes. Open them with the Training maps button on the run card. Adds "
+                           "a few seconds an epoch."))
     params += by_section("training", "", "lora")
     if desc.identity_blocks:
         a, b = desc.identity_blocks[0], desc.identity_blocks[-1]
@@ -1060,7 +1066,15 @@ def state(desc, values, image_folder="", captioner="", speed_file=False, checkpo
         hidden.add("LEARNING_RATE")          # Adaptive LR on: Min and Max in its place (the box is ignored)
     if kind == "finetune":       # a fine-tune trains at its own fixed rate: no Adaptive LR, on any model
         hidden.add("ADAPTIVE_LR")
-    opt = str(values.get("OPTIMIZER_TYPE", ""))
+    if kind == "finetune":       # its optimizers take no args; a LoRA optimizer is said, and trains as Adafactor (#312)
+        from fizgig.training.optimizers import FT_OPTIMIZERS
+        hidden.add("OPTIMIZER_ARGS")
+        ft_opt = str(values.get("OPTIMIZER_TYPE", "") or "").strip().lower()
+        if ft_opt and ft_opt not in FT_OPTIMIZERS:
+            notes["OPTIMIZER_TYPE"] = (f"{ft_opt} is a LoRA optimizer - a fine-tune can't use it, so it would train "
+                                       f"with Adafactor. Pick Adafactor (recommended: what every Fizgig fine-tune is "
+                                       f"tested on), or AdamW8bit, AdamW, AdEMAMix8bit or Lion8bit.")
+    opt = str(values.get("OPTIMIZER_TYPE", "")) if kind != "finetune" else ""
     if opt in ("automagic3", "automagic4"):
         disabled |= {"ADAPTIVE_LR", "KREA2_PER_IMAGE_LR", "KREA2_WARMUP_LOOK"}
         force.update({k: False for k in ("ADAPTIVE_LR", "KREA2_PER_IMAGE_LR", "KREA2_WARMUP_LOOK") if values.get(k)})
@@ -1077,8 +1091,6 @@ def state(desc, values, image_folder="", captioner="", speed_file=False, checkpo
             force["OPTIMIZER_ARGS"] = mine
         if opt == "muon":
             notes["OPTIMIZER_TYPE"] = "muon matches AdamW's step size: the usual learning rates and Adaptive LR apply."
-        elif kind == "finetune":                 # a fine-tune keeps its own optimizer and rate (families/ft.py)
-            notes["OPTIMIZER_TYPE"] = "A fine-tune uses its own optimizer: prodigy applies to LoRAs."
         else:
             # per-image LR stays: with Prodigy it weights that image's loss, it never writes the group rate
             disabled |= {"LEARNING_RATE", "ADAPTIVE_LR", "KREA2_WARMUP_LOOK"}
@@ -1090,7 +1102,7 @@ def state(desc, values, image_folder="", captioner="", speed_file=False, checkpo
             notes["OPTIMIZER_TYPE"] = ("prodigy finds its own learning rate: the Learning Rate box is a multiplier, "
                                        "locked to 1.0, and Adaptive LR and the look warm-up are off. Per-image LR "
                                        "still works, as a weight on each picture's loss.")
-    if opt not in ("prodigy", "muon"):
+    if kind != "finetune" and opt not in ("prodigy", "muon"):
         # switched away from Muon / Prodigy (every picture preset is on Muon): their default args left in the box made
         # AdamW / AdamW8bit fail to build and fall back to plain, unfused AdamW, with only a log warning. Exactly their
         # defaults are cleared; anything typed by hand stays.
@@ -1512,6 +1524,7 @@ def inputs(desc, values, *, models, python, repo_dir, image_folder, cache_root, 
         FAMILY_SLIDER_SOURCE=(("prompts" if s("FAMILY_SLIDER_SOURCE") == "Prompts" else "pairs")
                               if len(slider_sources(desc)) > 1 else slider_sources(desc)[0]),
         ADAPTIVE_LR=b("ADAPTIVE_LR") and desc.adaptive_lr, SAVE_STATE=b("SAVE_STATE"),
+        TRAINING_MAPS=b("TRAINING_MAPS") and desc.training_maps,
         SAVE_STATE_ON_TRAIN_END=b("SAVE_STATE_ON_TRAIN_END"), FAMILY_FT_FUSED=b("FAMILY_FT_FUSED"),
         FAMILY_SLIDER_ULTRA=b("FAMILY_SLIDER_ULTRA"),
         FAMILY_FAST_ID=b("FAMILY_FAST_ID") and kind == "standard" and bool(desc.identity_blocks),

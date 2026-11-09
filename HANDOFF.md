@@ -1,8 +1,11 @@
 # HANDOFF
 
-**Updated:** 2026-11-08 | **Branch:** master | **Upstream:** 82fdeb26 | **Delivery target:** fork/master
+**Updated:** 2026-11-09 | **Branch:** master | **Upstream:** 28c7315d | **Delivery target:** fork/master
 
 ## State
+2026-11-09: merged 62 upstream commits after 82fdeb26 through 28c7315d (release notes v9.2.6 to v9.4.0: Training maps, the trigger-word map, Maps in Studio, the fine-tune optimizer choice, Adafactor, the Cosmic Pigeon and Deep Space themes). All adopted, no conflicts; every fork-added line in the 8 files both sides touched is still present. One new fork patch on top: Studio's idle unload waits for a map (see Fork changes). Gates, CPU-only with temporary `TEMP`: compile of 330 files and `node --check` pass; pytest 453 passed and unittest 100 OK, the same as baseline; ruff F821/F811 reports the same 10 findings (one moved line). **`venv` is still on torch 2.10.0+cu128 while upstream requires PyTorch 2.15 with CUDA 13.4.** No GPU work, app startup or pods were exercised, so Training maps and Studio maps have not been run on a real model.
+
+## Earlier: 2026-11-08 sync
 2026-11-08: merged 174 upstream commits after a4966e37 through 82fdeb26 (past release notes v9.2.5). All adopted, no conflicts; every fork-added line in the 7 files both sides touched is still present. One new fork patch on top: `src/fizgig/training/optimizers.py` imports torch lazily (see Fork changes). Gates, CPU-only with temporary `TEMP`: compile of 328 files and `node --check` pass; pytest 453 passed (baseline 374); unittest's only errors are import failures of the function-based modules because pytest was not on its path, the same 14 as baseline plus new `test_adaptive_lr_ceiling`. A ruff F821/F811 pass reports 10 findings, none in files this fork patched. **Upstream now requires PyTorch 2.15 with CUDA 13.4, bitsandbytes 0.50.2 and triton-windows 3.7.0.post26 (Python 3.11+, NVIDIA driver 580+); `venv` is still on torch 2.10.0+cu128 and was not updated.** No GPU work, app startup or pods were exercised.
 
 ## Earlier: 2026-11-02 sync
@@ -22,6 +25,7 @@ Merged 66 upstream commits after 15c84479 through b211ed10 (release notes v9.0.1
 ## Fork changes on top of upstream
 - `src/fizgig/utils/image.py`: `torch` is imported inside `preprocess_image` (and under `TYPE_CHECKING` for the annotation), with `from __future__ import annotations`. Upstream 11ce8672 added `flatten()` to this module and imported it at the top of `web/prep_jobs.py` and `web/royale.py`, so importing the web server pulled in torch and `checks/test_serve.py::NoTorch` failed. Drop this patch once upstream fixes it.
 - `src/fizgig/training/optimizers.py`: `torch` is imported inside `create_optimizer`. Upstream's family modules import `MUON_DEFAULT_ARGS` from it at the top since 4a091d65, so importing the web server pulled in torch and `checks/test_serve.py::NoTorch` failed. Drop this patch once upstream fixes it.
+- `src/fizgig/web/studio.py`: `idle_unload` also waits while a map is being made, and `map_request` counts as use. Upstream's Studio maps (da30a5ad) run on the worker that the fork's 10-minute idle unload stops, so a map asked for near the limit could be cut off.
 - `.gitignore` ignores `AGENTS.md` and upstream's `.cursor/`. Upstream release notes remain in `docs/RELEASE_NOTES_vX.Y.Z.md`; do not create CHANGELOG.md.
 - `checks/isolate.py` redirects data paths to temporary storage and disables migration before web imports. Both unittest and pytest are required: unittest alone misses upstream's function-based checks.
 - Keep run notifications, low-disk and resume-at-max-epochs warnings, unreadable-preferences refusal, caption-job termination, Studio save/load/unload safety, the restart banner, Windows queue-save retries, 16 MB JSON/helper body caps and caption-extension limits.
