@@ -79,7 +79,8 @@ class IdleUnload(unittest.TestCase):
     def test_busy_stays(self):
         late = 1000.0 + studio.IDLE_UNLOAD_S * 10
         for busy in ({"S": {"rendering": True}}, {"S": {"pending": ({}, None)}}, {"S": {"state": "loading"}},
-                     {"S": {"state": "idle"}}, {"R": {"state": "rendering"}}, {"M": {"state": "rendering"}}):
+                     {"S": {"state": "idle"}}, {"R": {"state": "rendering"}}, {"M": {"state": "rendering"}},
+                     {"S": {"map": {"busy": True}}}):
             with self.subTest(busy=busy):
                 self._restore()
                 with studio._lock:

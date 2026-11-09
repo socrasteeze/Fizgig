@@ -316,6 +316,7 @@ def idle_unload(now=None) -> bool:
     with _lock:
         idle = (_S["state"] == "ready" and not _S["rendering"] and _S["pending"] is None
                 and not _S.get("nolora_busy") and _R["state"] != "rendering" and _M["state"] != "rendering"
+                and not (_S.get("map") or {}).get("busy")
                 and not any(t["state"] == "rendering" for t in _T.values())
                 and now - (_S["used"] or now) > IDLE_UNLOAD_S)
     if not idle:
@@ -427,6 +428,7 @@ def map_request(state, trigger="", blocks=False):
         # each request its own number, echoed by the worker: a result is only ever the answer to its own request
         # (a map asked for while another was being made used to take the earlier one's result)
         rid = _S["map_rid"] = int(_S.get("map_rid", 0)) + 1
+        _S["used"] = time.time()                 # a map counts as use: idle_unload starts its wait again
         _S["map"] = {"gen": shown, "rid": rid, "busy": True, "trigger": trig, "with_blocks": bool(blocks)}
     _send({"cmd": "map", "gen": shown, "rid": rid, "state": state, "picture": pic, "trigger": trig, "blocks": bool(blocks)})
     return {"ok": True, "gen": shown, "rid": rid, "trigger": trig}
