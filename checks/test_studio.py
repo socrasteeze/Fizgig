@@ -98,6 +98,12 @@ class IdleUnload(unittest.TestCase):
             studio._event({"ev": "loaded", "family": "klein", "primary": "fake.safetensors"})
         self.assertEqual(studio._S["used"], 5000.0)
 
+    def test_reload_forgets_a_map_cut_off_with_the_old_worker(self):
+        with studio._lock:
+            studio._S.update(state="loading", map={"busy": True})
+        studio._event({"ev": "loaded", "family": "klein", "primary": "fake.safetensors"})
+        self.assertNotIn("map", studio._S)
+
 
 class SaveBakesStudiosLora(unittest.TestCase):
     """Studio and Royale share one engine: Royale swaps its LoRA in. Save must bake Studio's, or refuse."""

@@ -145,6 +145,7 @@ def _event(ev):
             _S.update({k: ev.get(k) for k in ("primary_blocks", "donor_blocks", "hash", "eq")})
             if kind == "loaded":
                 _S.update(nolora="", nolora_media="", nolora_gen=0, nolora_busy=False)
+                _S.pop("map", None)              # a map cut off with the old worker never answers: idle_unload must not wait for it
                 _S.update(state="ready", family=ev.get("family", ""), primary=ev.get("primary", ""),
                           donor=ev.get("donor", ""), status="Loaded.", error="", used=time.time())
                 _S["profile"] = _profile(ev.get("hash", ""))
