@@ -23,7 +23,7 @@ import torch
 import torch.nn.functional as F
 from safetensors.torch import load_file
 
-from fizgig.families.driver import Block, BlockGroup, FamilyDriver, prior_base, weighted_loss, with_prior
+from fizgig.families.driver import Block, BlockGroup, FamilyDriver, picture_losses, prior_base, weighted_loss, with_prior
 
 logger = logging.getLogger(__name__)
 
@@ -584,6 +584,31 @@ class Fibo2Driver(FamilyDriver):
         if base is not None:
             loss = with_prior(loss, prior, base, (pred - base.float()).pow(2).mean(dim=1), mw, wgt)
         return loss, {"t": state["t"]}
+
+    def stack_conds(self, conds):
+        """Captions of different lengths pad to the longest, rounded up to a multiple of 16 (few shapes for cuDNN's
+        attention plans, #221), with the mask off: the DiT reads each prompt's length from its mask (its gist count,
+        its cross-attention), as the pipeline batches prompts."""
+        n = max(c["tokens"].shape[-2] for c in conds)
+        n += -n % 16
+        tokens = [F.pad(c["tokens"], (0, 0, 0, n - c["tokens"].shape[-2])) for c in conds]
+        masks = [F.pad(c["mask"].bool(), (0, n - c["mask"].shape[-1])) for c in conds]
+        return {"tokens": torch.cat(tokens), "mask": torch.cat(masks)}
+
+    def training_loss_batch(self, dit, latents, cond, generator, *, min_t=0.0, max_t=1.0, loss_mask=None):
+        """Batch Size above 1: each picture's sigma and noise drawn as training_loss draws them, picture by picture,
+        then one forward over the batch. The loss is the pictures' mean: a mask weighs each picture on its own."""
+        latents = self._as4(latents)
+        states = [self.noise_latents(latents[i:i + 1], generator, min_t=min_t, max_t=max_t)
+                  for i in range(latents.shape[0])]
+        state = {k: torch.cat([s[k] for s in states]) for k in ("hidden_states", "timestep", "noise")}
+        pred = self.predict(dit, state, cond).float()
+        target = (state["noise"] - latents).float()
+        mw = None if loss_mask is None else \
+            loss_mask.float().to(latents.device).reshape(latents.shape[0], *latents.shape[-2:])
+        per = picture_losses((pred - target).pow(2).mean(dim=1), mw)
+        return per.mean(), {"t": sum(s["t"] for s in states) / len(states), "per": per,
+                            "ts": [float(s["t"]) for s in states]}
 
     @torch.no_grad()
     def initial_noise(self, seed, width, height):

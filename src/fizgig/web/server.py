@@ -154,6 +154,22 @@ def list_gpus():
     return [row] if row else []
 
 
+_CARD_GB = {}
+
+
+def _card_total_gb(prefs):
+    """The training card's size in GiB (Preferences' cuda_device, else the first), kept 5 minutes - the Training tab
+    asks on every change and the card doesn't change. None when there's no GPU to read."""
+    want = str((prefs or {}).get("cuda_device") or "")
+    hit = _CARD_GB.get(want)
+    if hit and time.time() - hit[0] < 300:
+        return hit[1]
+    row = _chosen_gpu(list_gpus(), want)
+    total = row["total_gb"] if row else None
+    _CARD_GB[want] = (time.time(), total)
+    return total
+
+
 def _chosen_gpu(rows, want):
     """The row for Preferences' cuda_device (an index or a GPU-… uuid), else the first card."""
     want = str(want or os.environ.get("CUDA_VISIBLE_DEVICES") or "").split(",")[0].strip()
@@ -475,6 +491,19 @@ def update_prefs(changes: dict):
         _write_json(PREFS_FILE, p)
 
 
+def _repair_model_links():
+    """A Preferences row pointing at another model's file (Klein 9B's and Z-Image's VAEs, both once saved as
+    ae.safetensors): moved to the right file, once at start (fetch_models.repair_links). Never stops the start."""
+    try:
+        from fizgig.scripts.fetch_models import repair_links
+        with _lock:
+            p = _read_json(PREFS_FILE)
+            if p and repair_links(p, user_data.MODELS_DIR, log=lambda m: logger.info("[models]%s", m[1:])):
+                _write_json(PREFS_FILE, p)
+    except Exception as e:
+        logger.warning(f"[models] couldn't check the model files' links: {e}")
+
+
 def pref_path(prefs, key) -> str:
     """A Preferences path as the desktop resolves it (a folder inside Fizgig is stored relative)."""
     v = str(prefs.get(key) or "").strip()
@@ -600,6 +629,9 @@ def _studio_samples(desc):
     turbo = v.get("FAMILY_TURBO_STRENGTH")
     if blank(turbo):
         turbo = spd[1] if spd else 0
+    from fizgig.families.form import turbo_ticked_off
+    if turbo_ticked_off(desc, v):                 # the Use the Turbo LoRA tick off (MOSS-Image)
+        turbo = 0
     f = pref_path(load_prefs(), sp.pref_key) if sp is not None and sp.pref_key else ""
     try:
         live = bool(f and os.path.isfile(f) and float(turbo) > 0)
@@ -1078,7 +1110,7 @@ _SIZE_KEYS = ("DATASET_MEGAPIXELS", "CLIP_MEGAPIXELS")
 # are the same), the save schedule (when checkpoints are written) and the learning rate (the run trains on at the
 # new one, logged); the rest trains on as it was
 _RESUME_SAMPLE_KEYS = ("SAMPLE_PROMPT", "SAMPLE_SEED", "SAMPLE_WIDTH", "SAMPLE_HEIGHT", "SAMPLE_STEPS",
-                       "SAMPLE_CFG_SCALE", "FAMILY_TURBO_STRENGTH", "SAMPLE_CHECKPOINT",   # + previews on the checkpoint
+                       "SAMPLE_CFG_SCALE", "FAMILY_TURBO_STRENGTH", "FAMILY_TURBO_ON", "SAMPLE_CHECKPOINT",
                        "FAMILY_PREVIEW_LOOK",                                              # + the SFT look tick
                        "SAMPLE_EVERY_N_EPOCHS", "SAMPLE_LATER", "SAMPLE_UNTIL_EPOCH", "SAMPLE_EVERY_AFTER",
                        "BLOCKS_SWAP", "SAVE_EVERY_N_EPOCHS", "SAVE_LATER", "SAVE_UNTIL_EPOCH", "SAVE_EVERY_AFTER",
@@ -2028,6 +2060,8 @@ def preview_labels(mode) -> dict:
         line = words.get("checkpoint" if r.get("checkpoint") else "look" if r.get("look") else "base", "")
         if r.get("turbo") and words.get("turbo"):
             line = (words["turbo"] + " " + line).strip()
+        if r.get("small"):                       # Faster, smaller previews (a card under 20 GB)
+            line = (line + f" Rendered smaller ({r['small']}) to save time, so softer than full size.").strip()
         if r.get("helper"):                      # a helper rendered the round (web/helpers.py)
             line = (line.rstrip(".") + f" · rendered on {r['helper']}" if line else f"Rendered on {r['helper']}")
         if line:
@@ -3441,6 +3475,8 @@ class Handler(BaseHTTPRequestHandler):
             r["resume"] = r.get("resume") if r["state"] == "paused" else ""
             from fizgig.web import helpers
             r["move"] = helpers.move_status()
+            _bd = get_family(r.get("family") or "")         # Move to...'s batch tick: why a batch can't go (or [])
+            r["move_batch"] = form.batch_blockers(_bd, r.get("values") or {}) if _bd is not None else ["no run"]
             r["web_queue"] = webqueue.status()
             from fizgig.web import pod_stop
             r["pod_stop"] = pod_stop.status()
@@ -3834,7 +3870,8 @@ class Handler(BaseHTTPRequestHandler):
                 if path == "/api/helper/share_start":
                     return self.json(helpers.share_start(b))
                 if path == "/api/helpers/move":           # this computer's run: carry on training on a helper
-                    return self.json(helpers.move_start(str(b.get("id") or ""), bool(b.get("now")), b.get("home", True) is not False))
+                    return self.json(helpers.move_start(str(b.get("id") or ""), bool(b.get("now")), b.get("home", True) is not False,
+                                                        bool(b.get("batch"))))
                 if path == "/api/helpers/move_back":      # a run moved to a helper: back here, to carry on training
                     return self.json(helpers.move_back(bool(b.get("now")), bool(b.get("delete"))))
                 if path == "/api/helpers/move_clear":
@@ -3903,12 +3940,32 @@ class Handler(BaseHTTPRequestHandler):
                                 base_file=pref_path(prefs, dit) if dit else "",
                                 checkpoint_path=ckf if ckf and os.path.isfile(ckf) else "",
                                 look_file=bool(lkf and os.path.isfile(lkf)), look_fetch=_look_fetch(desc, vals, lkf))
+                if getattr(desc, "preview_small_card_option", 0):   # Faster, smaller previews: cards under 20 GB
+                    vt = _stats["vram"][1]
+                    if vt and vt / 1e9 >= 20.0 and "FAMILY_PREVIEW_SMALL" not in st["hidden"]:
+                        st["hidden"] = sorted([*st["hidden"], "FAMILY_PREVIEW_SMALL"])
+                    elif (vt and vt / 1e9 < 20.0 and not vals.get("_chosen_FAMILY_PREVIEW_SMALL")
+                          and not vals.get("FAMILY_PREVIEW_SMALL")):
+                        st["force"]["FAMILY_PREVIEW_SMALL"] = True   # on for a card under 20 GB until they choose
                 if st["kind"] in ("standard", "finetune"):     # the Subjects card: what each folder trains as
                     mpn = _multi_person_notes(vals, b.get("image_folder") or "",
                                               multi_person=st["kind"] == "standard" and
                                               bool(vals.get("FAMILY_MULTI_PERSON")))
                     st["placeholders"] = mpn.pop("__placeholders", {})
                     st["notes"].update(mpn)
+                if desc.batch_training and "BATCH_SIZE" not in st["disabled"]:   # what the batch needs on this card
+                    from fizgig.web import batch_plan
+                    with _lock:
+                        busy = _run["proc"] is not None and _run["proc"].poll() is None
+                    bn, bpend = batch_plan.line(desc, vals, gpu_env(dict(os.environ, PYTHONPATH=os.path.join(
+                        BASE_DIR, "src")), prefs), busy=busy,
+                        files=batch_plan.models(desc, lambda k: pref_path(prefs, k)))
+                    if bn:
+                        st["notes"]["BATCH_SIZE"] = bn
+                    st["pending"] = st.get("pending") or bpend
+                    if str(vals.get("BATCH_SIZE") or "").strip().lower() == "auto":   # Auto: what it does on this card
+                        st["notes"]["BATCH_SIZE"] = launch.batch_auto_note(
+                            desc, vals.get("DATASET_MEGAPIXELS") or 1.0, _card_total_gb(prefs))
                 if st["kind"] == "finetune" and desc.finetune:      # the fine-tune card's plan line (the desktop's)
                     from fizgig.web import ft_plan
                     st["notes"]["FAMILY_FT_ROTATIONS"], st["pending"] = ft_plan.line(
@@ -4787,7 +4844,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("A training run is using the GPU. Extract can run when it finishes.")
                 tools.run_finetune(str(b.get("base") or "").strip(), str(b.get("tuned") or "").strip(),
                                    str(b.get("out_dir") or "").strip() or default_output_dir(),
-                                   str(b.get("name") or ""), b.get("ranks") or [])
+                                   str(b.get("name") or ""), b.get("ranks") or [], identity=bool(b.get("identity")))
                 return self.json({"ok": True})
             if path == "/api/extract/run":
                 from fizgig.web import tools
@@ -4801,7 +4858,8 @@ class Handler(BaseHTTPRequestHandler):
                     name += ".safetensors"
                 folder = str(b.get("out_dir") or "").strip() or default_output_dir()
                 out = tools.run(desc, str(b.get("source") or "").strip(), os.path.join(folder, os.path.basename(name)),
-                                int(b.get("rank") or 4), str(b.get("preset") or ""), [str(x) for x in (b.get("blocks") or [])])
+                                int(b.get("rank") or 4), str(b.get("preset") or ""), [str(x) for x in (b.get("blocks") or [])],
+                                identity=bool(b.get("identity")))
                 return self.json({"ok": True, "output": out})
             if path == "/api/metadata/save":         # the header rewritten, every tensor byte as it was
                 from fizgig.utils.st_meta import write_metadata
@@ -5089,6 +5147,7 @@ def main(argv=None):
         from fizgig.web import pod_version
         pod_version.boot()
     user_data.migrate()                       # Fizgig 7's loose files into user_data, before anything reads them
+    _repair_model_links()
     # a pod: its VNC_PASSWORD, the remote desktop's, so one password opens both. Elsewhere VNC_PASSWORD is ignored (a
     # stray one would open the web UI to the network while Preferences says no password).
     saved = str(load_prefs().get("web_password") or "").strip()

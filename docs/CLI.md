@@ -44,6 +44,7 @@ Every script supports `--help` for the full argument list. This document covers 
 - [ACE-Step training (songs)](#ace-step-training-songs)
 - [Masked training](#masked-training)
 - [Start at a smaller size](#start-at-a-smaller-size)
+- [Batch size](#batch-size)
 - [Caption dropout](#caption-dropout)
 - [Detail crops (style LoRAs)](#detail-crops-style-loras)
 - [Keeping a subject to its trigger (DOP)](#keeping-a-subject-to-its-trigger-dop)
@@ -78,8 +79,8 @@ Headless, there is no Preferences tab: **model locations are passed as flags on 
 
 | File | Download | Used for |
 |---|---|---|
-| Base DiT `flux3_image_klein_bf16.safetensors` | diffusion_models/ | training (`--dit`); quantised to INT8 or NF4 at load when `--precision` asks |
-| Distilled DiT `flux3_image_klein_sd_bf16.safetensors` | diffusion_models/ | 16-step previews (`--preview_checkpoint`) and the workbench tabs |
+| Base DiT `flux3-image-klein-base-bf16.safetensors` | diffusion_models/ | training (`--dit`); quantised to INT8 or NF4 at load when `--precision` asks |
+| Distilled DiT `flux3-image-klein-bf16.safetensors` | diffusion_models/ | 16-step previews (`--preview_checkpoint`) and the workbench tabs |
 | Autoencoder `flux2-vae.safetensors` | vae/ | `--vae` (cache step: `--model`) |
 | Text encoder `qwen3vl_4b_bf16.safetensors` | text_encoders/ | `--text_encoder` (cache step: `--model`) |
 
@@ -253,7 +254,7 @@ cache_directory = "/data/my_subject/cache"
 Field notes:
 
 - **`resolution`** — `[width, height]`. With bucketing enabled this is the *area* target: each image is assigned to the nearest aspect-ratio bucket of roughly `width × height` pixels, so mixed portrait/landscape/square datasets train at their natural aspect ratios. `[1024, 1024]` ≈ 1 MP is the sweet spot for both Klein and Krea 2; `[768, 768]` trains faster on smaller cards at some quality cost.
-- **`batch_size`** — keep it at 1: Fizgig trains one image a step. For a larger effective batch, pass `--gradient_accumulation_steps N` to the trainer: the same averaged gradient, at the memory of batch 1.
+- **`batch_size`** — 1 trains one picture a step, the default. Families that support it take more; see [Batch size](#batch-size). For a larger effective batch at the memory of batch 1, keep 1 and pass `--gradient_accumulation_steps N` to the trainer.
 - **`num_repeats`** — multiplies how often each image appears per epoch. Leave at 1 and train more epochs instead, unless you're balancing multiple `[[datasets]]` blocks against each other.
 - **`cache_directory`** — where latents and text embeddings are stored. **Give every dataset its own cache directory.** The training set is built from the cache, and a shared cache directory can mix a previous dataset's images into your run. (Fizgig cross-checks the cache against `image_directory` and skips orphans with a warning, but a dedicated directory per dataset is the clean way.)
 - **Multiple `[[datasets]]` blocks** are supported — each with its own `image_directory`, `cache_directory`, and optional per-dataset overrides of any `[general]` key (e.g. a different `num_repeats` to weight one folder more heavily).
@@ -335,7 +336,7 @@ Checkpoints land as `output_loras/my_subject/my_subject-000001.safetensors` (epo
 
 **LoRA shape** — `--network_dim` / `--network_alpha` (the GUI presets use matched pairs: 4/4 style and details, 8/8, 16/16 identity); `--network_type lokr --lokr_factor 8` for LoKR.
 
-**Learning rate** — `--learning_rate`, or `--adaptive_lr` (the bi-directional plateau tracker: probes LR up on steady descent, cuts it with weight rollback on plateau or instability). Bounds via `--adaptive_lr_min` (5e-5 for single-subject sets, 1e-4 for noisy multi-subject sets) and `--adaptive_lr_max` (4e-4 is the empirical ceiling). **`--learning_rate` is ignored while adaptive is on**: the run starts at the geometric midpoint of the window and the watcher owns the LR from there. Without it, `--lr_scheduler` / `--lr_warmup_steps` apply.
+**Learning rate** — `--learning_rate`, or `--adaptive_lr` (the bi-directional plateau tracker: probes LR up on steady descent, cuts it with weight rollback on plateau or instability). Bounds via `--adaptive_lr_min` (5e-5 for single-subject sets, 1e-4 for noisy multi-subject sets) and `--adaptive_lr_max` (4e-4 is the empirical ceiling). **`--learning_rate` is ignored while adaptive is on**: the run starts at the geometric midpoint of the window and the watcher owns the LR from there. If it has to cut the rate within three epochs of raising it, the raised rate counts as too high for that run: later raises stop one step below it (the log says "ceiling … learned"), and a resume keeps it. Without it, `--lr_scheduler` / `--lr_warmup_steps` apply.
 
 **Training only part of the model** (the GUI's Model Area) — `--train_blocks` takes block ids (`double_0`-`double_7`, `single_0`-`single_23`) and `--min_timestep` / `--max_timestep` (0-1000) the noise range:
 
@@ -372,7 +373,7 @@ python src/fizgig/families/cache.py --family flux3 --stage text    --dataset_con
 python src/fizgig/families/train.py \
   --family flux3 \
   --dataset_config my_dataset.toml \
-  --dit /models/flux3_image_klein_bf16.safetensors \
+  --dit /models/flux3-image-klein-base-bf16.safetensors \
   --output_dir ./output_loras/my_subject \
   --output_name my_subject \
   --network_dim 16 --network_alpha 16 \
@@ -388,7 +389,7 @@ python src/fizgig/families/train.py \
   --save_state --save_state_on_train_end --keep_last_n_states 2 \
   --vae /models/flux2-vae.safetensors \
   --text_encoder /models/qwen3vl_4b_bf16.safetensors \
-  --preview_checkpoint /models/flux3_image_klein_sd_bf16.safetensors \
+  --preview_checkpoint /models/flux3-image-klein-bf16.safetensors \
   --sample_prompts sample_prompts.txt \
   --sample_every_n_epochs 1 --sample_at_first \
   --sample_width 1024 --sample_height 1024 --sample_seed 1234
@@ -474,7 +475,7 @@ python src/fizgig/families/train.py \
   --optimizer_type adamw \
   --precision auto --compile_blocks auto \
   --ema_decay 0.98 \
-  --family_option lownoise_pct=60:7:30:8:3 \
+  --family_option lownoise_pct=30:7:60:8:3 \
   --save_state --save_state_on_train_end --keep_last_n_states 2 \
   --vae /models/flux2-vae_small.safetensors \
   --text_encoder /models/qwen3.5_9b_bf16.safetensors \
@@ -554,7 +555,7 @@ The non-obvious flags (`--help` lists them all):
   - `<output_dir>/loss_log/per_image_loss.jsonl` — the raw per-step log
   - `<output_dir>/loss_log/problem_images.json` — current verdicts + trends (the per-image loss view in Runs & outputs reads this; it's plain JSON, perfectly greppable headless)
   - a **plateau banner** in the console when ≤~5% of images are still improving, with a best-checkpoint epoch estimate — your "you're done" signal.
-- `--per_image_lr` — acts on the verdicts: stuck images get throttled (×0.5 → ×0.25 → ×0.125), mined-out images ease off (×0.6), the healthy cohort gets a gentle boost (×1.1). Batch size 1 makes this a true per-image learning rate.
+- `--per_image_lr` — acts on the verdicts: stuck images get throttled (×0.5, then ×0.25), mined-out images ease off (×0.6), the healthy cohort gets a gentle boost (×1.1). It is a true per-image learning rate at any Batch size: in a batch, each picture's loss is weighed on its own.
 - `--auto_recaption` — between epochs, confirmed-stuck images get their captions rewritten by Qwen3-VL from what's actually visible, the text cache is re-encoded, and the image gets a fresh start. Two failed attempts and a still-stuck image is excluded from the run entirely. Requires `--text_encoder`. Pass `--trigger_word` so rewritten captions keep your trigger (appended as `, <trigger>`).
 - `--warmup_look_outliers` — curriculum entry (×0.4 LR ramping to ×1.0) for real-but-unusual images. Reads `<dataset>/fizgig_look_scores.json`, which is produced by the GUI's Look Consistency Filter scan — **GUI-only prerequisite**; without the file this flag logs a warning and disables itself.
 
@@ -851,6 +852,26 @@ The log says when each part starts. In a Z-Image Turbo test, 0.25 MP for the fir
 
 ---
 
+## Batch size
+
+`batch_size = 2` (or 3, 4, 6, 8) in the dataset TOML's `[general]` trains that many pictures a step, on Klein 9B, Krea 2, Flux 3 Image Klein, Fibo 2.0, MOSS-Image, Qwen Image 2.1, Z-Image Turbo and Base, SDXL, Anima and MiniMax H3. On MiniMax H3 the batch is of pictures: a clip or a voice still trains on a step of its own. A step's loss is the average of each picture's own loss, as gradient accumulation averages it. A batch holds pictures of one bucket size; captions of different lengths are padded where the model allows it, or the batch is split by caption length.
+
+It pays off most with block swap: each step's swap is spread over every picture in the batch. Batch 3 against batch 1 with Gradient Accumulation 3, at 0.25 MP on an A40:
+
+| | 1 picture a step | Batch 3 |
+|---|---|---|
+| Qwen Image 2.1, 8 blocks swapped | 5.0 s a picture | 1.9 s (2.7× faster) |
+| Qwen Image 2.1, 16 blocks swapped | 9.5 s | 3.5 s (2.7×) |
+| MOSS-Image int8, 8 blocks swapped | 2.5 s | 1.4 s (1.8×) |
+
+With no swap it helps the smaller models (Anima 2.6×, SDXL 2.3× on a 4090) and changes little for the larger ones. These speed-ups were measured at 0.25 MP; at 1 MP the gain is smaller unless blocks are swapping. Each extra picture costs roughly 0.2–0.75 GB at 0.25 MP, more at larger sizes with gradient checkpointing on.
+
+**Batch size Auto** (the GUI's Auto choice, `--batch_size_auto` to the trainer with `batch_size = 1` in the TOML) picks the batch measured fastest per picture for the model at the run's size, on a 40 GB+ card: SDXL 8 at 0.25 MP and 4 at 1 MP, MiniMax H3 4, Anima 4, Flux 3 4 and Fibo 2.0 2 at 0.25 MP, otherwise 1. It stays at 1 on smaller cards, when a setting reads one picture a step, or when the batch would need block swap. Measured on an RTX PRO 6000 with checkpointing off, against batch 1 with it off: SDXL 7.3× / 3.3× faster a picture, H3 2.7× / 1.8×, Anima 2.3×, Fibo 1.7×, Flux 3 1.45×. Klein, Z-Image, MOSS-Image, Qwen Image 2.1 and Krea 2 aren't offered Auto: with no swap one picture already fills the GPU, and batching measured no faster. With checkpointing off each extra picture costs far more (SDXL 2.3 / 5.5 GB at 0.25 / 1 MP, H3 2.4 / 5.9, Anima 5.1, Flux 3 5.7, Fibo 22), so `--gradient_checkpointing auto` turns it off for a batch only when one picture's figure plus those fits.
+
+Batch size above 1 isn't used with sliders, edit pairs, DOP, Fizgig LoRA Isolation or MiniMax H3's reference distillation, and turns off masked-training mask priors, Start at a smaller size and helper shares. The GUI greys those out; the trainer refuses a batch with them. The per-image loss watch (problem images, per-image LR, the look warm-up, auto-recaption) works at any Batch size: each picture in a batch is weighed, excluded and recorded on its own, as its own step would be. Full fine-tunes batch too: each picture past the first is planned off the free memory before the windows are sized, and a regularisation picture keeps its own LR multiplier.
+
+---
+
 ## Caption dropout
 
 `--caption_dropout 0.05` trains that share of steps with no caption (the empty caption's encoding, made once), so the LoRA leans less on the trigger word and the caption's exact words. The GUI offers 0.05 and 0.10. Every picture family; MiniMax H3 has its own, `--family_option caption_dropout=0.05`.
@@ -973,7 +994,7 @@ python src/fizgig/scripts/extract_lora.py --family klein \
   --source big_r32.safetensors --output small_r8.safetensors --rank 8
 ```
 
-`--preset` keeps one of the family's block groups — Klein: `Identity` (single 1-16), `Style+Composition` (double 0-7 + single 0-1, single 2 at half strength), `Details` (single 12-23) — and `--blocks single_1,single_2,...` picks blocks by id. The Extract tab does the same with a Custom block picker.
+`--identity` keeps 4x the rank in the model's identity blocks (MOSS-Image blocks 24-35, Qwen Image 2.1 blocks 10-14), so a character LoRA keeps its likeness at a small rank; the Extract tab's Identity mode tick does the same. `--preset` keeps one of the family's block groups — Klein: `Identity` (single 1-16), `Style+Composition` (double 0-7 + single 0-1, single 2 at half strength), `Details` (single 12-23) — and `--blocks single_1,single_2,...` picks blocks by id. The Extract tab does the same with a Custom block picker.
 
 ---
 
@@ -1021,13 +1042,15 @@ python -m fizgig.scripts.extract_finetune --base /models/base.safetensors --tune
   --out-dir ./output_loras --name my_finetune --ranks 32,64
 ```
 
+`--identity` gives the model's identity blocks 4x each rank (MOSS-Image blocks 24-35, Qwen Image 2.1 blocks 10-14; `_id` in the file name), which keeps a character's likeness in a smaller LoRA.
+
 **Model files** — `python -m fizgig.scripts.fetch_models --family <key> --include-optional` downloads a family's files (`--all` for every family, `--dry-run` to list them first, `--token` for gated repos, `--models-dir` to save somewhere other than `user_data/models`, `--choose PREF=alt` for a file offered in a second build).
 
 ---
 
 ## Other training flags
 
-- `--gradient_checkpointing auto|on` — `auto` (default) turns it off for a compiled LoRA run with no block swap when the measured peak fits free VRAM, as on most 40 GB+ cards (13–27% faster per step); where it doesn't all fit, the last blocks go without it. `on` keeps it everywhere.
+- `--gradient_checkpointing auto|on` — `auto` (default) turns it off for a compiled LoRA run with no block swap when the measured peak fits free VRAM, on 40 GB+ cards only (13–27% faster per step; SDXL, Anima, Flux 3 and Klein measured 1.3–2.3× faster); at a Batch size above 1, when that peak plus each extra picture's measured cost fits. Where it doesn't all fit, the last blocks go without it (batch 1). `on` keeps it everywhere.
 - `--training_adapter_strength S` — the training adapter's strength (default 1.0), for the families that use one.
 - `--sample_strengths 0.5` — also render each preview at these LoRA strengths, comma-separated.
 - `--preview_int8` — INT8 matmuls on the preview checkpoint, for smaller cards.

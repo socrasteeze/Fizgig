@@ -229,6 +229,11 @@ def create_optimizer(name: str, params, lr: float, args_str: str = "",
     MiniMax H3 workaround and every other family keeps the library default. See the note below.
     """
     name = (name or DEFAULT_OPTIMIZER).strip()
+    if name.lower() not in ("muon", "prodigy") and (args_str or "").strip() in (MUON_DEFAULT_ARGS, PRODIGY_DEFAULT_ARGS):
+        # Muon's / Prodigy's own default args left over from a preset (every picture preset is on Muon): they'd make
+        # this optimizer fail to build and fall back to plain AdamW - they don't belong to it, so they're dropped
+        logger.info("[optimizer] %s: ignoring the Optimizer Args left from Muon / Prodigy (%s)", name, args_str.strip())
+        args_str = ""
     kwargs = parse_optimizer_args(args_str)
     key = name.lower()
     _warn_lr(key, lr)
@@ -289,8 +294,11 @@ def create_optimizer(name: str, params, lr: float, args_str: str = "",
             params = list(params)
             flat = ([p for g in params for p in g.get("params", ())]
                     if params and isinstance(params[0], dict) else params)
-            if hasattr(torch.optim, "Muon") and all(getattr(p, "ndim", 0) == 2 for p in flat):
-                opt = torch.optim.Muon(params, lr=lr, **kwargs)
+            if all(getattr(p, "ndim", 0) == 2 for p in flat):
+                # torch.optim.Muon's update with the per-matrix work batched (a LoRA's hundreds of small matrices
+                # made its per-parameter loop a third of a MOSS step, #221)
+                from fizgig.training.muon import BatchedMuon
+                opt = BatchedMuon(params, lr=lr, **kwargs)
             else:
                 from fizgig.training.muon import Muon
                 opt = Muon(params, lr=lr, **kwargs)

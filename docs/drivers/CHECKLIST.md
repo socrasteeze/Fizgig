@@ -52,21 +52,24 @@ Most people train on 12–24 GB cards, so a family isn't finished until it has b
 
 - [ ] Each tab named in `workbench` loads the family and renders: Repair Studio (I'm feeling lucky included), the Profiler (a quick profile writes its report), Extract (a rank-reduced file), LoRA Royale (two checkpoints, seed travel, and prompt travel - it needs `pad_conditioning`, and without it Royale quietly offers no prompt travel).
 - [ ] **Save Repaired is faithful:** a LoRA saved with some blocks switched off renders the same as the live preview it was saved from.
-- [ ] With `activation_cache`: a slider change renders the **same picture** with Turbo Preview on as with it off.
+- [ ] With `activation_cache`: a slider change renders the **same picture** with Reuse unchanged blocks on as with it off.
 
 ## Abilities: every one the model can support
 
-Switch on every ability the model can support, and test each one below. Leave one out only when the model can't do it or a measurement shows it hurts, and say why in a comment beside the description field. [ABILITIES.md](ABILITIES.md) lists what each one asks of the driver.
+Switch on every ability the model can support, and test each one below. Leave one out only when the model can't do it or a measurement shows it hurts, and name it in the description's `not_offered` with the reason. [ABILITIES.md](ABILITIES.md) lists what each one asks of the driver.
+
+`checks/test_family_abilities.py` enforces this: a picture family that lacks an ability at least half the picture families have, without a `not_offered` entry, fails the checks. Run them before calling a family done.
 
 - [ ] **LoKR** (`network_types`), or a comment saying why not.
 - [ ] **Masked training** (`masked_training`): a run with masks and the prior outside them trains and previews.
 - [ ] **Slider LoRAs** (`slider_training`), from photo pairs and from prompts, with a rank-8 Slider preset.
 - [ ] **Edit LoRAs** (`edit_training`) wherever the model takes reference images, with an Edit preset.
 - [ ] **Fast previews:** a speed LoRA, distilled model or preview checkpoint wherever one is published.
-- [ ] **Turbo Preview** (`activation_cache`).
+- [ ] **Reuse unchanged blocks** (`activation_cache`).
 - [ ] **Prompt travel** (`pad_conditioning`) and seed travel in LoRA Royale.
 - [ ] **Compile** and **INT8 attention** where they measure faster.
 - [ ] **EMA**, **Adaptive LR**, the **per-image loss watch**, **caption dropout** and **Multi Concept**, unless the model has a reason against.
+- [ ] **Batch size** (`batch_training`): `training_loss_batch` (and `stack_conds` when captions vary in length), checked on the GPU against the one-picture loss from the same generator state, with captions of different lengths in the batch.
 - [ ] **`start_lr_bands`** for every kind the family offers.
 - [ ] **No Model Area to Train** (`train_areas` stays `()`) and no Fast Identity Mode (`identity_blocks` stays `()`), as on every model but Klein (Model Areas) and Qwen Image (Fast Identity Mode): the LoRA trains the whole model. Areas and identity blocks come only after the block map has been charted by measurement (what each block group does), as Klein's and Qwen Image's were, never from a guess or from what a test run happened to train, and they are added in their own change, not with the family.
 - [ ] **Presets are the standard set**, named after the model: a LoRA preset on the whole model, plus Edit, Fine-tune and Slider where the family has them. No preset that leaves blocks out.
@@ -118,14 +121,14 @@ The abilities that need more than a run to check:
 
 The checks above prove the family works. These make it good, and every family should have them unless it has a measured reason not to. Most are one field in the description.
 
-**Every ability your model can support.** People expect the same tools on every model, so switch on each ability the model is able to do, not only the one you came for. Most cost a field or two: slider LoRAs (`slider_training`: photo pairs need nothing more, prompt sliders two short methods), LoKR in `network_types`, EMA (`ema_default`), the per-image loss watch, a speed LoRA for fast previews, Turbo Preview in Repair Studio (`activation_cache`), every workbench tab, compile and INT8 attention where they measure faster, edit training if the model takes reference images, and full fine-tuning (which can also come later). Leave one out only when the model can't support it or a measurement shows it hurts, and say why in a comment beside the description. [ABILITIES.md](ABILITIES.md) lists them all.
+**Every ability your model can support.** People expect the same tools on every model, so switch on each ability the model is able to do, not only the one you came for. Most cost a field or two: slider LoRAs (`slider_training`: photo pairs need nothing more, prompt sliders two short methods), LoKR in `network_types`, EMA (`ema_default`), the per-image loss watch, a speed LoRA for fast previews, Reuse unchanged blocks in Repair Studio (`activation_cache`), every workbench tab, compile and INT8 attention where they measure faster, edit training if the model takes reference images, and full fine-tuning (which can also come later). Leave one out only when the model can't support it or a measurement shows it hurts, and say why in a comment beside the description. [ABILITIES.md](ABILITIES.md) lists them all.
 
 **Research before presets.** Before writing presets or sampling defaults, find what the model's users actually settled on, not only the model card: the sampler, scheduler, steps and CFG; the learning rate, rank and alpha, epochs or steps per dataset size, and optimizer; and which layers must never be trained (Anima's LLM adapter, for example). Cite the sources in comments beside the values.
 
 **Parity with the reference.** Measure your text conditioning, one model prediction and the sigma schedule against the reference implementation, from identical inputs. If your model code isn't the reference's own code, compare in fp32. A config file written for a newer library can be misread silently; spell such values out in the driver.
 
 **Presets.**
-- Use `adamw` (fused AdamW), not `adamw8bit`, for LoRA presets. 8-bit AdamW steps each LoRA tensor separately, and on a model with hundreds of LoRA'd layers that costs a large share of every step (0.3 s per step on SDXL).
+- Use `muon` for LoRA presets, with `"OPTIMIZER_ARGS": MUON_DEFAULT_ARGS` (Peter, 6 Nov 2026: every picture model's presets are on it, for its source-matching detail). Muon's step is matched to AdamW's (`adjust_lr_fn=match_rms_adamw`), so pick learning rates as for AdamW (one Qwen Image 2.1 run overcooked when Adaptive LR took Muon to 3.5e-4). Add the new family's key to `CHOSEN` in checks/test_optimizers.py, or that check fails. `adamw8bit` and `adamw` stay in the optimizer list: if a model's LoRAs melt on Muon, use one of them for that preset and say why in the description (on 8-bit, set `optimizer_eps_floor_8bit` if some tensors step far past the learning rate, as MiniMax H3's did). Fine-tunes ignore the preset's optimizer and use Adafactor.
 - Set `ema_default="0.98"`, as every other family does.
 - Use a flat learning rate where the per-epoch loss is noisy, and set `adaptive_lr=False` if the plateau detector would only react to noise (SDXL).
 - Set epoch counts from the community's step targets for a typical dataset, and save every epoch.

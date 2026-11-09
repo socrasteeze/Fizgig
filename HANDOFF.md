@@ -1,8 +1,11 @@
 # HANDOFF
 
-**Updated:** 2026-11-02 | **Branch:** master | **Upstream:** 11ce8672 | **Delivery target:** fork/master
+**Updated:** 2026-11-08 | **Branch:** master | **Upstream:** 82fdeb26 | **Delivery target:** fork/master
 
 ## State
+2026-11-08: merged 174 upstream commits after a4966e37 through 82fdeb26 (past release notes v9.2.5). All adopted, no conflicts; every fork-added line in the 7 files both sides touched is still present. One new fork patch on top: `src/fizgig/training/optimizers.py` imports torch lazily (see Fork changes). Gates, CPU-only with temporary `TEMP`: compile of 328 files and `node --check` pass; pytest 453 passed (baseline 374); unittest's only errors are import failures of the function-based modules because pytest was not on its path, the same 14 as baseline plus new `test_adaptive_lr_ceiling`. A ruff F821/F811 pass reports 10 findings, none in files this fork patched. **Upstream now requires PyTorch 2.15 with CUDA 13.4, bitsandbytes 0.50.2 and triton-windows 3.7.0.post26 (Python 3.11+, NVIDIA driver 580+); `venv` is still on torch 2.10.0+cu128 and was not updated.** No GPU work, app startup or pods were exercised.
+
+## Earlier: 2026-11-02 sync
 2026-11-02: merged 12 upstream commits after b211ed10 through 11ce8672 (release notes v9.0.2) onto 75349b44. All adopted, no conflicts (the fork's added lines in every file it touches are still present). One fork patch on top: `src/fizgig/utils/image.py` imports torch lazily (see Fork changes).
 Gates run on the merged tree with `CUDA_VISIBLE_DEVICES=-1`, temporary `TEMP`, and pytest taken from the system Python via `PYTHONPATH` (not installed in `venv`): compile of `src` and `node --check` pass; pytest 319 passed; unittest 100 tests OK. The pre-merge baseline was the same except one `WinError 10053` socket error in unittest (`test_access.WithPassword.test_login_needs_token`, the known flake). A ruff pass for undefined names and unused imports (F821/F401/F841/F811) was clean of new findings. No GPU work, builds, app startup or pods were exercised, and the RunPod REST v2 calls (Pods tab, auto-stop, passwords, Start, Stop, Delete pod) have not been run against RunPod.
 
@@ -18,6 +21,7 @@ Merged 66 upstream commits after 15c84479 through b211ed10 (release notes v9.0.1
 
 ## Fork changes on top of upstream
 - `src/fizgig/utils/image.py`: `torch` is imported inside `preprocess_image` (and under `TYPE_CHECKING` for the annotation), with `from __future__ import annotations`. Upstream 11ce8672 added `flatten()` to this module and imported it at the top of `web/prep_jobs.py` and `web/royale.py`, so importing the web server pulled in torch and `checks/test_serve.py::NoTorch` failed. Drop this patch once upstream fixes it.
+- `src/fizgig/training/optimizers.py`: `torch` is imported inside `create_optimizer`. Upstream's family modules import `MUON_DEFAULT_ARGS` from it at the top since 4a091d65, so importing the web server pulled in torch and `checks/test_serve.py::NoTorch` failed. Drop this patch once upstream fixes it.
 - `.gitignore` ignores `AGENTS.md` and upstream's `.cursor/`. Upstream release notes remain in `docs/RELEASE_NOTES_vX.Y.Z.md`; do not create CHANGELOG.md.
 - `checks/isolate.py` redirects data paths to temporary storage and disables migration before web imports. Both unittest and pytest are required: unittest alone misses upstream's function-based checks.
 - Keep run notifications, low-disk and resume-at-max-epochs warnings, unreadable-preferences refusal, caption-job termination, Studio save/load/unload safety, the restart banner, Windows queue-save retries, 16 MB JSON/helper body caps and caption-extension limits.

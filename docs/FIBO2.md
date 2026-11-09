@@ -2,7 +2,7 @@
 
 [← Back to the README](../README.md)
 
-Fibo 2.0 Dev is BRIA's 8.2B model for text-to-image and editing, trained on long structured captions. Fizgig trains LoRAs, edit LoRAs, slider LoRAs and full fine-tunes on it, from a 12 GB card. Training previews render in 4 steps with Comfy-Org's Turbo LoRA. Every workbench tool works on it: Studio with Turbo Preview, LoRA Royale (epochs, seed and prompt travel), the Profiler and Extract. Saved LoRAs and fine-tunes load in ComfyUI as they are.
+Fibo 2.0 Dev is BRIA's 8.2B model for text-to-image and editing, trained on long structured captions. Fizgig trains LoRAs, edit LoRAs, slider LoRAs and full fine-tunes on it, from a 12 GB card. Training previews render in 4 steps with Comfy-Org's Turbo LoRA. Every workbench tool works on it: Studio with Reuse unchanged blocks, LoRA Royale (epochs, seed and prompt travel), the Profiler and Extract. Saved LoRAs and fine-tunes load in ComfyUI as they are.
 
 Thanks to @spaghettified26, who brought Fibo 2.0 to Fizgig.
 
@@ -30,12 +30,12 @@ All of them come from [Comfy-Org/Fibo-2.0](https://huggingface.co/Comfy-Org/Fibo
 
 | Preset | Rank | Learning rate | Epochs |
 |---|---|---|---|
-| **Fibo 2.0 (rank 32, full model)** | 32 | Automagic, from 1e-6 | 40 |
-| **Fibo 2.0 Edit** | 16 | AdamW 1e-4 | 6 |
+| **Fibo 2.0 (rank 32, full model)** | 32 | Muon 1e-4 | 40 |
+| **Fibo 2.0 Edit** | 16 | Muon 1e-4 | 6 |
 | **Fibo 2.0 Fine-tune** | — | 1e-5, 3 rotations | 2 a part |
-| **Fibo 2.0 Slider** | 8 | AdamW 2e-4, at 0.5 MP | 20 |
+| **Fibo 2.0 Slider** | 8 | Muon 2e-4, at 0.5 MP | 20 |
 
-The LoRA presets train at 0.25 MP with EMA 0.98, saving every epoch. Automagic sets its own rate from its 1e-6 start: it rose to about 1e-4 within ten epochs on a 16-photo likeness set and reached likeness sooner than AdamW at a flat 1e-4, with epoch 40 the best by eye. Starting Automagic at 1e-4 overcooks the LoRA. Scrub the epochs in LoRA Royale to pick the best one.
+The LoRA presets train at 0.25 MP with Muon and EMA 0.98, saving every epoch. Muon's steps match AdamW's in size, so its rates are AdamW's. Automagic v3 is still in the Optimizer Type row: it sets its own rate from a 1e-6 start (rising to about 1e-4 within ten epochs on a 16-photo likeness set); starting it at 1e-4 overcooks the LoRA. Scrub the epochs in LoRA Royale to pick the best one.
 
 The LoRA trains the whole model, every Linear, as Bria's own trainer does.
 
@@ -49,7 +49,7 @@ The LoRA trains the whole model, every Linear, as Bria's own trainer does.
 | INT8 | 18.7 GB | 20.5 GB |
 | NF4 | 15.5 GB | 17.5 GB |
 
-The 1024 preview sets these peaks; training alone takes about 8 GB less. On cards under 20 GB the previews render at 768 with the model parked for the decode, so a 16 GB card trains INT8 with no block swap (about 11 GB) and a 12 GB card trains NF4 (about 8 GB). **Compile Blocks** speeds training up on longer runs (INT8 at 0.25 MP: 0.82 → 0.47 s a step). On cards of 40 GB and up, Auto trains without gradient checkpointing when it fits.
+The 1024 preview sets these peaks; training alone takes about 8 GB less. On cards under 20 GB the previews render at 768 with the model parked for the decode, so Auto plans those cards from training's own peak: a 16 GB card trains INT8 with no block swap at 0.25 MP (12.4 GB measured on an RTX 4090 Laptop GPU, 2.1 s a step) and NF4 at 1 MP (about 13 GB), and a 12 GB card trains NF4 (about 10 GB at 0.25 MP). **Compile Blocks** speeds training up on longer runs (INT8 at 0.25 MP: 0.82 → 0.47 s a step). On cards of 40 GB and up, Auto trains without gradient checkpointing when it fits.
 
 A **full fine-tune** trains the 44 main layers. It fits a 16 GB card, streaming the frozen layers from system RAM; a 24 GB card trains it in three windows, and a 32 GB card in two. See [Full fine-tuning](FINETUNE.md).
 
