@@ -25,8 +25,6 @@ import ast
 import importlib
 import logging
 
-import torch
-
 logger = logging.getLogger(__name__)
 
 # What the Optimizer Args box is filled with when Prodigy or Muon is picked (and the defaults
@@ -228,6 +226,8 @@ def create_optimizer(name: str, params, lr: float, args_str: str = "",
     `eps_floor_8bit` raises the 8-bit Adam family's eps to 1e-6. OFF by default: it is a
     MiniMax H3 workaround and every other family keeps the library default. See the note below.
     """
+    import torch                      # not at the top: the families import the default args here and the web server must come up without torch
+
     name = (name or DEFAULT_OPTIMIZER).strip()
     if name.lower() not in ("muon", "prodigy") and (args_str or "").strip() in (MUON_DEFAULT_ARGS, PRODIGY_DEFAULT_ARGS):
         # Muon's / Prodigy's own default args left over from a preset (every picture preset is on Muon): they'd make
