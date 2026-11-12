@@ -37,6 +37,7 @@ Every script supports `--help` for the full argument list. This document covers 
 - [MOSS-Image training](#moss-image-training)
 - [Krea 2 training](#krea-2-training)
 - [MiniMax H3 training](#minimax-h3-training)
+- [MiniMax H3 Image training](#minimax-h3-image-training)
 - [Qwen Image 2.1 training](#qwen-image-21-training)
 - [Z-Image Turbo and Z-Image Base training](#z-image-turbo-and-z-image-base-training)
 - [SDXL training](#sdxl-training)
@@ -127,6 +128,15 @@ Headless, there is no Preferences tab: **model locations are passed as flags on 
 | Training adapter *(recommended)* | [minimax_h3_image_training_adapter.safetensors](https://huggingface.co/circlestone-labs/MiniMax-H3-Image-Training-Adapter/blob/main/minimax_h3_image_training_adapter.safetensors) (Circlestone, the GUI default — one file for both bases) | `--training_adapter` |
 | Training adapter, Ostris *(best for videos)* | [minimax_h3_training_adapter_v1.safetensors](https://huggingface.co/ostris/minimax_h3_training_adapter/blob/main/minimax_h3_training_adapter_v1.safetensors) (fl2va) · [ref2va file](https://huggingface.co/ostris/minimax_h3_training_adapter/blob/main/minimax_h3_ref2va_training_adapter_v1.safetensors) | `--training_adapter` — match it to `--dit` |
 
+**MiniMax H3 Image:**
+
+| File | Download | Used for |
+|---|---|---|
+| DiT, pruned int8 (~21 GB) | [minimax_h3_image_pruned_int8_convrot.safetensors](https://huggingface.co/Comfy-Org/MiniMax-H3-Image/blob/main/diffusion_models/minimax_h3_image_pruned_int8_convrot.safetensors) | training (`--dit`) — the same file ComfyUI runs |
+| VAE | [minimax_h3_image_vae_fp16.safetensors](https://huggingface.co/Comfy-Org/MiniMax-H3-Image/blob/main/vae/minimax_h3_image_vae_fp16.safetensors) | `--vae` (cache step: `--model`) — its own VAE, not the H3 video VAE |
+| Text encoder, nvfp4 (~15.7 GB) | [qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors](https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors) | `--text_encoder` (cache step: `--model`) — MiniMax H3's, unchanged |
+| Training adapter *(recommended)* | [fizgig_minimax_h3_image_training_adapter.safetensors](https://huggingface.co/ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter/blob/main/fizgig_minimax_h3_image_training_adapter.safetensors) | `--training_adapter` — frozen in training, off in previews and the saved LoRA |
+
 **Qwen Image 2.1:**
 
 | File | Download | Used for |
@@ -175,7 +185,7 @@ The quickest way to get every file is the fetcher the Preferences download butto
 
 ## What's family-specific at a glance
 
-Every family trains through the same two scripts — `src/fizgig/families/cache.py` and `src/fizgig/families/train.py`, selected with `--family` (`klein`, `flux3`, `fibo2`, `moss_image`, `krea2`, `minimax`, `qwen_image21`, `zimage`, `zimage_base`, `sdxl`, `anima`, `acestep15xl`) — and shares the dataset format, pause/resume, Context LoRA, LoKR, sliders, fine-tuning and the memory planner. What differs:
+Every family trains through the same two scripts — `src/fizgig/families/cache.py` and `src/fizgig/families/train.py`, selected with `--family` (`klein`, `flux3`, `fibo2`, `moss_image`, `krea2`, `minimax`, `minimax_image`, `qwen_image21`, `zimage`, `zimage_base`, `sdxl`, `anima`, `acestep15xl`) — and shares the dataset format, pause/resume, Context LoRA, LoKR, sliders, fine-tuning and the memory planner. What differs:
 
 | Feature | Klein 9B | Flux 3 Image Klein | MiniMax H3 | Krea 2 | Qwen Image 2.1 |
 |---|---|---|---|---|---|
@@ -452,7 +462,7 @@ Without `--speed_lora`, previews render on the Dev model: `--sample_steps 30 --s
 
 ## MOSS-Image training
 
-MOSS-Image trains through the shared cache script and trainer with `--family moss_image`. You need the three files from the [download table](#model-files-where-they-come-from-where-they-go); the dataset TOML is the same as the other families'. Previews run res_multistep for 30 steps with CFG 4. The LoRA trains every Linear in all 42 blocks, block 22 included; with MOSS-Image SFT or a fine-tune of it as `--dit`, add `--family_option lora_sft=1` so it trains attention only (the GUI's Train attention only; it also lowers a fine-tune's VRAM on Base, at a possible cost in quality). `--family_option lownoise_pct=40` sets the clean-end share (a single value; leave it out for the model's own schedule, about 11%); `lownoise_pct=60:7:30:8:3` is the GUI's Slide (the default), 60% until epoch 7, then sliding in a straight line to 30% by epoch 8 (here one step), and after that 60% with every 3rd epoch at 30%, at half the learning rate (the every-N epochs take the lower share, whichever comes first; leave off `:3` for none); `60:7:30:15:2` slides over eight epochs instead; `lownoise_pct=75:5:40` drops at once, 75% for the first 5 epochs, then 40%. Train on the Base: a LoRA trained on Kromoss began to overbake after about 750 steps in our test. With SFT as `--preview_checkpoint`, `--speed_lora` (the Turbo LoRA) is left out of the previews; it joins previews on the Base.
+MOSS-Image trains through the shared cache script and trainer with `--family moss_image`. You need the three files from the [download table](#model-files-where-they-come-from-where-they-go); the dataset TOML is the same as the other families'. Previews run res_multistep for 30 steps with CFG 4. The LoRA trains every Linear in all 42 blocks, block 22 included; with MOSS-Image SFT or a fine-tune of it as `--dit`, add `--family_option lora_sft=1` so it trains attention only (the GUI's Train attention only; it also lowers a fine-tune's VRAM on Base, at a possible cost in quality). `--family_option lownoise_pct=40` sets the clean-end share (a single value; leave it out for the model's own schedule, about 11%); `lownoise_pct=11:7:40:8:3` is the GUI's Slide (the default), 11% until epoch 7, then sliding in a straight line to 40% by epoch 8 (here one step), and after that 40% with every 3rd epoch at 11%, at half the learning rate (the every-N epochs take the lower share, whichever comes first; leave off `:3` for none); `60:7:30:15:2` slides over eight epochs instead; `lownoise_pct=75:5:40` drops at once, 75% for the first 5 epochs, then 40%. Train on the Base: a LoRA trained on Kromoss began to overbake after about 750 steps in our test. With SFT as `--preview_checkpoint`, `--speed_lora` (the Turbo LoRA) is left out of the previews; it joins previews on the Base.
 
 ### Full example
 
@@ -476,7 +486,7 @@ python src/fizgig/families/train.py \
   --optimizer_type adamw \
   --precision auto --compile_blocks auto \
   --ema_decay 0.98 \
-  --family_option lownoise_pct=30:7:60:8:3 \
+  --family_option lownoise_pct=11:7:40:8:3 \
   --save_state --save_state_on_train_end --keep_last_n_states 2 \
   --vae /models/flux2-vae_small.safetensors \
   --text_encoder /models/qwen3.5_9b_bf16.safetensors \
@@ -632,6 +642,32 @@ H3's own settings are `--family_option name=value` pairs (the GUI's Training-tab
 
 ---
 
+## MiniMax H3 Image training
+
+MiniMax H3 Image is MiniMax H3's DiT for pictures: no audio stream, distilled to 6 CFG-free steps with one output head per step. It trains through the shared cache script and trainer with `--family minimax_image`; the [dataset TOML](#dataset-config-toml) is the same as the other families'. You need the files from the [download table](#model-files-where-they-come-from-where-they-go), the training adapter included: without it, people trained on this model turn into caricatures. A LoRA trains at the checkpoint's own 6 noise levels, each through its own head; `--family_option lownoise_pct=P` puts P% of the steps at the level below 0.5 (0.232) and spreads the rest over the other five.
+
+```bash
+python src/fizgig/families/cache.py --family minimax_image --stage latents --dataset_config my_dataset.toml --model /models/minimax_h3_image_vae_fp16.safetensors
+python src/fizgig/families/cache.py --family minimax_image --stage text    --dataset_config my_dataset.toml --model /models/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
+python src/fizgig/families/train.py --family minimax_image \
+  --dataset_config my_dataset.toml \
+  --dit /models/minimax_h3_image_pruned_int8_convrot.safetensors \
+  --vae /models/minimax_h3_image_vae_fp16.safetensors \
+  --text_encoder /models/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors \
+  --training_adapter /models/fizgig_minimax_h3_image_training_adapter.safetensors \
+  --output_dir ./output_loras/my_subject --output_name my_subject_mmh3i \
+  --network_dim 8 --network_alpha 8 --optimizer_type muon \
+  --adaptive_lr --adaptive_lr_min 1e-4 --adaptive_lr_max 2e-4 --ema_decay 0.98 \
+  --max_train_epochs 16 --save_every_n_epochs 1 --seed 42 \
+  --precision auto --blocks_to_swap -1 \
+  --sample_prompts sample_prompts.txt --sample_every_n_epochs 1 --sample_at_first \
+  --sample_width 2048 --sample_height 2048 --sample_steps 6
+```
+
+The presets are still being tuned; see [MINIMAX_IMAGE.md](MINIMAX_IMAGE.md).
+
+---
+
 ## Qwen Image 2.1 training
 
 Qwen Image 2.1 is the first model on Fizgig's driver system: one cache script and one trainer (`src/fizgig/families/`) serve it, selected with `--family qwen_image21`. You need the files from the [download table](#model-files-where-they-come-from-where-they-go): the bf16 DiT, the VAE and the Qwen3-VL-8B text encoder, plus the training adapter and the Turbo LoRA, which are optional but both in the default recipe. The dataset TOML is the same as the other families'. 10 GB is the smallest card Qwen trains on.
@@ -680,7 +716,7 @@ The other two presets change only a few flags. **Standard** is `--network_dim 16
 
 - `--training_adapter FILE` — the Fizgig training adapter, frozen for every training step, off for previews and absent from the saved LoRA. Without it Qwen 2.1 LoRAs tend to collapse into texture or wobble part-way through.
 - `--ema_decay 0.98` — weight averaging: checkpoints and previews come from a smoothed average of the weights. `0` (the CLI default) turns it off.
-- `--optimizer_type adamw8bit|adamw|automagic3|automagic4|prodigy|muon` — `automagic3` and `automagic4` set their own learning rate from `--learning_rate` as a start, and turn off `--adaptive_lr`, `--per_image_lr` and `--warmup_look_outliers`. `prodigy` finds its own rate too: give `--learning_rate 1.0` (a multiplier); Adaptive LR and the look warm-up stand down, per-image LR stays. `muon` takes AdamW's learning rates.
+- `--optimizer_type adamw8bit|adamw|automagic3|automagic4|prodigy|muon` — `automagic3` and `automagic4` set their own learning rate from `--learning_rate` as a start, and turn off `--adaptive_lr`, `--per_image_lr` and `--warmup_look_outliers`; `automagic4` never climbs past 2.5e-4 unless `--optimizer_args` sets `max_lr=`. `prodigy` finds its own rate too: give `--learning_rate 1.0` (a multiplier); Adaptive LR and the look warm-up stand down, per-image LR stays. `muon` takes AdamW's learning rates.
 - `--network_type lokr --lokr_factor 8` — LoKR instead of LoRA.
 - `--min_timestep` / `--max_timestep` — restrict training to a noise band, on a 0-1 scale.
 
@@ -1025,14 +1061,13 @@ Points at the output dir (or the `per_image_loss.jsonl` directly) and prints the
 
 ## Captioning, translating and extracting from a fine-tune
 
-**AI captions** — `batch_caption.py` is what the Captions tab runs. Qwen3-VL (the Krea 2 text encoder file, or a bigger Qwen3-VL as the GUI's secondary captioning model) captions every file listed in a text file, one path a line, with your instruction, putting the trigger word first:
+**AI captions** — `batch_caption.py` is what the Captions tab runs, with any captioner in `src/fizgig/captioners/registry.py` (`--captioner <key>`). It captions every file listed in a text file, one path a line, putting the trigger word first. Qwen3-VL (`qwen3vl`: the Krea 2 text encoder file, or a bigger Qwen3-VL as the GUI's secondary captioning model) follows your instruction:
 
 ```bash
-python -m fizgig.scripts.batch_caption --backend qwen --text_encoder /models/qwen3vl_4b_fp8_scaled.safetensors \
-  --list_file images.txt --instruction_file instruction.txt --trigger zwxem --max_new_tokens 160
+python -m fizgig.scripts.batch_caption --captioner qwen3vl --model_file /models/qwen3vl_4b_fp8_scaled.safetensors   --list_file images.txt --instruction_file instruction.txt --trigger zwxem --max_new_tokens 160
 ```
 
-The GUI's caption tasks (person or character, object or product, style, concept) are instructions; write the one you want to a file. `--backend florence` uses Florence-2 instead.
+The GUI's caption tasks (person or character, object or product, style, concept) are instructions; write the one you want to a file. Florence-2 downloads itself: `--captioner florence2_promptgen` (or `florence2_base`, `florence2_large`) with `--task "<DETAILED_CAPTION>"`. JoyCaption Beta One follows an instruction like Qwen3-VL: `--captioner joycaption_beta_one --instruction_file instruction.txt` (downloads itself, 16 GB; bf16 with about 19 GB free, else 4-bit). Booru tags: `--captioner wd_eva02_large_v3` (downloads itself, 1.3 GB; tags scoring 0.35 or more). To add a captioner, see [ADDING_A_CAPTIONER.md](ADDING_A_CAPTIONER.md).
 
 **Bilingual captions** — `python -m fizgig.scripts.translate_captions <folder> [--skip_existing] [--ext .txt]` adds a Chinese translation to every caption (`<trigger>, <english> - <chinese>`), keeping the trigger word as it is.
 

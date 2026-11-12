@@ -79,6 +79,7 @@ async function boot() {
   const pr = await api("/api/prefs");
   S.prefs = pr.models || {};
   S.captioner = pr.captioner;              // the secondary captioning model's row
+  S.captioning = pr.captioning;            // the Captioning models card: the main model, the other captioners
   S.webPort = pr.web_port;
   S.portNow = pr.port_now;
   S.onPod = pr.on_pod;
@@ -123,12 +124,21 @@ async function boot() {
   phoneCard();
   podLocalInit();                                             // in the app window on a pod: this computer's folders
   welcomeShow(pr);
+  sysmemTipShow(pr);
   pollRun(); pollStats(); followLog();
-  setInterval(pollRun, 2000); setInterval(pollStats, 2000); setInterval(loadGallery, 15000);
+  setInterval(pollRun, 2000); setInterval(pollStats, 2000); setInterval(galleryRefresh, 15000);
+  // F5 / Ctrl+R reload the page in the app window as in a browser (the window has no reload of its own)
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "F5" || ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "r")) {
+      e.preventDefault(); location.reload(); }
+  });
   setInterval(loadCheckpoints, 15000);
 }
 
-async function chooseFamily(key) {
+// fresh (you picked another model at the top): the model's first preset goes over its saved values, so no setting
+// from earlier (an optimizer this model doesn't offer, say) carries over; paths and prompts the preset doesn't set stay.
+// Back on the model a run is training or paused on: that run's own settings instead
+async function chooseFamily(key, fresh = false) {
   try {                                     // the latest saved, in case another open page changed it
     const st = await api("/api/state");
     if (st && st.values && st.values[key]) S.all[key] = st.values[key];
@@ -136,10 +146,14 @@ async function chooseFamily(key) {
   S.family = key;
   S.fam = S.schema.families.find((f) => f.key === key);
   for (const sel of document.querySelectorAll(".family-pick")) sel.value = key;
-  if (S.all[key]) {
+  if (fresh) try { S.run = await api("/api/run"); } catch (e) { /* the last poll's */ }
+  const live = fresh && (training() || (S.run && S.run.state === "paused")) && S.run.family === key && S.run.values;
+  if (live) {
+    S.values = {...defaults(), ...(S.all[key] || {}), ...live};
+  } else if (S.all[key] && !fresh) {
     S.values = {...defaults(), ...S.all[key]};
-  } else {                              // a first visit takes the family's first preset, as the desktop does
-    S.values = defaults();
+  } else {                              // a first visit or a switch takes the family's first preset
+    S.values = {...defaults(), ...(S.all[key] || {})};
     const first = S.fam.form.presets[0];
     if (first) {
       S.values = (await api("/api/preset", {family: key, name: first.name, values: S.values})).values;
@@ -538,6 +552,10 @@ function splitRow(r, wrap) {
   const hintOne = el("div", {class: "field-hint", text: r.hint});
   const hintSplit = el("div", {class: "field-hint", text: r.split_hint || r.hint});
   const hintSlide = el("div", {class: "field-hint", text: r.slide_hint || r.hint});
+  // other known-good numbers, bracketed above the hint; the link puts them in the boxes
+  const altSlide = r.slide_alt ? el("div", {class: "field-hint"}, "(" + r.slide_alt[0] + " ",
+    el("a", {class: "inline-link", href: "#", text: "Click here to try them", onclick: (e) => {
+      e.preventDefault(); onValue(r, r.slide_alt[1]); show(); }}), ".)") : null;
   function show() {
     const m = modeOf();
     pills.querySelectorAll("input").forEach((rb) => { rb.checked = rb.value === m; });
@@ -554,7 +572,7 @@ function splitRow(r, wrap) {
     else { one.value = S.values[r.key] ?? ""; mem.single = one.value; }
     for (const [node, on] of [[lineOne, m === "Single"], [hintOne, m === "Single"], [lineSplit, m === "Split"],
                               [hintSplit, m === "Split"], [lineSlide, m === "Slide"], [lineRefresh, m === "Slide"],
-                              [hintSlide, m === "Slide"]]) {
+                              [altSlide, m === "Slide"], [hintSlide, m === "Slide"]]) {
       if (node) node.style.display = on ? "" : "none";
     }
   }
@@ -562,7 +580,7 @@ function splitRow(r, wrap) {
   sync._sync = show;
   sTick.addEventListener("change", () => { mem.slideTick = sTick.checked; });
   wrap.append(el("div", {class: "cad-title", text: r.label}), pills, lineOne, lineSplit, lineSlide, ...(lineRefresh ? [lineRefresh] : []),
-    hintOne, hintSplit,
+    hintOne, hintSplit, ...(altSlide ? [altSlide] : []),
     hintSlide, sync,
     el("div", {class: "field-hint row-note", id: "note_" + r.key}));
   if (r.warn) wrap.append(el("div", {class: "field-hint tc-warn"}, r.warn, r.warn_link ? el("a", {class: "inline-link",
@@ -1063,11 +1081,22 @@ function renderPrefs() {
   paintFetch();
 }
 
-// the secondary captioning model (#270): set, it captions everything (the Captions tab and auto-recaption);
-// empty, the Krea 2 text encoder does. Plain Hugging Face links to the builds Fizgig reads - nothing downloads itself
+// Preferences' Captioning models card: the main model (Krea 2's text encoder), the optional bigger Qwen3-VL (#270)
+// that takes its place everywhere, and the Captions tab's other models, each with a Download (or downloaded on first use)
 function captionerCard() {
   const c = S.captioner || {path: "", note: "", links: []};
-  const input = el("input", {type: "text", class: "w-path", value: c.path || "", placeholder: "Empty = the Krea 2 text encoder"});
+  const g = S.captioning || {main: "", main_ok: false, others: []};
+  const sub = (title, text) => [el("div", {class: "cap-pref-title", text: title}), el("div", {class: "field-hint", text})];
+
+  // 1. the main model
+  const main = el("div", {class: "pref-file"}, ...sub("Main captioning model",
+    "Krea 2's text encoder (Qwen3-VL 4B) writes captions on the Captions tab, and it's the model auto-recaption uses " +
+    "while training."),
+    el("div", {class: "field-hint cap-pref-state", text: g.main_ok ? `Set: ${g.main.split(/[\\/]/).pop()}` :
+      "Not set yet: set the Krea 2 text encoder under Krea 2 below, or press Download models for me."}));
+
+  // 2. the bigger Qwen3-VL, optional
+  const input = el("input", {type: "text", class: "w-path", value: c.path || "", placeholder: "Empty = the main model"});
   const note = el("div", {class: "field-hint", text: c.note || ""});
   const save = async () => {
     try {
@@ -1078,20 +1107,60 @@ function captionerCard() {
     } catch (e) { note.textContent = e.message; }
   };
   input.addEventListener("change", save);
-  const row = el("div", {class: "field-row"}, el("span", {class: "field-label", text: "Secondary captioning model:"}),
+  const row = el("div", {class: "field-row"}, el("span", {class: "field-label", text: "Bigger model:"}),
     input, el("button", {class: "btn", text: "Choose…", title: "Pick from what is on the machine running Fizgig",
       onclick: () => pick(input.value, false, (p) => { input.value = p; save(); })}),
     ...(c.links || []).map((l) => el("a", {class: "btn", target: "_blank", rel: "noopener", href: l.href,
       text: l.label.split(" (")[0], title: l.label})));
-  return el("div", {class: "section-card"}, el("div", {class: "card-title"}, el("span", {text: "Captioning model"})),
-    el("div", {class: "card-content"}, el("div", {class: "pref-file"}, row,
-      el("div", {class: "field-hint", text: "Optional, and Qwen3-VL only: the 8B, the bigger model of the family the " +
-        "Krea 2 text encoder belongs to (it's Qwen Image 2.1's text encoder), for more detailed captions. Any other " +
-        "file is refused; other captioners are picked on the Captions tab. Download a build from the links and " +
-        "choose it here; from then on it takes the Krea 2 text encoder's place wherever Qwen3-VL captions - the " +
-        "Captions tab's Qwen3-VL and auto-recaption. Empty the box to go back to the Krea 2 text encoder. " + (c.links || []).map((l) => l.label).join(" · ") +
-        ". On a card with less VRAM than it needs, it keeps what fits and streams the rest from system RAM (slower)."}),
-      note)));
+  const bigger = el("div", {class: "pref-file"}, ...sub("Bigger model (optional)",
+    "For more detailed captions, set Qwen3-VL 8B here (Qwen Image 2.1's text encoder), or another Qwen3-VL 4B. It " +
+    "takes the main model's place everywhere, auto-recaption included. Only Qwen3-VL files work, in bf16 or fp8 (not " +
+    "the int8 builds). Download a build from the links, choose it, and empty the box to go back to the main model. " +
+    "On a card with less memory than it needs, it keeps what fits and streams the rest from system RAM (slower)."),
+    row, note);
+
+  // 3. the Captions tab's other models
+  const list = el("div", {class: "cap-pref-list"});
+  const others = el("div", {class: "pref-file"}, ...sub("Other captioning models",
+    "For the Captions tab only: auto-recaption doesn't use them. Each downloads itself the first time you caption " +
+    "with it, or download it here first, to have it ready or to caption without internet."), list);
+  captionerOthersDraw(list, g.others || []);
+  return el("div", {class: "section-card"}, el("div", {class: "card-title"}, el("span", {text: "Captioning models"})),
+    el("div", {class: "card-content"}, main, bigger, others));
+}
+
+// a row per other captioner: what it's for, its size, and Download / its progress / Downloaded
+function captionerOthersDraw(list, others) {
+  list.replaceChildren(...others.map((o) => {
+    const state = o.state === "downloading" ? el("span", {class: "field-hint", text:
+        `Downloading… ${o.done_gb.toFixed(1)} of ${o.size_gb.toFixed(1)} GB`})
+      : o.downloaded ? el("span", {class: "cap-pref-done", text: "Downloaded ✓"})
+      : el("button", {class: "btn btn-sm", text: o.state === "failed" ? "Try again" : "Download",
+          onclick: async (ev) => {
+            ev.target.disabled = true;
+            try { await api("/api/captioners/download", {key: o.key}); captionerOthersPoll(list); }
+            catch (e) { ev.target.disabled = false; ev.target.title = e.message; }
+          }});
+    return el("div", {class: "cap-pref-row"},
+      el("span", {class: "cap-pref-name", text: o.label}),
+      el("span", {class: "field-hint", text: `${o.blurb} · ${o.size_gb < 1 ? Math.round(o.size_gb * 1000) + " MB" :
+        o.size_gb.toFixed(1) + " GB"}`}),
+      state,
+      o.state === "failed" ? el("div", {class: "field-hint cap-pref-err", text: `The download stopped: ${o.error}`}) : null);
+  }));
+}
+
+function captionerOthersPoll(list) {               // every 2 s while any is downloading
+  clearTimeout(S.capDlTimer);
+  S.capDlTimer = setTimeout(async () => {
+    try {
+      const r = await api("/api/captioners/status");
+      if (S.captioning) S.captioning.others = r.others;
+      if (!list.isConnected) return;
+      captionerOthersDraw(list, r.others);
+      if (r.others.some((o) => o.state === "downloading")) captionerOthersPoll(list);
+    } catch (e) { captionerOthersPoll(list); }
+  }, 2000);
 }
 
 // a folder setting the two apps share (prefs.json): a box, Choose…, saved when it changes
@@ -1177,6 +1246,9 @@ function fetchRow(f) {
   for (const p of picks) line.append(el("label", {class: "fetch-opt"}, p.label + ": ", p.sel));
   if (opt) line.append(el("label", {class: "fetch-opt"}, opt, " " + f.fetch_optional_label));
   box.append(line);
+  if ((f.licence_link || []).length === 2)       // the model's licence, a link only (description.licence_link)
+    box.append(el("div", {class: "field-hint licence-link"},
+      el("a", {target: "_blank", rel: "noopener", href: f.licence_link[1], text: f.licence_link[0]})));
   if (token) {
     const seen = new Set();
     const links = gated.filter((m) => !seen.has(m.repo) && seen.add(m.repo)).map((m) =>
@@ -1407,7 +1479,29 @@ function podCard() {
 
 // Fizgig 8's welcome, on this computer's own Fizgig (not a pod's or another computer's page): once a launch until
 // Don't show this again. The tour ships with Fizgig; if it won't play, the words stand on their own.
+// Off since 10 Nov 2026 (Peter): kept for a future release's welcome - new words and video, a new hidden pref
+// name (so Don't show this again from 8 doesn't hide it), then WELCOME_ON = true.
+const WELCOME_ON = false;
+// On Windows with an NVIDIA card: the tip to turn off CUDA Sysmem Fallback (a run spilling into system RAM trains
+// several times slower; driver and Windows updates turn it back on). Once a launch on this computer's own page, until
+// Don't show this again (pref sysmem_tip_hidden).
+function sysmemTipShow(pr) {
+  let seen = false;
+  try { seen = sessionStorage.getItem("fizgig.sysmemSeen") === "1"; } catch (e) { /* no storage */ }
+  if (!pr.sysmem_tip || seen || S.onPod || pageIsElsewhere()) return;
+  const m = $("sysmemModal");
+  const close = () => {
+    m.classList.remove("active");
+    try { sessionStorage.setItem("fizgig.sysmemSeen", "1"); } catch (e) { /* no storage */ }
+    if ($("sysmemNever").checked) api("/api/prefs", {changes: {sysmem_tip_hidden: "1"}}).catch(() => {});
+  };
+  $("sysmemClose").onclick = close; $("sysmemX").onclick = close;
+  m.onclick = (e) => { if (e.target === m) close(); };
+  m.classList.add("active");
+}
+
 function welcomeShow(pr) {
+  if (!WELCOME_ON) return;
   let seen = false;
   try { seen = sessionStorage.getItem("fizgig.welcomeSeen") === "1"; } catch (e) { /* no storage */ }
   if (pr.welcome_hidden || seen || S.onPod || pageIsElsewhere() || $("welcomeModal").classList.contains("active")) return;
@@ -2022,8 +2116,8 @@ function queueSummary(q, r) {
     return;
   }
   const text = q.held ? `Queue held: ${q.reason || "press Start queue to carry on"}` :
-    q.waiting ? `Queue waiting: ${q.waiting}` : "";
-  const sig = JSON.stringify([text, q.held, q.reason, q.waiting, items.map((it) => [it.id, it.lora])]);
+    q.waiting ? `Queue waiting: ${q.waiting}` : q.failed || "";
+  const sig = JSON.stringify([text, q.held, q.reason, q.waiting, q.failed, items.map((it) => [it.id, it.lora])]);
   if (sig === S.queueSumSig) return;              // as renderWebQueue: a rebuild mid-click drops Start queue's click
   S.queueSumSig = sig;
   side.classList.toggle("held", !!q.held);
@@ -2033,7 +2127,7 @@ function queueSummary(q, r) {
   $("sideQueueList").replaceChildren(...items.slice(0, 3).map((it, i) => el("div", {class: "side-queue-row"},
     el("span", {class: "n", text: String(i + 1)}), el("span", {class: "name", text: it.lora, title: it.lora}))),
     ...(n > 3 ? [el("div", {class: "side-queue-more", text: `+${n - 3} more`})] : []));
-  $("sideQueueHeld").textContent = q.held ? q.reason || "Press Start queue to carry on." : q.waiting || "";
+  $("sideQueueHeld").textContent = q.held ? q.reason || "Press Start queue to carry on." : q.waiting || q.failed || "";
   $("sideQueueStart").style.display = q.held ? "" : "none";
   up.classList.toggle("held", !!q.held);
   up.replaceChildren(...[el("span", {text: q.held ? text : `Up next: ${items.slice(0, 3).map((it, i) => `${i + 1}. ${it.lora}`).join(" · ")}` +
@@ -2325,6 +2419,18 @@ function previewGrid(items, prompts, eager) {
     top.hidden = table.scrollWidth <= wrap.clientWidth;
   }).observe(table);
   return el("div", {}, top, wrap);
+}
+
+// the 15 s refresh: a refresh that fails says so under the previews (and in the console) instead of leaving the
+// gallery silently frozen at its last good draw - an app-window gallery once stopped at epoch 36 with no clue why
+async function galleryRefresh() {
+  try {
+    await loadGallery();
+    $("galleryError").textContent = "";
+  } catch (e) {
+    console.error("[gallery] refresh failed", e);
+    $("galleryError").textContent = `Previews couldn't refresh: ${e && e.message || e}. Press F5 to reload the page.`;
+  }
 }
 
 async function loadGallery() {
@@ -3017,6 +3123,9 @@ function trainMapsPanel(box, meta, run, load) {
   const st = {key: meta.keys[0], t: "all", kind: "learned", trig: "",
               i: Math.max(0, meta.epochs.length - 1), timer: null, img: null,
               bands: tmPref("scale", "bands") === "bands", grey: tmPref("picture", "grey") === "grey",
+              // Learned since the start: "amount" (the loss removed), "share" (removed as a share of the cell's own
+              // start: how far along each part is), "fixed" (the share on one 0-20% scale for every run and epoch)
+              learnedAs: ["amount", "share", "fixed"].includes(tmPref("learned", "amount")) ? tmPref("learned", "amount") : "amount",
               // the map's opacity, 1 = as designed; up to 1.5 stronger (capped at solid), down to 0 (hidden)
               opacity: Math.max(0, Math.min(1.5, Number(tmPref("opacity", "1")) || 0))};
   const d = {...meta, epochs: []};
@@ -3082,11 +3191,17 @@ function trainMapsPanel(box, meta, run, load) {
     if (k !== "learned") return g[k] || null;
     const base = (((d.epochs[0] || {}).maps || {})[st.key] || {})[tKey(t)];
     if (!base || !base.loss || !g.loss || base.loss.v.length !== g.loss.v.length) return null;
+    if (st.learnedAs !== "amount") {           // a share of the cell's own start; a nearly-clean cell's start is floored
+      const b = base.loss.v, lo = [...b].sort((x, y) => x - y)[Math.floor(0.1 * (b.length - 1))] || 1e-8;
+      return {w: g.loss.w, h: g.loss.h, signed: true, share: true,
+              v: g.loss.v.map((x, j) => (b[j] - x) / Math.max(b[j], lo, 1e-8))};
+    }
     return {w: g.loss.w, h: g.loss.h, v: g.loss.v.map((x, j) => base.loss.v[j] - x), signed: true};
   };
   const scales = new Map();                    // the scales per picture + map + level, until the epochs change
   const scaleOf = (k, t) => {                  // one scale for this picture + level + map, over every epoch
-    const memo = `${st.key}|${k}|${t}|${k === "attn" ? st.trig : ""}`;
+    if (k === "learned" && st.learnedAs === "fixed") return 0.2;      // 20% of a cell's start = full colour, every run
+    const memo = `${st.key}|${k}|${t}|${k === "attn" ? st.trig : ""}|${k === "learned" ? st.learnedAs : ""}`;
     if (scales.has(memo)) return scales.get(memo);
     let mx = 0;
     for (let e = 0; e < d.epochs.length; e++) {
@@ -3106,7 +3221,7 @@ function trainMapsPanel(box, meta, run, load) {
     for (const t of d.timesteps) {
       const g = gridAt(e, k, t);
       if (!g || (out && g.v.length !== out.v.length)) continue;
-      const s = scaleOf(k, t);
+      const s = g.share ? 1 : scaleOf(k, t);  // shares already compare across levels: a plain mean
       if (!out) out = {w: g.w, h: g.h, signed: g.signed, v: g.v.map((x) => x / s)};
       else out.v = out.v.map((x, j) => x + g.v[j] / s);
       n++;
@@ -3132,6 +3247,7 @@ function trainMapsPanel(box, meta, run, load) {
   };
   const draw = () => {
     fillTrig();
+    learnedRow.style.display = st.kind === "learned" ? "" : "none";
     const img = st.img;
     if (!img || !img.naturalWidth) return;
     // the part of the photo it trained on (the bucket's centre crop), so the map sits exactly on it
@@ -3187,7 +3303,8 @@ function trainMapsPanel(box, meta, run, load) {
         "linear-gradient(90deg, var(--pic-worse), transparent, var(--pic-better))") :
       (st.bands ? "linear-gradient(90deg, transparent 0 25%, var(--pic-heat-1) 25% 50%, var(--pic-heat-2) 50% 75%, " +
         "var(--pic-heat-3) 75% 100%)" : "linear-gradient(90deg, transparent, var(--pic-heat-1), var(--pic-heat-2), var(--pic-heat-3))");
-    legendLo.textContent = g.signed ? "worse" : "less"; legendHi.textContent = g.signed ? "better" : "more";
+    legendLo.textContent = g.signed ? (g.share && st.learnedAs === "fixed" ? "20% worse" : "worse") : "less";
+    legendHi.textContent = g.signed ? (g.share && st.learnedAs === "fixed" ? "20% better" : "better") : "more";
   };
   const showPic = () => {
     const p = (d.images || {})[st.key];
@@ -3201,6 +3318,15 @@ function trainMapsPanel(box, meta, run, load) {
     el("button", {class: "btn btn-sm" + (v === cur() ? " btn-primary" : ""), text: label, title: tip || "",
       onclick: (e) => { set(v); e.target.parentElement.querySelectorAll("button").forEach((b) => b.classList.remove("btn-primary"));
         e.target.classList.add("btn-primary"); draw(); }})));
+  // how Learned since the start is measured (optional; Amount is the default)
+  const learnedRow = chips([
+    ["amount", "Amount", "How much less wrong each part is than at the start. The part that learned most sets the scale, " +
+      "so a part with less to learn looks pale even when it's well learned"],
+    ["share", "Share of its own start", "How much of each part's own starting error has gone: how far along each part is, " +
+      "whatever it started at"],
+    ["fixed", "Share, same scale for every run", "The share on one scale (full colour = 20% of its start gone) for every run " +
+      "and epoch, so two runs' maps compare by eye"]],
+    () => st.learnedAs, (v) => { st.learnedAs = v; tmSetPref("learned", v); });
   const probes = el("span", {class: "tm-row tm-probes"}, ...d.keys.map((k) => {
     const p = (d.images || {})[k];
     const im = el("img", {alt: k, title: k, class: k === st.key ? "on" : "",
@@ -3277,6 +3403,7 @@ function trainMapsPanel(box, meta, run, load) {
       (v) => { st.t = v; fetchOne().catch((e) => { say.textContent = e.message; }); }),
     chips(TM_KINDS.filter((k) => k[0] !== "attn" || (d.attn || []).length), () => st.kind, (v) => { st.kind = v; }),
     trigRow,
+    learnedRow,
     kindSay,
     stage,
     el("div", {class: "tm-row"}, play, scrub, d.live ? refresh : null, d.live ? autoLab : null, legendLo, legend, legendHi),
@@ -7083,13 +7210,33 @@ async function studioPresets() {
   const user = (await api("/api/studio/presets?family=" + encodeURIComponent(L.key)).catch(() => ({user: []}))).user;
   sel.innerHTML = "";
   sel.append(el("option", {value: "", text: "Presets…"}));
+  // every model's: the primary and the donor evenly, block by block (needs a donor loaded)
+  sel.append(el("option", {value: "x:even", text: "Primary + donor, 50/50", title: "Every block both LoRAs touch: " +
+    "each at 0.5. A block only one of them touches: that one at full strength. Needs a donor LoRA loaded."}));
   for (const p of L.presets) sel.append(el("option", {value: "b:" + p.name, text: p.name}));
   if (user.length) sel.append(el("optgroup", {label: "Your presets"}, ...user.map((n) => el("option", {value: "u:" + n, text: n}))));
 }
 
 async function studioPresetApply(v) {
   const L = S.st.layout;
-  if (v.startsWith("b:")) {
+  if (v === "x:even") {                          // Primary + donor, 50/50: each block by who touches it
+    if (!S.st.donor) {
+      $("stStatus").textContent = "Primary + donor, 50/50 needs a donor LoRA: load one under Donor first.";
+      $("stPreset").value = "";
+      return;
+    }
+    let both = 0, one = 0;
+    for (const [id, b] of Object.entries(S.st.blocks)) {
+      const p = S.st.primaryBlocks.has(id), d = S.st.donorBlocks.has(id);
+      if (!p && !d) continue;
+      const w = p && d ? 0.5 : 1;                // only one of them touches it: that one at full strength
+      if (p && !S.st.locks.has(id)) Object.assign(b, {pe: true, ps: w});
+      if (d && !S.st.dlocks.has(id)) Object.assign(b, {de: true, ds: w});
+      if (p && d) both++; else one++;
+    }
+    $("stStatus").textContent = `Primary + donor, 50/50: ${both} block(s) at 0.5 each, ${one} touched by one LoRA ` +
+      "at full strength" + (S.st.locks.size + S.st.dlocks.size ? "; locked sliders left alone." : ".");
+  } else if (v.startsWith("b:")) {
     const p = L.presets.find((x) => x.name === v.slice(2));
     for (const [id, b] of Object.entries(S.st.blocks)) {
       if (!S.st.dlocks.has(id)) Object.assign(b, {de: true, ds: 1});
@@ -7637,11 +7784,54 @@ const capItemFolder = (it) => it.path.slice(0, it.path.length - it.name.length -
 function capSettings() {
   return {trigger: $("capTrigger").value, model: $("capModel").value, task: $("capTask").value,
     tokens: $("capTokens").value, overwrite: $("capOverwrite").checked, songWords: $("capSongWords").value,
-    skipCjk: $("capSkipCjk").checked, perPage: $("capPerPage").value, concept: $("capConcept").value.trim()};
+    skipCjk: $("capSkipCjk").checked, perPage: $("capPerPage").value, concept: $("capConcept").value.trim(),
+    threshold: $("capThreshold").value, leaveOut: $("capLeaveOut").value, underscores: $("capUnderscores").checked,
+    extras: (S.capSaved || {}).extras || {}};
 }
 const saveCapSoon = debounce(() => { S.capSaved = capSettings(); api("/api/state", {captions: S.capSaved}).catch(() => {}); }, 600);
-const qwenOn = () => !!S.cap.opts && S.cap.opts.qwen_available && $("capModel").value === S.cap.opts.qwen_model;
-const qwenTask = () => (S.cap.opts.qwen_tasks || []).find((t) => t.label === $("capTask").value);
+// the chosen captioner's description (fizgig/captioners/registry.py), and whether it follows an instruction
+const capDesc = () => ((S.cap.opts && S.cap.opts.captioners) || []).find((c) => c.label === $("capModel").value);
+const qwenOn = () => !!(capDesc() || {}).instruction;
+const qwenTask = () => (S.cap.opts.instruction_tasks || []).find((t) => t.label === $("capTask").value);
+// the chosen captioner's own caption type (JoyCaption's Straightforward...), when one is picked in the task menu
+const capType = () => ((capDesc() || {}).prompt_types || []).find((t) => t[0] === $("capTask").value);
+
+// a caption type's text at the chosen length: "any", a word ("long") or a word count ("120")
+function capTypeText(t, length) {
+  if (!length || length === "any") return t[1];
+  return /^\d+$/.test(length) ? t[2].split("{word_count}").join(length) : t[3].split("{length}").join(length);
+}
+
+// the ticked extra options' sentences; {name} is the trigger word, and that sentence goes when there is none
+function capExtrasText() {
+  const d = capDesc() || {}, trig = $("capTrigger").value.trim().replace(/,+$/, "").trim();
+  const ticked = (d.prompt_extras || []).filter((x, i) => { const b = $("capExtra" + i); return b && b.checked; })
+    .filter((x) => !x.text.includes("{name}") || trig).map((x) => x.text.split("{name}").join(trig));
+  return capOwnText().concat(ticked).join(" ");        // your own first, straight after the main instruction
+}
+
+// the user's own extra instructions, straight after the main instruction (before the ticked ones): as typed, a full stop added when the last has none so it
+// can't run into what follows
+function capOwnText() {
+  const b = $("capExtraOwn");
+  if (!b || !((capDesc() || {}).prompt_extras || []).length) return [];
+  const t = b.value.replace(/\s+/g, " ").trim();
+  return t ? [/[.!?]["'\u201d)]?$/.test(t) ? t : t + "."] : [];
+}
+
+// what the captioner is told: Fizgig's task instruction (or its own caption type at the chosen length), then the ticks
+function capInstruction() {
+  const t = qwenOn() && qwenTask(), ty = capType();
+  const base = ty ? capTypeText(ty, $("capLength").value)
+    : t ? t.instruction.split("{concept}").join($("capConcept").value.trim() || "the same concept") : "";
+  return [base, capExtrasText()].filter(Boolean).join(" ");
+}
+
+function capSentShow() {                         // the line under the ticks: exactly what will be sent
+  const d = capDesc() || {};
+  if (!(d.prompt_extras || []).length) return;
+  $("capSent").textContent = "It's told: " + capInstruction();
+}
 
 async function loadCaptionOptions() {
   const o = S.cap.opts = await api("/api/captions/options?family=" + encodeURIComponent(S.family));
@@ -7650,7 +7840,7 @@ async function loadCaptionOptions() {
   model.innerHTML = "";
   for (const m of o.models) model.append(el("option", {value: m, text: m}));
   model.value = o.models.includes(saved.model) ? saved.model : o.default_model;
-  $("capModelHint").textContent = o.secondary ?
+  S.cap.hint = o.secondary ?
     `Qwen3-VL captions with your secondary captioning model (${o.secondary}, set in Preferences), following an ` +
     "instruction you can edit. Empty that row in Preferences to caption with the Krea 2 text encoder again. " +
     "Florence-2 downloads itself the first time." : o.qwen_available ?
@@ -7665,6 +7855,9 @@ async function loadCaptionOptions() {
   fillTasks(saved.task);
   if (saved.tokens) $("capTokens").value = saved.tokens;
   if (saved.concept !== undefined) $("capConcept").value = saved.concept;
+  if (saved.threshold) $("capThreshold").value = saved.threshold;
+  if (saved.leaveOut !== undefined) $("capLeaveOut").value = saved.leaveOut;
+  if (saved.underscores !== undefined) $("capUnderscores").checked = saved.underscores;
   capConceptShow();
   $("capSongCard").style.display = o.song_words ? "" : "none";
   // a model that trains on no pictures or clips (ACE-Step): the AI card has nothing to caption, the song card does
@@ -7675,15 +7868,77 @@ async function loadCaptionOptions() {
   $("capModelHint").style.display = pictures ? "" : "none";
   if (!pictures) $("capInstrBox").style.display = "none";
   $("capTaskHint").style.display = pictures && qwenOn() ? "" : "none";       // fillTasks ran while the row was hidden
+  capKindRows();
   if (o.song_words) { $("capSongWords").placeholder = "e.g. " + o.song_words; $("capSongWords").value = saved.songWords || ""; }
+}
+
+// the rows the chosen captioner uses: a task menu when it has one (or follows an instruction), Max tokens for
+// sentences, the tag rows (threshold, left-out tags, underscores) for a tagger; its own hint when it has one
+function capKindRows() {
+  const o = S.cap.opts, d = capDesc() || {kind: "sentences", tasks: []};
+  const media = (S.fam && S.fam.media) || ["photo"];
+  const pictures = media.includes("photo") || media.includes("clip");
+  const show = (id, on) => { $(id).closest(".field-row").style.display = pictures && on ? "" : "none"; };
+  show("capTask", d.instruction || d.tasks.length);
+  show("capTokens", d.kind !== "tags");
+  $("capTagRows").style.display = pictures && d.kind === "tags" ? "" : "none";
+  $("capModelHint").textContent = d.hint || S.cap.hint || "";
+  if (o && !qwenOn()) $("capTaskHint").style.display = "none";
+  capOwnRows();
+}
+
+// the captioner's Length menu and extra-option ticks (remembered per captioner), shown when it has them
+function capExtrasFill() {
+  const d = capDesc() || {}, saved = ((S.capSaved || {}).extras || {})[d.key] || {};
+  const lengths = d.prompt_lengths || [];
+  $("capLength").innerHTML = "";
+  for (const l of lengths) $("capLength").append(el("option", {value: l, text: l}));
+  $("capLength").value = lengths.includes(saved.length) ? saved.length : (d.default_length || lengths[0] || "");
+  $("capExtraOwn").value = saved.own || "";
+  const box = $("capExtras");
+  box.innerHTML = "";
+  (d.prompt_extras || []).forEach((x, i) => {
+    const b = el("input", {type: "checkbox", id: "capExtra" + i});
+    b.checked = saved.ticks ? saved.ticks.includes(x.label) : x.on;
+    b.addEventListener("change", () => { capExtrasSave(); capSentShow(); });
+    box.append(el("label", {class: "checkbox-label", title: x.text}, [b, " " + x.label]));
+  });
+  capOwnRows();
+}
+
+function capExtrasSave() {
+  const d = capDesc();
+  if (!d || !(d.prompt_extras || []).length) return;
+  const ticks = d.prompt_extras.filter((x, i) => $("capExtra" + i).checked).map((x) => x.label);
+  S.capSaved = S.capSaved || {};
+  S.capSaved.extras = {...(S.capSaved.extras || {}),
+    [d.key]: {ticks, length: $("capLength").value, own: $("capExtraOwn").value}};
+  saveCapSoon();
+}
+
+function capOwnRows() {                          // Length with the captioner's own types; the ticks with any task
+  const d = capDesc() || {}, on = $("capTask").closest(".field-row").style.display !== "none";
+  $("capLengthRow").style.display = on && capType() ? "" : "none";
+  $("capExtrasBox").style.display = on && (d.prompt_extras || []).length ? "" : "none";
+  // its own types aren't edited in place: Edit instructions copies one into Custom... to change it
+  $("capEditInstr").textContent = capType() ? "Edit as Custom…" : "Edit instructions…";
+  capSentShow();
 }
 
 function fillTasks(want) {
   const o = S.cap.opts, task = $("capTask");
   task.innerHTML = "";
-  const labels = qwenOn() ? o.qwen_tasks.map((t) => t.label) : o.florence_tasks;
+  const d = capDesc() || {tasks: [], default_task: ""};
+  const labels = qwenOn() ? o.instruction_tasks.map((t) => t.label) : d.tasks;
   for (const l of labels) task.append(el("option", {value: l, text: l}));
-  task.value = labels.includes(want) ? want : (qwenOn() ? o.default_qwen_task : "<DETAILED_CAPTION>");
+  const own = (d.prompt_types || []).map((t) => t[0]);       // the captioner's own types, under a divider
+  if (own.length) {
+    const g = el("optgroup", {label: `${d.label}'s own`});
+    for (const l of own) g.append(el("option", {value: l, text: l}));
+    task.append(g);
+  }
+  task.value = labels.concat(own).includes(want) ? want : (qwenOn() ? o.default_instruction_task : d.default_task);
+  capExtrasFill();
   $("capEditInstr").style.display = qwenOn() ? "" : "none";
   $("capTaskHint").style.display = qwenOn() && $("capTask").closest(".field-row").style.display !== "none" ? "" : "none";
   $("capInstrBox").style.display = "none";
@@ -7696,10 +7951,16 @@ function capConceptShow() {
   for (const id of ["capConceptRow", "capConceptHint"]) $(id).style.display = on ? "" : "none";
 }
 
+const CAP_LENGTH_TOKENS = {"any": 300, "very short": 60, "short": 120, "medium-length": 200, "long": 300, "very long": 400};
+
 function onCapTask() {
   capConceptShow();
-  const t = qwenOn() && qwenTask();
-  if (t) $("capTokens").value = t.tokens;            // each Qwen task suggests its own length
+  capOwnRows();
+  const t = qwenOn() && qwenTask(), ty = capType();
+  if (ty) {                                        // its own type: room for the length asked for
+    const l = $("capLength").value;
+    $("capTokens").value = /^\d+$/.test(l) ? Number(l) * 2 + 40 : CAP_LENGTH_TOKENS[l] || 300;
+  } else if (t) $("capTokens").value = t.tokens;     // each Qwen task suggests its own length
   if ($("capInstrBox").style.display !== "none") openInstr();
   saveCapSoon();
 }
@@ -7732,10 +7993,11 @@ const capExt = () => {                    // Training > Other Options > Caption 
 };
 
 function capJobBody(extra = {}) {
-  const t = qwenOn() && qwenTask();
   return {family: S.family, folder: capFolder(), model: $("capModel").value, task: $("capTask").value, ext: capExt(),
-    instruction: t ? t.instruction.split("{concept}").join($("capConcept").value.trim() || "the same concept") : "",
+    instruction: capInstruction(),
     max_tokens: Number($("capTokens").value) || 120,
+    threshold: Number($("capThreshold").value) || 0.35, leave_out: $("capLeaveOut").value,
+    underscores: $("capUnderscores").checked,
     trigger: $("capTrigger").value, overwrite: $("capOverwrite").checked, ...extra};
 }
 
@@ -8008,12 +8270,13 @@ function wireCaptions() {
     S.values.DATASET_CAPTION_EXT = $("captionExt").value.trim() || ".txt";
     syncInputs(["DATASET_CAPTION_EXT"]); saveStateSoon(); loadCaptions();
   });
-  $("capModel").addEventListener("change", () => { fillTasks(); onCapTask(); });
+  $("capModel").addEventListener("change", () => { fillTasks(); onCapTask(); capKindRows(); });
   $("capPerPage").addEventListener("change", () => {
     CAP_PAGE = Number($("capPerPage").value) || 12; S.cap.page = 0; renderCaptions(); saveCapSoon(); });
   $("capTask").addEventListener("change", onCapTask);
   $("capConcept").addEventListener("input", saveCapSoon);
-  for (const id of ["capTrigger", "capTokens", "capOverwrite", "capSongWords", "capSkipCjk"])
+  for (const id of ["capTrigger", "capTokens", "capOverwrite", "capSongWords", "capSkipCjk", "capThreshold", "capLeaveOut",
+                    "capUnderscores"])
     $(id).addEventListener("change", saveCapSoon);
   // a trigger word typed here fills auto-recaption's on the Training tab (an empty one leaves it alone)
   $("capTrigger").addEventListener("input", () => {
@@ -8023,8 +8286,22 @@ function wireCaptions() {
     saveTriggerSoon($("capTrigger").value.trim());
     saveStateSoon();
   });
-  $("capEditInstr").addEventListener("click", () =>
-    $("capInstrBox").style.display === "none" ? openInstr() : ($("capInstrBox").style.display = "none"));
+  $("capEditInstr").addEventListener("click", async () => {
+    const ty = capType();
+    if (ty) {                                      // its own type: copied into Custom..., which is editable
+      await api("/api/captions/instruction", {key: "custom", text: capTypeText(ty, $("capLength").value)});
+      await loadCaptionOptions();
+      $("capTask").value = (S.cap.opts.instruction_tasks.find((t) => t.key === "custom") || {}).label || $("capTask").value;
+      onCapTask();
+      openInstr();
+      return;
+    }
+    $("capInstrBox").style.display === "none" ? openInstr() : ($("capInstrBox").style.display = "none");
+  });
+  $("capLength").addEventListener("change", () => { capExtrasSave(); onCapTask(); });
+  $("capTrigger").addEventListener("input", capSentShow);
+  $("capExtraOwn").addEventListener("input", () => { capSentShow(); capExtrasSave(); });
+  $("capConcept").addEventListener("input", capSentShow);
   $("capInstrSave").addEventListener("click", () => saveInstr($("capInstr").value));
   $("capInstrReset").addEventListener("click", () => saveInstr(""));
   $("capAll").addEventListener("click", () => capRun("/api/captions/ai", capJobBody()));
@@ -10012,7 +10289,7 @@ function wire() {
   document.querySelectorAll("[data-close]").forEach((b) =>
     b.addEventListener("click", () => $(b.dataset.close).classList.remove("active")));
   for (const sel of document.querySelectorAll(".family-pick"))
-    sel.addEventListener("change", (e) => chooseFamily(e.target.value));
+    sel.addEventListener("change", (e) => chooseFamily(e.target.value, true));
   const folder = $("imageFolder");
   const setFolder = () => {
     const was = S.imageFolder;

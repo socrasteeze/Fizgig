@@ -281,6 +281,9 @@ class FamilyOption:
     # with the tick ":N", after it the higher value with every Nth epoch at the lower; `slide_hint` replaces the hint
     slide: tuple = ()
     slide_hint: str = ""
+    # (note, value): a bracketed line above the Slide hint naming other known-good numbers, with "click here to try
+    # them", which puts `value` into the boxes. () = none
+    slide_alt: tuple = ()
     single: str = ""                  # Single's value to start with when the default is a Split or Slide value
 
     def choice_labels(self):
@@ -370,6 +373,9 @@ class FamilyDescription:
     prefs_note: str = ""
     fetch_note: str = ""
     fetch_optional_label: str = ""
+    # (label, url): one small link under the family's Download button in Preferences, opening the model's licence in a
+    # new tab. A link only - the licence's text and terms live in the family's guide (docs/drivers/CHECKLIST.md)
+    licence_link: tuple = ()
     # the "new model files" popup's opening line (the files themselves: ModelFile.announce)
     announce_intro: str = ""
 
@@ -434,6 +440,10 @@ class FamilyDescription:
     # breaks rather than degrade quietly.
     compile_payback_steps: dict = field(default_factory=dict)
     compile_boundary: str = "inside"
+    # "inside" only from this PyTorch (e.g. "2.15"): older ones keep the checkpoint outside - MOSS-Image's inside
+    # placement keeps 7-10 full-width activations a block on torch 2.10 against 2 on 2.15 (#324: an install pulled
+    # without updating PyTorch spilled into system RAM). "" = any version.
+    compile_inside_min_torch: str = ""
     compile_fullgraph: bool = True
     # measured peak GB when compiled: {precision: {"inside" | "outside": ((megapixels, GB), ...)}}. With it the compile
     # plan checks free VRAM: the family's boundary if it fits, else the checkpoint outside the graph, else uncompiled.
@@ -572,6 +582,10 @@ class FamilyDescription:
     # masked training (fizgig/dataset/masks.py): the driver's training_loss takes loss_mask; opt in, so a family added
     # later never gets a tick its driver can't honour
     masked_training: bool = False
+    # Element boost (an experiment, the loss weight of one part of each still early in a run; masks.face_box /
+    # element_map): tuned on MOSS-Image only, so only a family that opts in shows it (Peter, 10 Nov 2026). Needs
+    # masked_training too (the driver's training_loss takes loss_mask)
+    element_boost: bool = False
     # see-through pictures (an RGBA VAE: Qwen Image 2.1): the latent cache keeps a picture's alpha when some of it is
     # transparent, and the driver's decode returns RGBA when the render is; off: the alpha is dropped, as for RGB VAEs
     rgba: bool = False

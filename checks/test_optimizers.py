@@ -26,8 +26,11 @@ NEW = ("prodigy", "muon", "automagic4")
 
 
 def test_new_optimizers_listed():
+    import importlib.util
     opts = available_optimizers()
-    for name in NEW + ("automagic3", "adamw", "adamw8bit"):
+    # adamw8bit needs bitsandbytes, which the public CPU checks don't install (it's listed only where it loads)
+    want = NEW + ("automagic3", "adamw") + (("adamw8bit",) if importlib.util.find_spec("bitsandbytes") else ())
+    for name in want:
         assert name in opts
 
 
@@ -98,6 +101,14 @@ def test_muon_steps_and_its_fallback():
 def test_automagic4_owns_its_rate():
     opt, _ = create_optimizer("automagic4", [nn.Parameter(torch.randn(8, 8))], 1e-6)
     assert owns_its_rate(opt)
+
+
+def test_automagic4_ceiling():
+    """v4's rate stops at 2.5e-4 (a start above it is clamped too); max_lr= in Optimizer Args overrides it."""
+    opt, _ = create_optimizer("automagic4", [nn.Parameter(torch.randn(8, 8))], 1e-6)
+    assert opt.param_groups[0]["max_lr"] == 2.5e-4
+    opt, _ = create_optimizer("automagic4", [nn.Parameter(torch.randn(8, 8))], 1e-6, "max_lr=5e-4")
+    assert opt.param_groups[0]["max_lr"] == 5e-4
 
 
 def test_new_optimizers_never_fall_back_to_adamw():

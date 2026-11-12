@@ -1138,6 +1138,10 @@ input[type="range"] {
   display: flex;
 }
 /* the welcome: the tour beside what's the same and what's new; stacked on a narrow window */
+.modal-window.sysmem-window { width: 620px; border-radius: var(--radius); overflow: hidden; }
+.sysmem-body { font-size: 13.5px; line-height: 1.5; }
+.sysmem-body p { margin: 0 0 10px; }
+.sysmem-body a { color: var(--accent); }
 .modal-window.welcome-window { width: 1080px; border-radius: var(--radius); overflow: hidden; }
 .welcome-body { display: flex; gap: 20px; align-items: flex-start; }
 .welcome-body video { flex: 0 0 58%; width: 58%; border-radius: 10px; background: var(--pic-shade); aspect-ratio: 16 / 9; }
@@ -1234,6 +1238,10 @@ input[type="range"] {
 .form-group-rows { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: flex-end; }
 .section-card[id^="sec-"] .form-group-rows > .form-row { flex: 1 1 140px; min-width: 120px; margin: 0; }
 .form-group-rows > .form-row.kind-wide { flex: 3 1 320px; }
+/* Metadata's seven boxes: about three to a line (one on a phone), the long ones a line each */
+.section-card[id^="sec-"] .form-group[data-group="metadata"] .form-group-rows > .form-row { flex: 1 1 220px; }
+.section-card[id^="sec-"] .form-group[data-group="metadata"] .form-group-rows >
+  .form-row:is([data-key="METADATA_DESCRIPTION"], [data-key="METADATA_THUMBNAIL"]) { flex: 1 1 100%; }
 .section-card[id^="sec-"] .form-group-rows > .form-row.kind-check { flex: 0 1 auto; padding: 4px 0; border: none;
   background: none; align-self: flex-end; }
 .section-card[id^="sec-"] .form-group-rows .row-hint { display: none; }
@@ -2861,3 +2869,20 @@ label[title]:has(.tip-mark) { cursor: help; }
 .st-map-note { margin-top: 8px; padding: 6px 10px; border-left: 3px solid var(--warning); border-radius: 4px;
   background: color-mix(in srgb, var(--warning) 12%, transparent); color: var(--text-primary); font-size: 9.5pt; }
 .st-map-trig { width: 140px; }
+
+/* a captioner's extra-option ticks (Captions tab) */
+.cap-extras { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 2px 14px; margin: 4px 0 8px; }
+.cap-extras .checkbox-label { margin: 0; }
+#capExtraOwn { width: 100%; max-width: 720px; margin: 2px 0 6px; }
+.cap-sent { margin-top: 4px; padding: 6px 10px; border-left: 3px solid var(--accent); border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent); max-width: 720px; }
+
+/* Preferences' Captioning models card */
+.cap-pref-title { font-weight: 700; color: var(--text-primary); margin-bottom: 2px; }
+.cap-pref-state { margin-top: 4px; }
+.cap-pref-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.cap-pref-row { display: grid; grid-template-columns: minmax(180px, 260px) 1fr auto; gap: 4px 12px; align-items: center; }
+.cap-pref-name { font-weight: 600; }
+.cap-pref-done { color: var(--success); font-weight: 600; white-space: nowrap; }
+.cap-pref-err { grid-column: 1 / -1; color: var(--warning); }
+@media (max-width: 640px) { .cap-pref-row { grid-template-columns: 1fr auto; } .cap-pref-row > .field-hint:not(.cap-pref-err) { grid-column: 1 / -1; } }

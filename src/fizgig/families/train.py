@@ -792,6 +792,11 @@ def _render_previews(driver, dit, net, vae, encoded, out_dir, epoch, *, output_n
         _eager = torch.compiler.set_stance("force_eager")
         _eager.__enter__()
         done.add("eager")
+        if getattr(driver, "preview_int8_attention", False):   # the checkpoint asks for INT8 attention, so the
+            from fizgig.modules import int8_attention as _i8a   # previews match ComfyUI's render (MiniMax H3 Image)
+            _i8 = _i8a.renders(True)
+            _i8.__enter__()
+            done.add("i8a")
         for i, cond in enumerate(encoded):
             for m in mults:
                 if m is not None or extra:
@@ -830,6 +835,8 @@ def _render_previews(driver, dit, net, vae, encoded, out_dir, epoch, *, output_n
     finally:
         if "eager" in done:
             _eager.__exit__(None, None, None)
+        if "i8a" in done:
+            _i8.__exit__(None, None, None)
         if slider or strengths:
             net.set_trainable_multiplier(1.0)  # a preview that failed mid-dial must not leave the LoRA scaled
         if "decode_park" in done:
@@ -1091,6 +1098,29 @@ class _FineTune:
         logger.info(f"[save] {path} ({replaced}{'/' + str(total) if total else ''} tensors trained)")
 
 
+def _test_vram_cap(device):
+    """(GB, from step) for FIZGIG_TEST_VRAM_CAP_GB / FIZGIG_TEST_VRAM_CAP_AT_STEP (the out-of-memory recovery's
+    tests), else None. A cap from step 0 applies at once."""
+    raw = os.environ.get("FIZGIG_TEST_VRAM_CAP_GB", "").strip()
+    if not raw or torch.device(device).type != "cuda" or not torch.cuda.is_available():
+        return None
+    try:
+        gb, at = float(raw), int(os.environ.get("FIZGIG_TEST_VRAM_CAP_AT_STEP", "0") or 0)
+    except ValueError:
+        return None
+    if at <= 0:
+        _apply_test_vram_cap(gb, 0)
+        return None
+    return gb, at
+
+
+def _apply_test_vram_cap(gb, at):
+    total = torch.cuda.get_device_properties(0).total_memory
+    torch.cuda.empty_cache()                 # the cached blocks go, so the cap bites on the next allocations
+    torch.cuda.set_per_process_memory_fraction(max(0.01, min(1.0, gb * 1024 ** 3 / total)))
+    logger.warning(f"[test] VRAM capped at {gb:g} GB from step {at} (FIZGIG_TEST_VRAM_CAP_GB) - a test setting")
+
+
 def train_family(family, dit_path, dataset_config, output_dir, output_name, *, network_dim=32, network_alpha=32,
                  preview_small_card_cap=0,
                  learning_rate=1e-4, max_train_epochs=16, save_every_n_epochs=1, save_until_epoch=0,
@@ -1122,7 +1152,7 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                  ft_epochs_done=0, ft_fused_backward=False, reg_lr_multiplier=0.2, preview_checkpoint=None,
                  preview_checkpoint_cache="auto", preview_int8=False, family_options=None,
                  dop=False, dop_trigger=None, dop_class="", dop_weight=1.0, dop_every=1, dop_ft_samples=8,
-                 lr_boost=None, share_worker=None, masked_training=False, mask_floor=0.1, mask_prior=0.0,
+                 lr_boost=None, share_worker=None, masked_training=False, mask_floor=0.1, mask_prior=0.0, face_weight=1.0, face_area="face", face_cycle="1:0", face_until="0:0",
                  caption_dropout=0.0, stage_dataset_config=None, stage_until=0.3, stage_blend=0.1,
                  batch_size_auto=False):
     desc = get_family(family)
@@ -1247,6 +1277,19 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
 
     # ---- data ------------------------------------------------------------------------------------
     shared_epoch = Value("i", 0)
+    # the face's own loss weight (the face detector's oval): anything but 1 (0 = the face not at all); stills only
+    face_phase = {"on": True, "epoch": 0, "ended": False}   # Boost the face's cycle: this epoch boosted? (per epoch)
+    try:                                   # --face_until E:S - the boost ends after epoch E or step S, whichever is
+        _face_end = tuple(max(0, int(x)) for x in (str(face_until or "0:0").split(":") + ["0"])[:2])   # sooner; 0 = none
+    except ValueError:
+        raise RuntimeError(f"--face_until {face_until!r}: give it as EPOCH:STEP, e.g. 12:600 (0 = no limit)") from None
+    try:                                   # --face_cycle N:M - N boosted epochs, then M normal ones
+        _face_cyc = tuple(max(0, int(x)) for x in str(face_cycle or "1:0").split(":")[:2])
+        _face_cyc = (max(1, _face_cyc[0]), _face_cyc[1] if len(_face_cyc) > 1 else 0)
+    except ValueError:
+        raise RuntimeError(f"--face_cycle {face_cycle!r}: give it as N:M, e.g. 2:1") from None
+    face_on = (face_weight is not None and float(face_weight) >= 0.0 and float(face_weight) != 1.0
+               and not slider_prompts and desc.masked_training)
     if slider_prompts:
         user_config = {"general": {"resolution": [slider_bank_res, slider_bank_res]}}
         group = _SliderBank([None] * max(1, int(slider_bank)))    # filled once the DiT is loaded
@@ -1267,6 +1310,11 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                 raise RuntimeError(f"{desc.display_name} has no masked training - drop --masked_training")
             from fizgig.dataset.image_dataset import ImageDataset
             ImageDataset.loss_masks = True      # each still with a photo-masklabel.png gets its mask (dataset/masks.py)
+        if face_on:
+            from fizgig.dataset.image_dataset import ImageDataset
+            ImageDataset.face_boost = float(face_weight)     # each still's largest face as an oval (Boost the face)
+            from fizgig.dataset.masks import FACE_AREAS
+            ImageDataset.face_area = face_area if face_area in FACE_AREAS else "face"
         group = generate_dataset_group_by_blueprint(blueprint.dataset_group, training=True,
                                                     num_timestep_buckets=None, shared_epoch=shared_epoch)
     if group.num_train_items == 0:
@@ -1336,10 +1384,36 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
     def _loss_mask(batch):
         """The step's per-cell loss weights (masked training), or None: a picture without a mask trains as normal."""
         m = batch.get("loss_mask") if masked_training else None
-        if m is None:
+        if face_on and any(_face_end) and _face_cyc[1] > 0 and not face_phase["ended"]:
+            # with --face_until, the cycle runs in steps: the window (epoch E or step S, the sooner) splits into E
+            # equal blocks (12 if no epoch is given) - an epoch each when they fit, so a big dataset whose S steps
+            # are only a few epochs still gets its normal stretches between the boosted ones
+            win = min(x for x in (_face_end[0] * steps_per_epoch, _face_end[1]) if x)
+            unit = max(1, min(steps_per_epoch, win // (_face_end[0] or 12)))
+            on = (global_step // unit) % (_face_cyc[0] + _face_cyc[1]) < _face_cyc[0]
+            if on != face_phase.get("was"):
+                face_phase["was"] = on
+                face_phase.setdefault("said", []).append(   # said at the next epoch's start: mid-step it would land
+                    f"[face boost] step {global_step} (epoch {face_phase['epoch'] + 1}): "     # on a progress-bar
+                    + ("boosted" if on else "normal (no boost)")                                 # line, which the
+                    + f" for {unit * (_face_cyc[0] if on else _face_cyc[1])} steps")            # app's log thins out
+            face_phase["on"] = on
+        f = batch.get("face_weight") if face_on and face_phase["on"] else None
+        if f is not None and not face_phase["ended"] and ((_face_end[0] and face_phase["epoch"] >= _face_end[0])
+                                                         or (_face_end[1] and global_step >= _face_end[1])):
+            face_phase["ended"] = True       # its limit: from here on the run trains as if it were off
+            face_phase.setdefault("said", []).append(f"[face boost] ends at step {global_step} (epoch "
+                                                     f"{face_phase['epoch'] + 1}): the rest of the run trains without it")
+        if face_phase["ended"]:
+            f = None
+        if m is None and f is None:
             return None
         from fizgig.dataset.masks import mask_weight
-        return mask_weight(m.to(device).float(), mask_floor)
+        w = mask_weight(m.to(device).float(), mask_floor) if m is not None else None
+        if f is not None:                    # the face: x face_weight over its oval (0 = not at all), on top of the mask
+            f = 1.0 + (float(face_weight) - 1.0) * f.to(device).float()
+            w = f if w is None else w * f
+        return w
     if slider_pairs:
         shared = _pair_slider_caption(user_config)
         if shared:                           # the dial is shown on what both ends of a pair have in common
@@ -2039,6 +2113,12 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                        "ss_masked_images": str(masked_images)})
             if mask_prior:
                 md["ss_mask_prior"] = f"{mask_prior:g}"
+        if face_on:
+            md["ss_face_weight"] = f"{float(face_weight):g}"
+            md["ss_face_area"] = str(face_area or "face")
+            md["ss_face_cycle"] = f"{_face_cyc[0]}:{_face_cyc[1]}"
+            if any(_face_end):
+                md["ss_face_until"] = f"{_face_end[0]}:{_face_end[1]}"
         md.update(driver.run_metadata())
         return md
 
@@ -2380,6 +2460,9 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
     steplog = StepLog(output_dir, output_name, start_step=step_off + global_step)
     for _w in ("sample", "save"):          # a request left from an earlier run is not this one's
         take_request(output_dir, _w)
+    # a test setting, ignored unless set: FIZGIG_TEST_VRAM_CAP_GB caps this process's VRAM (a real CUDA out-of-memory
+    # where Windows would otherwise spill into shared memory), from step FIZGIG_TEST_VRAM_CAP_AT_STEP (default 0)
+    test_cap = _test_vram_cap(device)
     progress = tqdm(total=steps_per_epoch * max_train_epochs, initial=global_step, desc="steps", smoothing=0)
     between = [None]          # when the last epoch's steps ended: the time until the next epoch's is left out of s/it
     dit.train()
@@ -2702,6 +2785,12 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                 logger.info("[maps] training maps: no picture could be read from the cache - off for this run")
                 maps = None
     for epoch in (_worker_epochs() if share_worker else range(start_epoch, max_train_epochs)):
+        while face_phase.get("said"):        # the boost's switches during the last epoch, each on a line of its own
+            logger.info(face_phase["said"].pop(0))
+        face_phase["epoch"] = epoch
+        if face_on and _face_cyc[1] > 0 and not any(_face_end):   # Boost the face on N epochs, then M normal
+            face_phase["on"] = epoch % (_face_cyc[0] + _face_cyc[1]) < _face_cyc[0]   # ones, repeating from epoch 1
+            logger.info(f"[face boost] epoch {epoch + 1}: " + ("boosted" if face_phase["on"] else "normal (no boost)"))
         shared_epoch.value = epoch + 1
         driver.begin_epoch(epoch + 1 + (ftr.epochs_done if ftr is not None else 0))   # a continued fine-tune counts on
         if share_worker and epoch + 1 == int(share_now[0]["epoch"]):   # a round's first epoch: the lead's LoRA
@@ -2919,6 +3008,9 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
             if pending >= accum:
                 _update()
             global_step += 1
+            if test_cap and global_step >= test_cap[1]:
+                _apply_test_vram_cap(*test_cap)
+                test_cap = None
             _flush()                           # the last step's numbers: finished on the GPU by now
 
             def _rec(lv, per=None, _e=epoch, _i=i, _g=global_step, _keys=batch.get("item_keys"), _ts=_info.get("ts"),
@@ -3046,6 +3138,8 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
         logger.info("[share] the lead's run is done here")
         return None
     progress.close()
+    while face_phase.get("said"):
+        logger.info(face_phase["said"].pop(0))
     steplog.flush()
     for _old in glob.glob(os.path.join(output_dir, SHARE_DIR, "*")):   # the share's rounds and bundles: done with
         if os.path.basename(_old) != "setup.json":
@@ -3246,6 +3340,18 @@ def setup_parser():
                         "fully, grey partly, black at --mask_floor; pictures without a mask train as normal")
     p.add_argument("--mask_floor", type=float, default=0.1,
                    help="masked training: how much outside the mask counts (0 = nothing, 1 = as much as inside)")
+    p.add_argument("--face_weight", type=float, default=1.0,
+                   help="Boost the face (an experiment): each still's largest face counts this many times as much in "
+                        "the loss (a soft oval from the face detector), on top of any mask; 1 = off, 0 = the face not at all")
+    p.add_argument("--face_cycle", default="1:0",
+                   help="--face_weight on N epochs then off M, repeating from epoch 1 (N:M; the off ones train as if "
+                        "it were off): 1:1 = every 2nd epoch, 2:1 = two boosted then one normal, 1:0 = every epoch")
+    p.add_argument("--face_until", default="0:0",
+                   help="--face_weight ends after epoch E or step S, whichever comes first (E:S, 0 = no limit; it "
+                        "can stop mid-epoch): 12:600 = the first 12 epochs or 600 steps")
+    p.add_argument("--face_area", choices=("face", "head", "person", "no_clothes", "body_clothes", "body", "clothes",
+                                           "not_faces", "background"), default="face",
+                   help="--face_weight's area: the face, or the head (face and hair; a mask trims it to the person)")
     p.add_argument("--mask_prior", type=float, default=0.0,
                    help="masked training: outside the mask, keep the LoRA to the model's own prediction (LoRA at 0) "
                         "at this weight (OneTrainer's masked prior preservation; 0 = off; one extra forward a step)")
@@ -3318,7 +3424,7 @@ def main():
         dop_ft_samples=a.dop_ft_samples,
         lr_boost=[(x.split("=", 1)[0], float(x.split("=", 1)[1])) for x in a.lr_boost if "=" in x] or None,
         share_worker=a.share_worker, masked_training=a.masked_training, mask_floor=a.mask_floor,
-        mask_prior=a.mask_prior, caption_dropout=a.caption_dropout, stage_dataset_config=a.stage_dataset_config,
+        mask_prior=a.mask_prior, face_weight=a.face_weight, face_area=a.face_area, face_cycle=a.face_cycle, face_until=a.face_until, caption_dropout=a.caption_dropout, stage_dataset_config=a.stage_dataset_config,
         stage_until=a.stage_until, stage_blend=a.stage_blend)
 
 

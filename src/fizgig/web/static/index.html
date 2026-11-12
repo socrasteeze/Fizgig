@@ -517,6 +517,18 @@
               <div class="field-row"><span class="field-label">Task:</span>
                 <select id="capTask" class="w-combo-lg"></select>
                 <button class="btn" id="capEditInstr">Edit instructions…</button></div>
+              <div class="field-row" id="capLengthRow" style="display:none"><span class="field-label">Length:</span>
+                <select id="capLength" class="w-combo"></select>
+                <span class="field-hint">A length word, or at most this many words.</span></div>
+              <div id="capExtrasBox" style="display:none">
+                <div class="field-hint">Also tell it to (added after the main instruction and your own):</div>
+                <div class="cap-extras" id="capExtras"></div>
+                <div class="field-hint">Your own, added straight after the main instruction (before the ticked ones):
+                  write each as a plain sentence telling it what to do, one or more, in the order you want them.</div>
+                <textarea id="capExtraOwn" rows="2"
+                  placeholder="e.g. Mention the colour of her eyes. Describe the jewellery in detail. Do not describe the background."></textarea>
+                <div class="field-hint cap-sent" id="capSent"></div>
+              </div>
               <div class="field-row" id="capConceptRow" style="display:none"><span class="field-label">The concept is:</span>
                 <input type="text" id="capConcept" class="w-path" placeholder='a few plain words, e.g. "a backflip" or "a double exposure"'></div>
               <div class="field-hint" id="capConceptHint" style="display:none;margin-bottom:12px">Every caption names it in exactly these
@@ -536,6 +548,16 @@
               <div class="field-row"><span class="field-label">Max tokens:</span>
                 <input type="number" id="capTokens" class="w-num" value="120">
                 <span class="field-hint">How long a caption may be.</span></div>
+              <div id="capTagRows" style="display:none">
+                <div class="field-row"><span class="field-label">Keep tags scoring:</span>
+                  <input type="number" id="capThreshold" class="w-num" min="0.05" max="0.95" step="0.05" value="0.35">
+                  <span class="field-hint">or more (0 to 1). Higher keeps only the tags it's sure of; lower adds more tags,
+                    and more mistakes.</span></div>
+                <div class="field-row"><span class="field-label">Leave out:</span>
+                  <input type="text" id="capLeaveOut" class="w-path" placeholder="tags never to write, e.g. watermark, signature, blurry"></div>
+                <label class="checkbox-label"><input type="checkbox" id="capUnderscores">
+                  Keep underscores in tags (long_hair rather than long hair)</label>
+              </div>
               <label class="checkbox-label"><input type="checkbox" id="capOverwrite" checked>
                 Overwrite existing captions (untick to caption only the files without one)</label>
             </div>
@@ -648,6 +670,7 @@
           <div class="section-card" id="galleryCard">
             <div class="card-title">Previews so far</div>
             <div class="card-desc" id="galleryInfo">The newest first, from the current run's output folder.</div>
+            <div class="field-hint tc-warn" id="galleryError"></div>
             <div class="card-content">
               <div class="field-row gallery-controls" id="galleryControls" style="display:none">
                 <span class="field-label">Run:</span><select id="galleryRun" class="w-combo"></select>
@@ -2025,6 +2048,29 @@
       <div class="modal-footer">
         <label class="checkbox-label welcome-never"><input type="checkbox" id="welcomeNever"> Don't show this again</label>
         <button class="btn btn-primary" id="welcomeClose">Get started</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- On Windows with an NVIDIA card: turn off CUDA Sysmem Fallback, once a launch until Don't show this again -->
+  <div class="modal-backdrop" id="sysmemModal">
+    <div class="modal-window sysmem-window">
+      <div class="modal-header"><span>For full training speed on Windows</span>
+        <button class="btn btn-sm" id="sysmemX" title="Close">✕</button></div>
+      <div class="modal-body sysmem-body">
+        <p>NVIDIA's driver can quietly move part of a training run into system RAM when the card fills up. Nothing
+          crashes, but training can run several times slower, and a driver or Windows update can switch it on.</p>
+        <p><b>To turn it off:</b> open <b>NVIDIA Control Panel</b> → <b>Manage 3D settings</b> → <b>Global Settings</b>,
+          set <b>CUDA - Sysmem Fallback Policy</b> to <b>Prefer No Sysmem Fallback</b>, click Apply, and restart
+          Fizgig.</p>
+        <p class="field-hint">Use Global Settings, not Program Settings: Fizgig's Python there is only a launcher, so a
+          per-program setting never reaches it. With it off, a run too big for your card stops with an out-of-memory
+          message instead of slowing down, and Fizgig retries it lighter by itself.
+          <a href="https://github.com/shootthesound/Fizgig/blob/master/docs/INSTALL.md#training-suddenly-several-times-slower-windows-shared-gpu-memory" target="_blank" rel="noopener">More in the install guide</a></p>
+      </div>
+      <div class="modal-footer">
+        <label class="checkbox-label"><input type="checkbox" id="sysmemNever"> Don't show this again</label>
+        <button class="btn btn-primary" id="sysmemClose">OK</button>
       </div>
     </div>
   </div>

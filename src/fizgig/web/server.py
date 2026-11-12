@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, urlparse
 from fizgig.dataset.masks import is_mask_file, mask_for_stem
 from fizgig.families import form, launch
 from fizgig.families.registry import get as get_family, training_families
-from fizgig.web import captions, history
+from fizgig.web import captions, history, oom
 from fizgig.web import queue as webqueue
 from fizgig.web import prep_jobs
 from fizgig.families import refmod
@@ -126,6 +126,15 @@ def _amd_gpu_row():
                 "uuid": "", "util": None, "temp": None, "power": None, "power_limit": None}
     except Exception:
         return None
+
+
+def _has_nvidia():
+    """An NVIDIA card on this machine (nvidia-smi lists one; ROCm's AMD fallback rows don't count)."""
+    try:
+        return any("nvidia" in str(g.get("name") or "").lower() or str(g.get("uuid") or "").startswith("GPU-")
+                   for g in list_gpus())
+    except Exception:
+        return False
 
 
 def list_gpus():
@@ -1554,16 +1563,81 @@ def _continue_point(rec):
             "unit": "epoch"}
 
 
-def _oom_note(run_id):
-    """What to do after a run ran out of GPU memory: Continue from its newest save (fresh memory - memory that
-    fragments over hours is the usual cause late in a run), or, with nothing saved yet, a lighter setup."""
-    pt = _continue_point(history.get(run_id))
-    if pt:
-        return (f"\nThe GPU ran out of memory. The run is saved at {pt['unit']} {pt['done']}: press Continue on its "
-                f"card in Runs & outputs to carry on from there, with fresh memory. Closing other programs that use "
-                f"the GPU (a browser, a game) helps too.\n")
-    return ("\nThe GPU ran out of memory before the run saved anything. Try a smaller picture size or more block "
-            "swap (Memory & Precision, on the Training tab), and close other programs that use the GPU.\n")
+OOM_WAIT_S = 15                 # before an automatic retry: the failed process's memory is given back first
+
+
+def _oom_recover(kind, stage_name, plan):
+    """A run ran out of memory (oom.classify's kind): carry it on by itself when web/oom.py says so - a Continue from
+    its newest save, or a fresh restart a step lighter - logged plainly and kept on its record. False when it
+    stops here (the advice and what was tried are in the log); the caller then lets the queue move on."""
+    rid = _run.get("history_id")
+    rec = history.get(rid) or {}
+    tries = [t for t in (rec.get("oom") or []) if isinstance(t, dict)]
+    pt = _continue_point(rec)
+    try:            # only a save this run made: an earlier run with the same name and folder leaves its own behind
+        started = float(rec.get("started_at") or 0)        # the record's first start (a Continue keeps it)
+        if pt and os.path.getmtime(pt["path"]) < started - 5:
+            pt = None
+    except (OSError, TypeError, ValueError):
+        pass
+    desc = get_family(rec.get("family") or "")
+    values = {k: v for k, v in (rec.get("values") or {}).items() if not str(k).startswith("__")}
+    prog = rec.get("progress") or _run.get("progress") or {}
+    step = prog.get("step")
+    try:
+        per_epoch = int(prog.get("total_steps") or 0) // max(1, int(prog.get("total_epochs") or 1))
+    except (TypeError, ValueError):
+        per_epoch = 0
+    finetune = bool(desc is not None and desc.finetune and form._kind(desc, values) == "finetune")
+    done = f"{pt['unit']} {pt['done']}" if pt else ""
+
+    def lighter():
+        try:
+            max_swap = int(desc.load_driver().max_blocks_to_swap() or 0)
+        except Exception:
+            max_swap = 0
+        return oom.step_down(desc, values, plan, max_swap, launch.precision_key,
+                             {**launch.PRECISION_LABELS, **getattr(desc, "precision_labels", {})})
+
+    if stage_name != "Training" or desc is None or rec.get("source") != "web":
+        d = {"do": "stop", "why": ""}            # a cache stage, or a run this server didn't start: advice only
+    else:
+        d = oom.decide(kind, tries, pt is not None, step, per_epoch, finetune, lighter)
+    new_values, change = values, "same settings"
+    if d["do"] != "stop" and d.get("lighter"):
+        new_values, change = lighter()
+        if new_values is None:
+            d = {"do": "stop", "why": f"it can't go lighter ({change})"}
+    if d["do"] == "stop":
+        append_log(oom.summary(tries) + (f"Automatic recovery stopped: {d['why']}.\n" if tries and d["why"] else "")
+                   + oom.advice(kind, pt is not None, done))
+        return False
+    tries.append({"kind": kind, "step": step, "at": time.time(),
+                  "action": f"{'Continue from the newest save' if d['do'] == 'continue' else 'started again'} "
+                            f"({change})"})
+    history.set_field(rid, "oom", tries)
+    append_log(f"\n↻ Out-of-memory recovery ({len(tries)} of {oom.MAX_TRIES}): {d['why']} - "
+               f"{tries[-1]['action']}, in {OOM_WAIT_S} s.\n")
+    t = threading.Timer(OOM_WAIT_S, _oom_go, args=(rid, d["do"], new_values, tries))
+    t.daemon = True
+    t.start()
+    return True
+
+
+def _oom_go(rid, do, values, tries):
+    """The automatic Continue / restart _oom_recover scheduled; a run started meanwhile (Start, the queue) wins, and
+    the queue then carries on."""
+    rec = history.get(rid) or {}
+    if do == "continue":
+        r = _continue_run(rid, queue_ok=False, values=values)
+    else:
+        r = _start(rec.get("family") or "", values, rec.get("image_folder") or "")
+        if isinstance(r, dict) and not r.get("error") and not r.get("problems") and _run.get("history_id"):
+            history.set_field(_run["history_id"], "oom", tries)       # the new record carries the count on
+    if not isinstance(r, dict) or r.get("error") or r.get("problems"):
+        why = (r or {}).get("error") or "; ".join((r or {}).get("problems") or []) if isinstance(r, dict) else str(r)
+        append_log(f"\nOut-of-memory recovery couldn't start the run again: {why}\n")
+        webqueue.on_run_ended("failed", rec.get("lora"), _queue_starter)
 
 
 def _run_form(rec, values=None):
@@ -1895,10 +1969,10 @@ def _run_stages(stages, out_dir):
             return
         with _lock:
             _run["proc"] = proc
-        oom = False
+        mem = oom.Watch()                       # GPU / system-RAM messages, and the Auto plan the trainer chose
         for line in proc.stdout:
             append_log(line)
-            oom = oom or "out of memory" in line.lower()
+            mem.feed(line)
             try:
                 upd = tracker.consume(line)
             except Exception:
@@ -1928,12 +2002,14 @@ def _run_stages(stages, out_dir):
             webqueue.on_run_ended("stopped", _run.get("lora"), _queue_starter)
             return
         if ret != 0:
-            append_log(f"\n✖ {stage.name} failed (exit code {ret}).\n" + _log_where())
+            kind = oom.classify(ret, mem)
+            what = {"gpu": " - the GPU ran out of memory", "ram": " - system memory (RAM) ran out"}.get(kind, "")
+            append_log(f"\n✖ {stage.name} failed (exit code {ret}){what}.\n" + _log_where())
             with _lock:
                 _run.update(state="failed", proc=None, ended_at=time.time())
             history.end(_run.get("history_id"), "failed", _run.get("progress"))
-            if oom:
-                append_log(_oom_note(_run.get("history_id")))
+            if kind and _oom_recover(kind, stage.name, mem.plan):
+                return                           # it carries on by itself: the queue waits for that run
             webqueue.on_run_ended("failed", _run.get("lora"), _queue_starter)
             return
     paused = ((os.path.exists(os.path.join(out_dir, ".pause_requested")) or _run["pause"])
@@ -3046,6 +3122,10 @@ class Handler(BaseHTTPRequestHandler):
                                          for k in form.model_keys(d)},
                               "cache_dir": str(p.get("cache_dir") or ""),
                               "settings": {k: str(p.get(k) or "") for k in SETTING_PREFS},
+                              "captioning": {"main": pref_path(p, "krea2_text_encoder"),
+                                             "main_ok": bool(pref_path(p, "krea2_text_encoder")
+                                                             and os.path.isfile(pref_path(p, "krea2_text_encoder"))),
+                                             "others": captions.other_captioners()},
                               "captioner": {"path": str(p.get(captions.SECONDARY_PREF) or ""),
                                             "note": secondary_captioner_note(p),
                                             "links": [{"label": lab, "href": f"https://huggingface.co/{r}/blob/main/{f}"}
@@ -3056,6 +3136,10 @@ class Handler(BaseHTTPRequestHandler):
                               "password_on": bool(self.password),
                               "password_saved": bool(str(p.get("web_password") or "").strip()),
                               "welcome_hidden": str(p.get("welcome_v8_hidden") or "") == "1",
+                              # the launch tip to turn off CUDA Sysmem Fallback: Windows with an NVIDIA card (nvidia-smi
+                              # answers), until Don't show this again
+                              "sysmem_tip": sys.platform == "win32" and str(p.get("sysmem_tip_hidden") or "") != "1"
+                              and _has_nvidia(),
                               "password_env": bool(os.environ.get("FIZGIG_PASSWORD")) or getattr(self, "password_arg", False),
                               "lan_ip": __import__("fizgig.web.port", fromlist=["x"]).lan_ip(),
                               "cuda_device": str(p.get("cuda_device") or ""), "gpus": list_gpus(),
@@ -3118,6 +3202,8 @@ class Handler(BaseHTTPRequestHandler):
                                       "application/octet-stream")
             except (ValueError, OSError) as e:
                 return self.json({"error": str(e)}, 400)
+        if path == "/api/captioners/status":          # Preferences' Other captioning models, while one downloads
+            return self.json({"others": captions.other_captioners()})
         if path == "/api/captions/options":
             p = load_prefs()
             cap = captioner_for(p)
@@ -4322,7 +4408,7 @@ class Handler(BaseHTTPRequestHandler):
                 render_keys = {f"workbench_render_{d.key}" for d in training_families()
                                if getattr(d, "workbench_render_choice", False)}
                 allowed = {k for d in training_families() for k in form.model_keys(d)} | set(SETTING_PREFS) | {
-                    "input_dataset_dir", "welcome_v8_hidden", captions.SECONDARY_PREF} | render_keys
+                    "input_dataset_dir", "welcome_v8_hidden", "sysmem_tip_hidden", captions.SECONDARY_PREF} | render_keys
                 ch = b.get("changes") or {}
                 ch = {k: v for k, v in ch.items() if k not in render_keys or v in ("checkpoint", "samples")}
                 if b.get("reset"):                      # Reset to defaults: the settings, never the model files
@@ -4373,11 +4459,13 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/trigger":
                 set_folder_trigger(str(b.get("folder") or ""), str(b.get("word") or ""))
                 return self.json({"ok": True})
+            if path == "/api/captioners/download":    # one captioner's files now, rather than on first use
+                return self.json(captions.download_captioner(str(b.get("key") or ""), load_prefs()))
             if path == "/api/captions/ai":
                 prefs, folder, clips, photos, _ = _caption_args(b)
                 cap = captioner_for(prefs)
                 model = str(b.get("model") or "")
-                _caption_gpu_check(8.0 if model == captions.QWEN_MODEL else 2.5)
+                _caption_gpu_check(captions.need_gb(model))
                 from fizgig.dataset import detail_crops     # the folder's files, or its largest detail crops
                 inside = {os.path.abspath(f) for f in captions.with_crops(folder)}
                 only = [p for p in (b.get("only") or []) if os.path.dirname(os.path.abspath(p)) in inside]
@@ -4385,7 +4473,8 @@ class Handler(BaseHTTPRequestHandler):
                     prefs, cap if cap and os.path.isfile(cap) else "", folder, model, str(b.get("task") or ""),
                     str(b.get("instruction") or ""), int(b.get("max_tokens") or 120), str(b.get("trigger") or ""),
                     bool(b.get("overwrite")), clips, only=only or None, photos=photos,
-                    ext=captions.caption_ext(b.get("ext"))))
+                    ext=captions.caption_ext(b.get("ext")), threshold=float(b.get("threshold") or 0.35),
+                    leave_out=str(b.get("leave_out") or ""), underscores=bool(b.get("underscores"))))
             if path.startswith("/api/studio/"):
                 try:
                     return self.json(_studio_post(path[len("/api/studio/"):], b))
