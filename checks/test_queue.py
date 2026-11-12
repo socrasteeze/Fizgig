@@ -72,14 +72,20 @@ class Holds(QueueBase):
         self.assertEqual([i["lora"] for i in st["items"]], ["fake_a"])
         self.assertTrue(st["held"])
 
-    def test_failed_or_stopped_run_holds(self):
-        for result in ("failed", "stopped", "paused"):
+    def test_stopped_or_paused_run_holds(self):
+        for result in ("stopped", "paused"):
             with self.subTest(result=result):
                 self._reset()
                 self.add("fake_a")
                 webqueue.on_run_ended(result, "fake_run", lambda item: self.fail("nothing starts"))
                 self.assertTrue(webqueue.status()["held"])
                 self.assertEqual(self.scheduled, [])
+
+    def test_failed_run_moves_on(self):         # upstream 475ddd77: an overnight queue doesn't stall on one failure
+        self.add("fake_a")
+        webqueue.on_run_ended("failed", "fake_run", lambda item: (True, ""))
+        self.assertFalse(webqueue.status()["held"])
+        self.assertEqual(self.scheduled, [10])
 
     def test_finish_moves_on(self):
         self.add("fake_a")

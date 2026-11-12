@@ -46,16 +46,16 @@ class FailedJobsEnd(unittest.TestCase):
         self.assertEqual(lines, ["FAIL: no images in list", "DONE"])
 
     def test_no_instruction_file(self):
-        lines = _job_lines(SimpleNamespace(include_video=False, backend="qwen"), {"list_file": self._list(self.photo)})
-        self.assertEqual(lines, ["FAIL: instruction_file required", "DONE"])
+        lines = _job_lines(SimpleNamespace(include_video=False, desc=SimpleNamespace(instruction=True)), {"list_file": self._list(self.photo)})
+        self.assertEqual(lines, ["FAIL: no instruction", "DONE"])
 
     def test_empty_instruction(self):
         instr = os.path.join(self.dir, "instr.txt")
         with open(instr, "w", encoding="utf-8") as f:
             f.write("  \n")
-        lines = _job_lines(SimpleNamespace(include_video=False, backend="qwen"),
+        lines = _job_lines(SimpleNamespace(include_video=False, desc=SimpleNamespace(instruction=True)),
                            {"list_file": self._list(self.photo), "instruction_file": instr})
-        self.assertEqual(lines, ["FAIL: empty instruction", "DONE"])
+        self.assertEqual(lines, ["FAIL: no instruction", "DONE"])
 
 
 class ReaderLeavesRunning(unittest.TestCase):
