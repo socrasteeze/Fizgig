@@ -383,7 +383,7 @@ def _write_json(path, data):
 # the desktop's DEFAULT_PREFS that aren't empty: a web-only install starts where the desktop app would
 PREF_DEFAULTS = {"lora_output_dir": "output_loras", "profiles_dir": "user_data/profiles", "cache_dir": "user_data/cache",
                  "runpod_stop_when_done": "0", "inference_blocks_to_swap": "Auto (detect from GPU)",
-                 "inference_int8": "1", "lan_discovery": "1", "update_check": "1"}
+                 "inference_int8": "1", "lan_discovery": "1", "update_check": "1", "window_no_gpu": "0"}
 
 
 LAST_USED_FILE = user_data.LAST_USED_FILE           # the training folder, each folder's trigger word
@@ -445,7 +445,7 @@ def set_folder_trigger(folder, word):
 
 # the Preferences settings Reset to defaults puts back (the model files are never reset)
 SETTING_PREFS = ("lora_output_dir", "profiles_dir", "cache_dir", "input_lora_dir", "input_ref_dir",
-                 "inference_blocks_to_swap", "inference_int8", "lan_discovery", "update_check")
+                 "inference_blocks_to_swap", "inference_int8", "lan_discovery", "update_check", "window_no_gpu")
 
 
 def load_prefs() -> dict:
@@ -1488,7 +1488,8 @@ def _record_pause(out_dir):
         fam, values, folder, name = _run["family"], dict(_run["values"]), _run["image_folder"], _run["lora"]
     desc = get_family(fam)
     ft = bool(desc is not None and desc.finetune and form._kind(desc, values) == "finetune")
-    path = launch.latest_ft_checkpoint(out_dir, name) if ft else launch.latest_state(out_dir, name)
+    began = (history.get(_run.get("history_id")) or {}).get("started_at") or 0     # an earlier run's states don't count
+    path = launch.latest_ft_checkpoint(out_dir, name) if ft else launch.latest_state(out_dir, name, began)
     if not path:
         return False
     side = {"mode": "ft" if ft else "state", "state_path": path, "output_name": name,
@@ -1551,7 +1552,7 @@ def _continue_point(rec):
                                                   values.get("FAMILY_FT_ROTATE_EVERY"))
         return {"kind": "ft", "path": path, "done": done, "of": done + left, "key": "FAMILY_FT_ROTATIONS",
                 "unit": "rotation"}
-    path = launch.latest_state(out, name)
+    path = launch.latest_state(out, name, rec.get("started_at") or 0)     # not an earlier run's, same name and folder
     m = re.search(r"-(\d{6})-state$", path)
     if not m:
         return None
@@ -4450,7 +4451,7 @@ class Handler(BaseHTTPRequestHandler):
                                                                   if k in SETTING_PREFS}}
                 if "inference_int8" in ch:
                     ch["inference_int8"] = "1" if ch["inference_int8"] in (True, "1", 1) else "0"
-                for k in ("lan_discovery", "update_check"):
+                for k in ("lan_discovery", "update_check", "window_no_gpu"):
                     if k in ch:
                         ch[k] = "1" if ch[k] in (True, "1", 1) else "0"
                 upd = {k: str(v) for k, v in ch.items() if k in allowed}
