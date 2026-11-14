@@ -88,6 +88,7 @@ async function boot() {
   S.passwordOn = pr.password_on;
   S.portFixed = pr.port_fixed;
   S.pw = {saved: pr.password_saved, env: pr.password_env, lan: pr.lan_ip || ""};
+  S.qtGpu = pr.qt_gpu_option ? {saved: !!pr.qt_disable_gpu, changed: false} : null;   // Linux's and Windows' app window
   S.pod = pr.pod;
   S.outputDefault = pr.output_default || "";
   S.outputPref = pr.lora_output_dir || "";
@@ -293,10 +294,25 @@ function renderSections(tab, host) {
           el("span", {class: "sec-video-sub", text: sec.help.sub || "Watch on YouTube"}))));
     }
     // a group's rows (form.py ROW_GROUPS) in one box where its first row is, side by side; their hints behind ?
-    const groups = {};
+    const groups = {}, folds = {};
     for (const r of sec.rows) {
       const row = renderRow(r);
       if (r && r.advanced_of && advancedInto(body, r.advanced_of, row)) continue;
+      if (r && r.fold) {                 // a fold of its own at the card's end, closed unless its tick is on
+        let f = folds[r.fold];
+        if (!f) {
+          const inner = el("div", {class: "form-fold-rows"});
+          const d = el("details", {class: "tc-box form-fold", "data-fold": r.fold},
+            el("summary", {text: r.fold_label || r.label}), inner);
+          S.foldOpen = S.foldOpen || {};
+          d.open = r.fold in S.foldOpen ? S.foldOpen[r.fold] : !!(r.fold_on && S.values[r.fold_on]);
+          d.addEventListener("toggle", () => { S.foldOpen[r.fold] = d.open; });
+          f = folds[r.fold] = {d, inner};
+          body.append(d);
+        }
+        f.inner.append(row);
+        continue;
+      }
       if (!r || !r.group) { body.append(row); continue; }
       let g = groups[r.group];
       if (!g) {
@@ -312,7 +328,11 @@ function renderSections(tab, host) {
       if (r.hint) g.help.append(el("div", {}, el("b", {text: r.label.replace(/:$/, "") + ": "}), r.hint));
     }
     for (const g of Object.values(groups)) if (!g.help.children.length) g.q.remove();
-    if (sec.id === "subjects" && !S.family.startsWith("acestep")) body.append(triggerCheckBlock());
+    // Check a trigger word: after the card's rows, above any fold of its own (the Regularisation dataset)
+    if (sec.id === "subjects" && !S.family.startsWith("acestep")) {
+      const fold = body.querySelector(":scope > .form-fold");
+      if (fold) body.insertBefore(triggerCheckBlock(), fold); else body.append(triggerCheckBlock());
+    }
     const card = el("div", {class: "section-card", id: "sec-" + sec.id, "data-section": sec.id}, head, body);
     show();
     if (sec.extras) host.append(el("div", {class: "extras-divider", "data-extras": "1"}, el("span", {text: "✦ Extras ✦"})));
@@ -961,6 +981,10 @@ async function refreshState() {
     o.querySelector(":scope > .adv-toggle").style.display = any ? "" : "none";
     o.querySelector(":scope > .row-advanced").style.display = any ? "" : "none";
   });
+  // a card's own fold shows while any of its rows can (the Regularisation dataset: Standard LoRA and LoKR only)
+  document.querySelectorAll(".form-fold").forEach((f) => {
+    f.style.display = [...f.querySelectorAll(".form-row[data-key]")].some((x) => !hidden.has(x.dataset.key)) ? "" : "none";
+  });
   document.querySelectorAll(".section-card[data-section]").forEach((c) => {
     c.style.display = hidden.has(c.dataset.section) ? "none" : "";
   });
@@ -1064,8 +1088,10 @@ function renderPrefs() {
   const host = $("prefsForm");
   host.innerHTML = "";
   if (S.pod) host.append(podCard());
+  const qt = qtGpuCard();
+  if (qt) host.append(qt);                 // between Theme (above) and Web UI
   host.append(webPortCard());
-  if (!S.pod) host.append(networkCard(), windowCard());
+  if (!S.pod) host.append(networkCard());
   host.append(dataFolderCard());
   host.append(outputFolderCard());
   host.append(foldersCard());
@@ -1582,6 +1608,35 @@ function welcomeShow(pr) {
   v.play().catch(() => {});
 }
 
+// prefs qt_disable_gpu → --disable-gpu for the app window from its next start: on Linux QTWEBENGINE_CHROMIUM_FLAGS (Qt
+// WebEngine), on Windows WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS (WebView2). The card shows on those two only
+function qtGpuCard() {
+  const G = S.qtGpu;
+  if (!G || S.onPod) return null;
+  const on = el("input", {type: "checkbox"});
+  on.checked = !!G.saved;
+  const say = el("div", {class: "field-hint"});
+  const base = "Keeps the app window off the GPU so it does not share VRAM " +
+    "with training, and can stop some setups where the window crashes or stays blank. Used from the next start (close Fizgig and open it again; not a browser tab).";
+  const paint = () => {
+    say.textContent = (G.changed ? "Saved: restart Fizgig for it to apply. " : "") + base;
+  };
+  on.addEventListener("change", async () => {
+    try {
+      await api("/api/prefs", {changes: {qt_disable_gpu: on.checked}});
+      G.saved = on.checked; G.changed = true; paint();
+    } catch (e) { on.checked = G.saved; say.textContent = e.message; }
+  });
+  paint();
+  return el("div", {class: "section-card"},
+    el("div", {class: "card-title"}, el("span", {text: "App window"})),
+    el("div", {class: "card-desc", text: "The Fizgig desktop window (WebView2 on Windows, Qt WebEngine on Linux)."}),
+    el("div", {class: "card-content"},
+      el("div", {class: "field-row"},
+        el("label", {class: "checkbox-label"}, on, " Disable GPU for the app window")),
+      say));
+}
+
 // the web UI's password (prefs web_password, the desktop's): empty = this machine only; set = other devices log in
 function webPasswordRows() {
   if (S.onPod) return [el("div", {class: "field-hint", text: "Password: this pod's FIZGIG_PASSWORD from the template, or the " +
@@ -1692,22 +1747,6 @@ function networkCard() {
       box("update_check", "Check for new releases"),
       el("div", {class: "field-hint", text: "Once at start-up, Fizgig asks GitHub for its newest release tag (the About " +
         "box says when one is out). Off: no check unless you press Check for updates in the About box."})));
-}
-
-// the app window's own drawing: on the graphics card (the usual way), or without it
-function windowCard() {
-  const on = el("input", {type: "checkbox"});
-  on.checked = String(S.set.window_no_gpu ?? "0") === "1";
-  on.addEventListener("change", () => api("/api/prefs", {changes: {window_no_gpu: on.checked}})
-    .then(() => { S.set.window_no_gpu = on.checked ? "1" : "0"; }));
-  return el("div", {class: "section-card"}, el("div", {class: "card-title"}, el("span", {text: "App window"})),
-    el("div", {class: "card-desc", text: "For Fizgig in its own window. In a browser, the browser's own hardware " +
-      "acceleration setting does this."}),
-    el("div", {class: "card-content"},
-      el("label", {class: "checkbox-label"}, on, " Draw the window without the graphics card"),
-      el("div", {class: "field-hint", text: "The window then holds none of the card's memory, which helps a run that " +
-        "needs nearly all of it (a 16 GB card at its limit). The page may scroll and play clips less smoothly. " +
-        "It takes effect the next time Fizgig starts."})));
 }
 
 // the web UI's port: saved by the first launch (8081, or the next free port if 8081 was taken)
