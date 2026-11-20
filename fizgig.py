@@ -12,11 +12,22 @@ sys.path.insert(0, os.path.join(HERE, "src"))
 #   out.
 # - Intel OpenMP's thread pool sleeps instead of spinning 200 ms after every parallel region: training's small
 #   per-step CPU work kept every core at 100% doing nothing (#18).
-#   ROCm reads its own name, PYTORCH_HIP_ALLOC_CONF, and ignores the CUDA one (#341).
+#   ROCm reads its own name, PYTORCH_HIP_ALLOC_CONF, and ignores the CUDA one (#341). On AMD only for datacenter
+#   cards: on consumer Radeon cards they corrupt memory silently (src/fizgig/utils/rocm_alloc.py, #363).
 if sys.platform != "win32" and os.environ.get("FIZGIG_NO_EXPANDABLE") != "1":
-    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-    if os.environ.get("FIZGIG_GPU_BACKEND") == "rocm":
-        os.environ.setdefault("PYTORCH_HIP_ALLOC_CONF", "expandable_segments:True")
+    if os.environ.get("FIZGIG_GPU_BACKEND") != "rocm":
+        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    else:
+        # loaded by its file, not as fizgig.utils: a worker started in this folder (python -m fizgig.scripts.…) finds
+        # this file as "fizgig" before the package, and fizgig.utils then isn't there (#379). rocm_alloc is stdlib-only
+        import importlib.util
+        _spec = importlib.util.spec_from_file_location(
+            "_fizgig_rocm_alloc", os.path.join(HERE, "src", "fizgig", "utils", "rocm_alloc.py"))
+        _rocm_alloc = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_rocm_alloc)
+        if _rocm_alloc.expandable_ok():
+            os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+            os.environ.setdefault("PYTORCH_HIP_ALLOC_CONF", "expandable_segments:True")
 os.environ.setdefault("KMP_BLOCKTIME", "0")
 os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
 

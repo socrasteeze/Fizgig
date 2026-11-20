@@ -1,8 +1,11 @@
 # HANDOFF
 
-**Updated:** 2026-11-16 | **Branch:** master | **Upstream:** 89a0ac16 | **Delivery target:** fork/master
+**Updated:** 2026-11-20 | **Branch:** master | **Upstream:** 8c28881b | **Delivery target:** fork/master
 
 ## State
+2026-11-20: merged 186 upstream commits after 89a0ac16 through 8c28881b (release notes v9.7.6 to v9.8.2). Conflicts in `server.py`, `studio.py` and `app.js`: fork start warnings, idle unload and Studio-save refusal kept; upstream GPU wait, load id and no-LoRA save refusal kept. Compile of 456 tracked Python files and `node --check` on `app.js` and `qrcode.js` passed. No GPU work.
+
+## Earlier: 2026-11-16 sync
 2026-11-16: merged 46 upstream commits after b3a892f6 through 89a0ac16 (release notes v9.7.2 to v9.7.5: H3 Image LCM sampler and 4-bit block swap on small cards, int8 on any pruned H3 file, Automagic v4 working rate, AMD/ROCm device pick and masked-attention fixes, Gizmo Prepare a folder and crop rework, run-history purge). All adopted. One conflict, `src/fizgig/web/studio.py`: the fork's idle unload and upstream's `studio_options`/`studio_tokens` are disjoint and both kept. Every fork-added line in the 7 files both sides touched is still present. Caught in the clean-merge sweep: upstream's new `@torch.no_grad()` on `automagic4_brakes` ran at import in `training/optimizers.py`, where the fork imports torch lazily, so importing the web server raised `NameError: torch` with or without torch installed; it now imports torch inside the call (see Fork changes). Gates, CPU-only with temporary `TEMP` in a fresh clone using the system Python (no `venv`, no torch): compile of 382 files and `node --check` pass; pytest 608 passed, 10 failed, 2 errors against a pre-merge 547 passed, 6 failed, 2 errors. Every new failure is in a new upstream check (`test_h3_16bit_int8`, `test_krea2_sageattention`, `test_stream_4bit_plan`) and fails the same way on pure upstream here (no `toml`, a cp1252 read on Windows); `test_files.Uploads.test_bad_names_refused` is the known Windows socket flake. No GPU work, app startup or pods were exercised.
 
 ## Earlier: 2026-11-09 sync

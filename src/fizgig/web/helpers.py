@@ -50,6 +50,13 @@ def _dir(*p):
     return os.path.join(user_data.USER_DATA, "helper", *p)
 
 
+def _glob(folder, *pattern):
+    """glob.glob in a folder whose own path may hold [ ] * or ? (a training or output folder named "photos [v2]", or
+    Fizgig installed under one): only `pattern` is a pattern. Unescaped, such a folder matched nothing, so Move a run
+    and a helper share sent none of its files."""
+    return glob.glob(os.path.join(glob.escape(folder), *pattern))
+
+
 def _write(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path + ".tmp", "w", encoding="utf-8") as f:
@@ -253,6 +260,15 @@ def submit(body):
     for k in ("lora", "context", "conds"):
         if body.get(k) and have(body[k])["size"] < 0:
             raise ValueError(f"The {k} file didn't arrive: send it again.")
+    kfs = body.get("keyframes") if isinstance(body.get("keyframes"), dict) else {}
+    for kf, name in kfs.items():                                   # First / Last frame (#376)
+        if kf not in ("first", "last") or not _SAFE.match(str(name)) or have(name)["size"] < 0:
+            raise ValueError("A first / last frame picture didn't arrive: send it again.")
+    job["keyframes"] = {kf: _dir("files", name) for kf, name in kfs.items()}
+    refs = body.get("references") if isinstance(body.get("references"), list) else []
+    if any(not _SAFE.match(str(n)) or have(n)["size"] < 0 for n in refs):
+        raise ValueError("A reference picture didn't arrive: send it again.")
+    job["references"] = [_dir("files", n) for n in refs]
     prefs = s.load_prefs()
     paths = {lab: p for lab, p, _f in _needs(desc, job, prefs)}
     roles = {f.role if f is not None else "": p for _lab, p, f in _needs(desc, job, prefs)}
@@ -289,7 +305,7 @@ def submit(body):
 def _tidy(hours=6):
     """Files and pictures of jobs whose lead went away mid-round, once they're old."""
     old = time.time() - hours * 3600
-    for p in glob.glob(_dir("files", "*")) + glob.glob(_dir("out", "*")):
+    for p in _glob(_dir("files"), "*") + _glob(_dir("out"), "*"):
         try:
             if os.path.getmtime(p) < old:
                 shutil.rmtree(p, ignore_errors=True) if os.path.isdir(p) else os.remove(p)
@@ -333,7 +349,7 @@ def drop(jid, lora=""):
         with _wlock:
             d = _w["dir"]
         if d:
-            for p in glob.glob(os.path.join(d, jid + ".*")):
+            for p in _glob(d, jid + ".*"):
                 try:
                     os.remove(p)
                 except OSError:
@@ -1064,7 +1080,7 @@ def _dispatch(hs):
     h, lv = _preview_helper(hs)
     if any(time.time() - i["at"] < 20 for i in _inbound.values()):
         return                              # a computer that connected in takes the rounds itself (pull)
-    rounds = sorted(glob.glob(os.path.join(out_dir, HELPER_ROUNDS, "*", "round.json"))) if out_dir else []
+    rounds = sorted(_glob(out_dir, HELPER_ROUNDS, "*", "round.json")) if out_dir else []
     if rounds and not h:
         # a round already handed to a helper still goes to it once it's ready, its Previews switch off or not: the
         # switch is for new rounds, and the trainer went on without this one, so nothing else would render it
@@ -1097,7 +1113,7 @@ def _send_round(h, lv, rd, out_dir, run):
     if job.get("compare"):
         _lead["compare"] = False
     c = Client(h["url"], h.get("cookie", ""))
-    queued = len(glob.glob(os.path.join(os.path.dirname(rd), "*", "round.json"))) - 1
+    queued = len(_glob(os.path.dirname(rd), "*", "round.json")) - 1
     act = lambda **a: lv.__setitem__("activity", {"run": run, "epoch": epoch, "queued": queued, **a})
     tag = hashlib.sha1(f"{socket.gethostname()}|{out_dir}|{job['output_name']}".encode()).hexdigest()[:8]
     # the model files first: a helper without them fetches them itself, and the round waits for them
@@ -1128,7 +1144,20 @@ def _send_round(h, lv, rd, out_dir, run):
     if os.path.isfile(os.path.join(rd, "conds.pt")):
         conds = f"{tag}-e{epoch:06d}-conds.pt"
         _send_file(c, os.path.join(rd, "conds.pt"), conds, lambda frac: None)
-    r = c.call("/api/helper/submit", {"job": job, "lora": lora, "context": ctx, "conds": conds}, timeout=60)
+    kfs = {}
+    for kf, name in (job.get("keyframes") or {}).items():         # First / Last frame (#376): the round's pictures
+        src = os.path.join(rd, str(name))
+        if os.path.isfile(src):
+            kfs[kf] = f"{tag}-e{epoch:06d}-{os.path.basename(src)}"
+            _send_file(c, src, kfs[kf], lambda frac: None)
+    refs = []
+    for name in job.get("references") or []:                         # the Reference base's pictures (#376)
+        src = os.path.join(rd, str(name))
+        if os.path.isfile(src):
+            refs.append(f"{tag}-e{epoch:06d}-{os.path.basename(src)}")
+            _send_file(c, src, refs[-1], lambda frac: None)
+    r = c.call("/api/helper/submit", {"job": job, "lora": lora, "context": ctx, "conds": conds, "keyframes": kfs,
+                                      "references": refs}, timeout=60)
     if r.get("models"):
         return
     jid, t0 = r["job"], time.time()
@@ -1139,7 +1168,7 @@ def _send_round(h, lv, rd, out_dir, run):
             break
         if st["state"] == "rendering" and not ahead:     # the next round's files go up while this one renders
             ahead = True
-            nxt = sorted(p for p in glob.glob(os.path.join(os.path.dirname(rd), "*", "round.json"))
+            nxt = sorted(p for p in _glob(os.path.dirname(rd), "*", "round.json")
                          if os.path.dirname(p) > rd)
             if nxt:
                 nd = os.path.dirname(nxt[0])
@@ -1165,14 +1194,15 @@ def _send_round(h, lv, rd, out_dir, run):
     os.makedirs(sample_dir, exist_ok=True)
     got = []
     for name in st.get("files") or []:
-        if not _SAFE.match(str(name)) or not name.endswith(".png"):
-            continue                         # only a plain picture name, never a path
+        if not _SAFE.match(str(name)) or not name.endswith((".png", ".mp4", ".wav")):
+            continue                         # a plain preview file name (a clip's still, clip, sound), never a path
         data = c.call(f"/api/helper/file?job={jid}&name={urllib.parse.quote(name)}", timeout=120)
         tmp = os.path.join(sample_dir, name + ".part")
         with open(tmp, "wb") as f:
             f.write(data)
         os.replace(tmp, os.path.join(sample_dir, name))
-        got.append(os.path.join(sample_dir, name))
+        if name.endswith(".png"):
+            got.append(os.path.join(sample_dir, name))
     c.call("/api/helper/drop", {"job": jid, "lora": lora})
     if conds:
         c.call("/api/helper/drop", {"job": "", "lora": conds})
@@ -1227,7 +1257,7 @@ def _rounds_run():
         try:
             for r in (_srv().history.runs() or [])[:20]:
                 d = r.get("output_dir") or ""
-                if d and glob.glob(os.path.join(d, HELPER_ROUNDS, "*", "round.json")):
+                if d and _glob(d, HELPER_ROUNDS, "*", "round.json"):
                     _lead["last_run"] = (d, r.get("lora") or "")
                     break
         except Exception:
@@ -1257,7 +1287,7 @@ def pull(body):
     out_dir, run = _rounds_run()
     if not out_dir:
         return {"run": ""}
-    for rj in sorted(glob.glob(os.path.join(out_dir, HELPER_ROUNDS, "*", "round.json"))):
+    for rj in sorted(_glob(out_dir, HELPER_ROUNDS, "*", "round.json")):
         rd = os.path.dirname(rj)
         taken = _read(os.path.join(rd, "taken.json"), {})
         if taken and (taken.get("by") != name and time.time() - taken.get("at", 0) < 600):
@@ -1296,7 +1326,7 @@ def finish(name, ok, error=""):
         if job.get("compare"):
             _lead["compare"] = False
             lv = {}
-            _compare(lv, job, sorted(glob.glob(os.path.join(rd, "theirs", "*.png"))))
+            _compare(lv, job, sorted(_glob(rd, "theirs", "*.png")))
             for i in _inbound.values():
                 if time.time() - i["at"] < 20:
                     i["check_stat"] = lv.get("check_stat", "")
@@ -2180,7 +2210,7 @@ def _cache_prep_work(p, out_dir, run, setup):
             trim = os.path.join(out_dir, SHARE_DIR, "trimmed")
             shutil.rmtree(trim, ignore_errors=True)
             for i, cd in enumerate(setup.get("cache_dirs") or []):
-                for src in glob.glob(os.path.join(cd, "*.safetensors")):
+                for src in _glob(cd, "*.safetensors"):
                     _trim(src, os.path.join(trim, str(i), os.path.basename(src)))
         # each set in one file (sent in pieces like a LoRA): hundreds of small files would cost two round trips each
         for kind, items in (("folder", _share_folder_files(setup)), ("cache", _share_cache_files(setup, {"trim": trim}))):
@@ -2203,7 +2233,7 @@ def _share_folder_files(setup):
     out = []
     for n, ds in enumerate(toml.loads(setup.get("dataset_config") or "").get("datasets") or []):
         d, cap = ds.get("image_directory") or "", (ds.get("caption_extension") or ".txt").lower()
-        for p in sorted(glob.glob(os.path.join(d, "*"))):
+        for p in sorted(_glob(d, "*")):
             if os.path.isfile(p) and os.path.splitext(p)[1].lower() in exts | {cap}:
                 out.append((f"m{n}", p))
     return out
@@ -2223,7 +2253,7 @@ def _share_cache_files(setup, prep):
         d, cap = ds.get("image_directory") or "", (ds.get("caption_extension") or ".txt").lower()
         keys = {os.path.splitext(f)[0] for f in os.listdir(d)
                 if os.path.splitext(f)[1].lower() not in (cap, ".json")} if d and os.path.isdir(d) else None
-        for p in sorted(glob.glob(os.path.join(cd, "*"))):
+        for p in sorted(_glob(cd, "*")):
             # cache names: <item>_<WxH>_<arch>.safetensors, <item>_<arch>_te.safetensors
             if keys is not None and "_".join(os.path.basename(p).split("_")[:-2]) not in keys:
                 continue
@@ -2267,7 +2297,7 @@ def _share_context(setup):
 
 def _unbundle(tag):
     """A set sent as one file, back into this computer's sent files (sh<tag>-<i>-<name>), as if sent one by one."""
-    for bp in glob.glob(_dir("files", f"sh{tag}-b-*")):
+    for bp in _glob(_dir("files"), f"sh{tag}-b-*"):
         with tarfile.open(bp) as tf:
             for m in tf.getmembers():
                 i, _, base = m.name.partition("/")
@@ -2466,7 +2496,7 @@ def _make_cache(tag, d, desc, cfg, stages, paths=None):
                                      stderr=subprocess.STDOUT, cwd=s.BASE_DIR, env=env, **_NO_WINDOW)
                 while p.poll() is None:
                     pat = "*_te.safetensors" if st["stage"] == "text" else "*[0-9]x[0-9]*.safetensors"
-                    m["done"] = sum(len(glob.glob(os.path.join(ds["cache_directory"], pat))) for ds in cfg["datasets"])
+                    m["done"] = sum(len(_glob(ds["cache_directory"], pat)) for ds in cfg["datasets"])
                     time.sleep(2)
             if p.returncode:
                 with open(logp, encoding="utf-8", errors="replace") as f:
@@ -2556,7 +2586,7 @@ def _share_start(body):
     def take(prefix, into, fix=os.replace):
         """The files sent as sh<tag>-<prefix>-*, under their own names, into a folder here."""
         os.makedirs(into, exist_ok=True)
-        for p in glob.glob(_dir("files", f"sh{tag}-{prefix}-*")):
+        for p in _glob(_dir("files"), f"sh{tag}-{prefix}-*"):
             real = names.get(os.path.basename(p)) or os.path.basename(p)[len(f"sh{tag}-{prefix}-"):]
             if os.path.basename(real) != real or real.startswith("."):
                 continue
@@ -2569,7 +2599,7 @@ def _share_start(body):
             ds["cache_directory"] = os.path.join(d, f"cache{n}").replace("\\", "/")
             os.makedirs(ds["cache_directory"], exist_ok=True)
         made = _made[tag] = {"state": "working", "stage": "latents", "done": 0, "cfg": cfg, "lead": lead,
-                             "total": sum(len(glob.glob(os.path.join(ds["image_directory"], "*"))) for ds in
+                             "total": sum(len(_glob(ds["image_directory"], "*")) for ds in
                                           cfg.get("datasets") or []) // 2 or 1}
         threading.Thread(target=_make_cache, args=(tag, d, desc, cfg, make, paths), daemon=True).start()
     if made is not None:
@@ -2588,7 +2618,7 @@ def _share_start(body):
             take(i, os.path.join(d, f"cache{i}"), _untrim)
             ds["cache_directory"] = os.path.join(d, f"cache{i}").replace("\\", "/")
             ds["image_directory"] = os.path.join(d, "no_images").replace("\\", "/")
-            if glob.glob(_dir("files", f"sh{tag}-k{i}-*")):        # masked training: the masks came with the cache
+            if _glob(_dir("files"), f"sh{tag}-k{i}-*"):        # masked training: the masks came with the cache
                 take(f"k{i}", os.path.join(d, f"masks{i}"))
                 ds["mask_directory"] = os.path.join(d, f"masks{i}").replace("\\", "/")
     jobs = os.path.join(d, "jobs")
@@ -2617,7 +2647,7 @@ def _share_start(body):
         elif flag == "--training_adapter":
             vals = [role("training_adapter")]
         elif flag == "--context_lora_path":       # sent with the run's files (sh<tag>-c-*), kept in the share folder
-            ctx = glob.glob(_dir("files", f"sh{tag}-c-*"))
+            ctx = _glob(_dir("files"), f"sh{tag}-c-*")
             if ctx:
                 os.replace(ctx[0], os.path.join(d, "context.safetensors"))
             if not os.path.isfile(os.path.join(d, "context.safetensors")):
@@ -2704,14 +2734,14 @@ def _share_tidy(keep):
     those of a worker still running."""
     live = ({keep} | {t for t, w in _sw.items() if w["proc"].poll() is None}
             | {t for t, m in _made.items() if m.get("state") == "working"})
-    for p in glob.glob(_dir("files", "sh*")):
+    for p in _glob(_dir("files"), "sh*"):
         m = re.match(r"sh([a-f0-9]{6,16})-", os.path.basename(p))
         if m and m.group(1) not in live:
             try:
                 os.remove(p)
             except OSError:
                 pass
-    for d in glob.glob(_dir("share", "*")):
+    for d in _glob(_dir("share"), "*"):
         if os.path.basename(d) not in live:
             shutil.rmtree(d, ignore_errors=True)
             _made.pop(os.path.basename(d), None)
@@ -2738,7 +2768,7 @@ def share_stop(tag):
             w["log"].close()
             os.makedirs(_dir("share_logs"), exist_ok=True)
             shutil.copyfile(os.path.join(w["dir"], "worker.log"), _dir("share_logs", f"{tag}.log"))
-            for old in sorted(glob.glob(_dir("share_logs", "*.log")), key=os.path.getmtime)[:-5]:
+            for old in sorted(_glob(_dir("share_logs"), "*.log"), key=os.path.getmtime)[:-5]:
                 os.remove(old)
         except OSError:
             pass
@@ -3037,7 +3067,7 @@ def _share_tick():
     _wait_set()                            # the flag is up: the trainer's first epoch goes to both
     lv["share_frac"] = st["frac"]
     # an epoch handed over and not yet sent: its start LoRA up, the job, then its result back
-    for jp in sorted(glob.glob(os.path.join(out_dir, SHARE_DIR, "*", "job.json"))):
+    for jp in sorted(_glob(out_dir, SHARE_DIR, "*", "job.json")):
         ed = os.path.dirname(jp)
         if ed in st["sent"] or any(os.path.exists(os.path.join(ed, n)) for n in (
                 "theirs.safetensors", "closed.json", "failed.json")):
@@ -3359,7 +3389,7 @@ def share_hello(body):
     prep = _cache_prep(out_dir, run, setup)
     if prep is None:
         return {"run": run, "tag": _share_tag(out_dir, run, setup), "preparing": True}
-    closed = [int(os.path.basename(os.path.dirname(p))) for p in glob.glob(os.path.join(out_dir, SHARE_DIR, "*", "closed.json"))
+    closed = [int(os.path.basename(os.path.dirname(p))) for p in _glob(out_dir, SHARE_DIR, "*", "closed.json")
               if os.path.basename(os.path.dirname(p)).isdigit()]
     entry = lambda make: [{"i": i, "name": os.path.basename(p), "size": os.path.getsize(p)}
                           for i, p in _share_send_list(setup, prep, make)]
@@ -3394,7 +3424,7 @@ def share_next(body):
     name = str(body.get("name") or "helper")[:60]
     out_dir, run = _run_now()
     launch = (_setup(out_dir, run) or {}).get("launch")
-    for jp in sorted(glob.glob(os.path.join(out_dir, SHARE_DIR, "*", "job.json"))) if out_dir else []:
+    for jp in sorted(_glob(out_dir, SHARE_DIR, "*", "job.json")) if out_dir else []:
         ed = os.path.dirname(jp)
         if any(os.path.exists(os.path.join(ed, n)) for n in ("theirs.safetensors", "closed.json", "failed.json"))                 or not os.path.exists(os.path.join(ed, "start.safetensors")):
             continue                       # back already, closed by the lead, or not this run's
@@ -3669,7 +3699,8 @@ def _move_names(values, k):
     if k == "FAMILY_REG_DIR" and not (values or {}).get("FAMILY_REG_ON"):
         return False
     return str((values or {}).get(k) or "").strip().lower() not in ("", "off")
-_MOVE_FILES = ("FAMILY_EDIT_REF", "SAMPLE_REFERENCE", "METADATA_THUMBNAIL")
+_MOVE_FILES = ("FAMILY_EDIT_REF", "SAMPLE_REFERENCE", "METADATA_THUMBNAIL",
+               "SAMPLE_FIRST_FRAME", "SAMPLE_LAST_FRAME")            # H3 previews' First / Last frame (#376)
 
 
 def _media_exts():
@@ -3961,20 +3992,20 @@ def _move_pack(out_dir, name, state, folder, values):
     path = os.path.join(out_dir, SHARE_DIR, "move.tar")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with tarfile.open(path + ".tmp", "w") as tf:
-        for p in sorted(glob.glob(os.path.join(folder, "*"))):
+        for p in sorted(_glob(folder, "*")):
             b = os.path.basename(p)
             if os.path.isfile(p) and (os.path.splitext(b)[1].lower() in exts or
                                       (b.startswith("fizgig_") and b.endswith(".json"))):
                 tf.add(p, arcname=f"images/{b}")
         for rel, sub in _run_subfolders(folder, values):      # its sub-folders, when the run trains them
-            for p in sorted(glob.glob(os.path.join(glob.escape(sub), "*"))):
+            for p in sorted(_glob(sub, "*")):
                 b = os.path.basename(p)
                 if os.path.isfile(p) and (os.path.splitext(b)[1].lower() in exts or
                                           (b.startswith("fizgig_") and b.endswith(".json"))):
                     tf.add(p, arcname=f"images/{rel}/{b}")
         dirs, files = _move_extras(values)
         for k, d in dirs.items():
-            for p in sorted(glob.glob(os.path.join(d, "*"))):
+            for p in sorted(_glob(d, "*")):
                 b = os.path.basename(p)
                 if os.path.isfile(p) and (os.path.splitext(b)[1].lower() in exts or
                                           (b.startswith("fizgig_") and b.endswith(".json"))):
@@ -4218,7 +4249,7 @@ def move_in(body):
         return {"models": m}
     _same_as_dit(desc, body.get("files") or {}, paths)
     name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(body.get("run") or "run")).strip("._")[:80] or "run"
-    for old in glob.glob(_dir("files", "mv*.tar")):      # an earlier attempt's file that never became a run
+    for old in _glob(_dir("files"), "mv*.tar"):      # an earlier attempt's file that never became a run
         if os.path.basename(old) != f"mv{tag}.tar" and time.time() - os.path.getmtime(old) > 3600:
             try:
                 os.remove(old)
@@ -4376,7 +4407,7 @@ def move_out(body):
     # captions and exclusions changed here: the training folder's, and the run's other folders'
     subs = [(f"images/{rel}/", d) for rel, d in _run_subfolders(rec["folder"], rec.get("values") or {})]
     for prefix, d in [("images/", rec["folder"])] + subs + [(f"dirs/{k}/", d) for k, d in (rec.get("dirs") or {}).items()]:
-        for p in sorted(glob.glob(os.path.join(d, "*"))):
+        for p in sorted(_glob(d, "*")):
             b = os.path.basename(p)
             if os.path.isfile(p) and (b.lower().endswith(rec.get("cap") or ".txt")
                                       or (b.startswith("fizgig_") and b.endswith(".json"))):

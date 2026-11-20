@@ -147,7 +147,7 @@ def captioner_problem(path) -> str:
 
 
 CUSTOM_TASK = "Custom…"
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif", ".avif"}   # every format training reads, and more
 
 
 CAPTION_EXTS = {".txt", ".caption", ".cap", ".tags", ".tag", ".text"}     # what a caption is called: never a script
@@ -176,6 +176,7 @@ def _log(line):
 def status():
     with _lock:
         out = {k: _st[k] for k in ("state", "job", "done", "total", "ok", "fail", "model")}
+        out["phase"] = _st.get("phase") or "loading"      # while state is "loading": "downloading" or "loading"
         out["log"] = _st["log"][-200:]
         out["loaded"] = _st["proc"] is not None and _st["proc"].poll() is None
     return out
@@ -348,10 +349,11 @@ def find_replace(folder, find, replace, apply, ext=".txt"):
     return {"changes": changes, "applied": bool(apply)}
 
 
-def add_text(folder, start, end, trigger, apply, ext=".txt"):
+def add_text(folder, start, end, trigger, apply, ext=".txt", each_line=False):
     """Text added to the start and/or end of every .txt caption (not songs' lyrics): the changes, and (apply)
     written. The start goes after the trigger word when a caption opens with it, so captions stay trigger-first; a
-    caption that already has the text is left as it is."""
+    caption that already has the text is left as it is. each_line: a file of several captions (one a line) has each
+    line done on its own."""
     start, end, trigger = (str(x or "").strip().strip(",").strip() for x in (start, end, trigger))
     if not (start or end):
         raise ValueError("Type what to add to the start or the end first.")
@@ -364,14 +366,18 @@ def add_text(folder, start, end, trigger, apply, ext=".txt"):
             old = read_text(fp)
         except OSError:
             continue
-        new = old.strip()
-        if start and not has(new, start):
-            m = re.match(r"\s*" + re.escape(trigger) + r"(?!\w)\s*,?\s*", new, re.IGNORECASE) if trigger else None
-            new = (new[:m.end()].rstrip(" ,") + ", " + start + (", " + new[m.end():] if new[m.end():] else "")
-                   if m else start + (", " + new if new else ""))
-        if end and not has(new, end):
-            new = (new.rstrip(" .,") + ", " if new else "") + end
-        if new == old.strip():
+        def one(new):
+            if start and not has(new, start):
+                m = re.match(r"\s*" + re.escape(trigger) + r"(?!\w)\s*,?\s*", new, re.IGNORECASE) if trigger else None
+                new = (new[:m.end()].rstrip(" ,") + ", " + start + (", " + new[m.end():] if new[m.end():] else "")
+                       if m else start + (", " + new if new else ""))
+            if end and not has(new, end):
+                new = (new.rstrip(" .,") + ", " if new else "") + end
+            return new
+        lines = [ln.strip() for ln in old.splitlines() if ln.strip()]
+        multi = each_line and len(lines) > 1
+        new = "\n".join(one(ln) for ln in lines) if multi else one(old.strip())
+        if new == ("\n".join(lines) if multi else old.strip()):
             continue
         changes.append({"name": _caption_name(folder, fp), "old": old[:300], "new": new[:300]})
         if apply:
@@ -430,6 +436,23 @@ def _mirror_crops(roots, ext):
     return n
 
 
+_on_end = [None]          # a queued caption job's callback: fn("finished" | "stopped" | "failed"), called once
+
+
+def when_done(fn):
+    """Call fn once with how the caption job just started ends (the queue moves on after it)."""
+    _on_end[0] = fn
+
+
+def _ended(result):
+    fn, _on_end[0] = _on_end[0], None
+    if fn is not None:
+        try:
+            fn(result)
+        except Exception:
+            pass
+
+
 def _reader(proc):
     for line in proc.stdout:
         line = line.rstrip()
@@ -441,6 +464,10 @@ def _reader(proc):
                 if _st["state"] == "loading":
                     _st["state"] = "running" if _st["job"] else "loaded"     # a queued job goes straight on
                 continue
+            if line.startswith("INFO: Downloading "):     # loading in two steps the first time (#366)
+                _st["phase"] = "downloading"
+            elif line.startswith("INFO: Loading "):
+                _st["phase"] = "loading"
             m = re.match(r"PROGRESS: (\d+) (\d+)", line)
             if m:
                 _st["done"], _st["total"] = int(m.group(1)), int(m.group(2))
@@ -458,11 +485,16 @@ def _reader(proc):
         _log(line)
         if roots:                                 # detail crops: the new captions over their other sizes
             _mirror_crops(roots, ext)
+        if line in ("DONE", "STOPPED"):
+            _ended("finished" if line == "DONE" else "stopped")
     with _lock:
+        died = _st["proc"] is proc and bool(_st["job"])
         if _st["proc"] is proc:
             _st.update(proc=None, key=None, state="idle", job="", model="")
             if _st["ready"] is not None:
                 _st["ready"].set()                # a worker that died loading wakes its waiter
+    if died:                                      # the worker died part way through a job
+        _ended("failed")
 
 
 def _env(prefs):
@@ -481,10 +513,13 @@ def _popen(cmd, prefs, stdin=False):
 
 
 def ai_captions(prefs, captioner, folder, model, task_label, instruction, max_tokens, trigger, overwrite, clips,
-                only=None, photos=True, ext=".txt", threshold=0.35, leave_out="", underscores=False):
+                only=None, photos=True, ext=".txt", threshold=0.35, leave_out="", underscores=False, add_line=False,
+                first_line=False):
     """Caption the folder's pictures (and clips) with a captioner from the registry (`model` is its label or key), or
     just `only` (a re-caption). The worker loads once and stays loaded for the next batch. A tagger keeps the tags
-    scoring `threshold` or more, minus `leave_out` (comma-separated), underscores as spaces unless `underscores`."""
+    scoring `threshold` or more, minus `leave_out` (comma-separated), underscores as spaces unless `underscores`.
+    add_line: every file, each keeping its caption and getting the new one on a line of its own (Several captions per
+    picture, #300). first_line: a re-caption of a file with several lines writes its first line and keeps the rest."""
     if _busy():
         raise ValueError("A captioning job is already running. Stop it first.")
     desc = _captioners.get(model)
@@ -499,9 +534,9 @@ def ai_captions(prefs, captioner, folder, model, task_label, instruction, max_to
         raise ValueError("Nothing here for the AI to caption: this model trains on recordings. Use Static Caption All "
                          "or Caption every song." if not photos and not clips else
                          "No pictures or clips in the training folder.")
-    if not only and not overwrite:
+    if not only and not overwrite and not add_line:
         images = [p for p in images if not os.path.exists(os.path.splitext(p)[0] + ext)]
-    images, roots = _crop_images(images, overwrite or bool(only), ext)    # detail crops: at their largest size
+    images, roots = _crop_images(images, overwrite or add_line or bool(only), ext)    # detail crops: at their largest size
     if not images:
         raise ValueError("Every file already has a caption. Tick Overwrite to caption them again."
                          if not only else "That file isn't there any more.")
@@ -521,7 +556,7 @@ def ai_captions(prefs, captioner, folder, model, task_label, instruction, max_to
         proc = _popen([sys.executable, "-m", "fizgig.scripts.batch_caption", "--serve", "--config", cfg_path], prefs,
                       stdin=True)
         with _lock:
-            _st.update(proc=proc, key=key, state="loading", model=model, ready=threading.Event())
+            _st.update(proc=proc, key=key, state="loading", model=model, ready=threading.Event(), phase="loading")
         _log(f"Loading {model}…")
         threading.Thread(target=_reader, args=(proc,), daemon=True).start()
     list_file, stop_file = os.path.join(JOB_DIR, "images.txt"), os.path.join(JOB_DIR, "stop")
@@ -532,7 +567,8 @@ def ai_captions(prefs, captioner, folder, model, task_label, instruction, max_to
     except OSError:
         pass
     job = {"list_file": list_file, "max_new_tokens": int(max_tokens or 120), "trigger": trigger.strip(),
-           "stop_file": stop_file, "caption_ext": ext}
+           "stop_file": stop_file, "caption_ext": ext, **({"add_line": True} if add_line else {}),
+           **({"first_line": True} if first_line and not add_line else {})}
     if desc.instruction:
         instr = os.path.join(JOB_DIR, "instruction.txt")
         with open(instr, "w", encoding="utf-8") as f:
@@ -611,7 +647,13 @@ def translate(prefs, folder, skip_existing, ext=".txt"):
 
 
 def stop():
-    """Stop the running job after the file it is on (the model stays loaded)."""
+    """Stop the running job after the file it is on (the model stays loaded). While the model is still downloading
+    or loading there is no file yet: Stop cancels the load and frees its memory (#366: it couldn't be stopped)."""
+    with _lock:
+        loading = _st["state"] == "loading"
+    if loading:
+        unload()
+        return True
     os.makedirs(JOB_DIR, exist_ok=True)
     open(os.path.join(JOB_DIR, "stop"), "w").close()
     _log("Stopping after the current file…")
@@ -621,10 +663,12 @@ def stop():
 def unload():
     """Quit the worker: its GPU memory is freed. Called before any training run starts."""
     with _lock:
-        proc = _st["proc"]
+        proc, loading = _st["proc"], _st["state"] == "loading"
     if proc is None or proc.poll() is not None:
         return False
     try:
+        if loading:              # downloading or loading: it reads no command until READY, so it's ended
+            raise RuntimeError("still loading")
         proc.stdin.write("QUIT\n")
         proc.stdin.flush()
         proc.wait(timeout=20)

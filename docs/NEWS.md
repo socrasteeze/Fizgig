@@ -1,5 +1,73 @@
 # Fizgig news
 
+## 19 Nov 2026: MiniMax H3 Image fine-tuning, and Studio as a generator
+
+**MiniMax H3 Image fine-tunes.** Fine-tune is now a kind of training for MiniMax H3 Image, with a built-in 5e-5 preset: the whole model trains, with Fizgig's training adapter on, and saves a full H3 Image file that Studio and ComfyUI load as the base. It trains on cards down to 24 GB.
+
+**Studio without a LoRA.** Leave the primary empty and Studio renders the base model on its own, any model, with the queue and Save as usual; Unload primary takes a LoRA out without reloading. On H3 Image, Studio's sizes now go up to 12288, ultrawide 7680-wide renders included.
+
+[Fizgig v9.8.2 release notes](https://github.com/shootthesound/Fizgig/releases/tag/v9.8.2)
+
+## 19 Nov 2026: Studio's own queue and outputs folder
+
+**Studio has its own queue.** While a render is going, **Add to queue** lines up the next exactly as Studio is set (another model or LoRA too), and each job is saved when it finishes; the queue bar above the preview keeps the finished ones with links to their files. Leaving Studio or starting a training run pauses it, and a training run never cuts a Studio render short: it waits and starts when the render is done.
+
+**Studio saves into a folder, and renders only what you look at.** Save original / Save tweaked write straight into `Studio_Outputs` (images, videos, songs) with no Save window, and **Save every render** saves each one by itself. The arrows between Baseline and Tweaked hide either pane, and a hidden pane isn't rendered, which halves an H3 clip's render.
+
+**First and Last frame for H3 previews.** The Samples tab takes a picture for each clip preview to start and end on, so an image-to-video LoRA's previews show what it does. On the Reference base the same rows are the previews' reference pictures, `<Picture 1>` and `<Picture 2>`. A previews helper now sends back whole clips with sound, not their middle frame.
+
+**Leaner Krea 2 on AMD.** INT8 fast inference is off by default on AMD cards, where the stored fp8 file is about twice as fast, and Krea 2's text encoder frees its memory without a 5 GB copy into RAM on every card.
+
+[Fizgig v9.8.1 release notes](https://github.com/shootthesound/Fizgig/releases/tag/v9.8.1)
+
+## 19 Nov 2026: MiniMax H3 Turbo previews keep their steps
+
+**A fix for MiniMax H3 previews.** Changing a Samples-tab setting while an H3 run trained sent the plain Steps box (20) to the run instead of the Turbo preview steps, so its Turbo previews came out with artefacts. They now keep your Turbo steps and strength, and Resume takes them too.
+
+[Fizgig v9.8.0 release notes](https://github.com/shootthesound/Fizgig/releases/tag/v9.8.0)
+
+## 18 Nov 2026: MiniMax H3 Studio twice as fast, long clips in pieces, Continue and Loop back
+
+**Faster H3 Studio.** On the int8 base, Studio renders through the int8 kernel ComfyUI uses, with each LoRA added in one pass: a 5-second 512 × 512 clip's six steps went from 24.9 s to 11.2 s on a 5090. The int8 video VAE now works and is the default download.
+
+**Longer clips.** In pieces makes a clip of any length as 5.2-second pieces that carry on from each other, in one piece's memory, and a prompt line starting with a time changes the prompt from there. Continue adds a new clip on the end of the one you rendered; Loop back adds one that comes back round to its first frame.
+
+**Also:** Cancel in Studio, an Aspect list and a Width/Height swap, the big caption view edited a line at a time with Join lines, and a fix for LoRAs that failed in Studio with a dtype error.
+
+[Fizgig v9.7.9 release notes](https://github.com/shootthesound/Fizgig/releases/tag/v9.7.9)
+
+## 18 Nov 2026: Download a dataset onto a pod, caption jobs in the queue, and every preview setting in one place
+
+**Download a training folder onto a pod.** On a pod, the Start tab downloads a dataset straight from a Hugging Face, Google Drive or zip link, checks the disk first, unpacks it and carries on after a stop, so a big dataset no longer goes up from your home connection.
+
+**Caption jobs in the queue.** The Captions tab's Add to queue lines up an AI caption job before the run that trains on the captions, and the job pill shows its settings to change and save, like a queued run. The Samples gallery lists every setting the previews render with, ready to copy into ComfyUI.
+
+**AMD.** Krea 2 previews fit 16 and 24 GB AMD cards at high resolutions, and expandable memory segments, which corrupt memory on Radeon cards with current ROCm, now stay off there.
+
+[Fizgig v9.7.8 release notes](https://github.com/shootthesound/Fizgig/releases/tag/v9.7.8)
+
+## 17 Nov 2026: Repeats from folder names, and several captions per picture
+
+**Repeats from folder names.** With Also train on its sub-folders ticked, **Repeats from folder names** reads `10_Laffey_base` as ten times an epoch, the naming kohya's sd-scripts and OneTrainer use, with a table of each folder's share and the Max Epochs that keeps the run as long.
+
+**Several captions per picture.** A caption file can hold several captions, one per line, and each time a picture trains one is picked at random. The Captions tab shows them a line at a time, and Add as another line builds tag-plus-sentence files.
+
+**Fixes.** Resume at a new size works with Enable Cache unticked, and a helper on a 16 GB card renders MiniMax H3 previews instead of running out of memory.
+
+[Fizgig v9.7.7 release notes](https://github.com/shootthesound/Fizgig/releases/tag/v9.7.7)
+
+## 17 Nov 2026: LoRA Isolation learns on MiniMax H3 video, Royale renders part of a run, and Gizmo's crop box follows the mouse
+
+**LoRA Isolation with Automagic.** Fizgig LoRA Isolation and Leave the rest of the model alone learned nothing with Automagic (every MiniMax H3 and H3 Image preset). Such a run now trains with AdamW, at the Learning Rate box's rate or Adaptive LR's.
+
+**LoRA Royale renders part of a run.** **Epochs from ... to ...** renders the stretch around an epoch you liked, and a finished run's folder lists its epochs again.
+
+**Gizmo's crop box follows the mouse.** It is drawn from the corner you press, moved by dragging inside it and resized by its corners and sides. Whole frame keeps the full picture of a video with non-square pixels.
+
+**Smaller things.** Photos with a colour profile train as they look, captioning models can be stopped while they load, Krea 2 decodes with about 2 GB less VRAM, and Leave the rest of the model alone can be told what your subject is.
+
+[Fizgig v9.7.6 release notes](https://github.com/shootthesound/Fizgig/releases/tag/v9.7.6)
+
 ## 16 Nov 2026: MiniMax H3 at int8 on any pruned file, and H3 Image on 12 GB cards
 
 **int8 on any pruned H3 file.** A pruned bf16 or fp8 MiniMax H3 or H3 Image file, Comfy-Org's or a fine-tune or merge saved that way, is converted to int8 as it loads, so Auto trains it at int8 instead of stopping at load. H3's pruned bf16 file converts to Comfy-Org's int8 file value for value. The full unpruned checkpoint stays 4-bit.

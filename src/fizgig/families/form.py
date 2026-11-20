@@ -96,7 +96,7 @@ DEFAULTS = {
     "FAMILY_MP_MANUAL": False, "FAMILY_MP_FACECROPS_FIRST": True, "FAMILY_SUBJECT_KIND": "From its captions", "FAMILY_SUBJECT_KIND2": "From its captions",
     "FAMILY_SUBJECT_KIND3": "From its captions", "FAMILY_SUBJECT_KIND4": "From its captions",
     "SAVE_STATE_ON_TRAIN_END": True, "KEEP_LAST_N_STATES": "2", "KREA2_LOSS_WATCH": False,
-    "KREA2_PER_IMAGE_LR": False, "KREA2_AUTO_RECAPTION": False, "TRAIN_SUBFOLDERS": False, "CAPTION_TRIGGER_WORD": "",
+    "KREA2_PER_IMAGE_LR": False, "KREA2_AUTO_RECAPTION": False, "TRAIN_SUBFOLDERS": False, "TRAIN_SUBFOLDER_REPEATS": False, "MULTI_CAPTION": False, "CAPTION_TRIGGER_WORD": "",
     "RECAPTION_FIRST": "Training caption (person or character)", "RECAPTION_SECOND": "Exhaustive detail (person or character)", "KREA2_WARMUP_LOOK": False,
     "FAMILY_PRECISION": launch.PRECISION_LABELS["auto"], "FAMILY_EMA": "0.98 (recommended)",
     "FAMILY_TRAINING_ADAPTER": True, "FAMILY_KIND": "standard", "FAMILY_FAST_ID": False,
@@ -311,7 +311,12 @@ def form(desc):
              "note"),
         _row("FAMILY_KIND", "Kind of training", "radio", choices=[label for _, label in ks], default=ks[0][1],
              sets={label: kind_sets(desc, k) for k, label in ks if kind_sets(desc, k)}) if len(ks) > 1 else None,
-        _row("TRAIN_SUBFOLDERS", "Also train on its sub-folders", "check", SUBFOLDERS_HINT, default=False),
+        _row("TRAIN_SUBFOLDERS", "Also train on its sub-folders", "check", SUBFOLDERS_HINT, default=False,
+             full=True),
+        _row("TRAIN_SUBFOLDER_REPEATS", "Repeats from folder names", "check", REPEATS_HINT, default=False,
+             note_table=True, full=True, child=True),
+        _row("MULTI_CAPTION", "Several captions per picture (one per line)", "check", MULTI_CAPTION_HINT,
+             default=False, note_info=True, full=True) if desc.multi_caption else None,
         _row("LEARNING_RATE", "Learning Rate", default=DEFAULTS["LEARNING_RATE"]),
     ]
     if desc.adaptive_lr:
@@ -484,7 +489,10 @@ def form(desc):
                       "The box shows the word Fizgig found. Type over it only if that is wrong."),
             _row("FAMILY_DOP_CLASS" + ("" if n == 1 else str(n)), f"Subject {n} - what they are",
                  hint="One word: woman, man, girl, boy, dog, cat, car ...\n"
-                      "The box shows what Fizgig found. Type over it only if that is wrong."))],
+                      "Leave the rest of the model alone: it takes the trigger word's place in the captions that keep "
+                      "the model as it was, so the model's own man (or woman ...) is what stays. Empty, the trigger "
+                      "word is just left out of them.\n"
+                      "Fizgig LoRA Isolation: the box shows what Fizgig found. Type over it only if that is wrong."))],
         # how often and how strongly the trigger-free pass runs is the tested recipe (every second step, x2): no control
         # last, under everything that changes them: what training will use, per subject (one of its own captions)
         *[_row(f"_subject{n}_as", f"Subject {n} - what training will use", "note", hint_labels=True)
@@ -681,7 +689,7 @@ def form(desc):
     labels = {**launch.PRECISION_LABELS, **dict(desc.precision_labels or ())}
     add("memory", "Memory & Precision", "training", [
         _row("BLOCKS_SWAP", "Blocks Swap", "combo", "Auto plans the fewest swapped blocks that fit your free VRAM.",
-             SWAP),
+             SWAP) if launch.swaps_blocks(desc) else None,       # SDXL, Anima, ACE-Step: no block swap to set
         _row("FAMILY_PRECISION", desc.precision_label or "Base precision", "choice", desc.precision_hint,
              [labels[p] for p in precisions], default=labels["auto"]) if len(desc.precisions) > 1 else None,
         _row("COMPILE_BLOCKS", "Compile Blocks", "choice", desc.compile_hint, ["Auto", "On", "Off"])
@@ -826,6 +834,13 @@ def form(desc):
              "Optional - every preview edits this photo with its prompt, at the photo's shape. Leave empty for normal "
              "previews. An Edit LoRA run previews on the photo set on its own card instead.",
              upload=True, start="data") if desc.reference_kind else None,
+        *[_row(f"SAMPLE_{kf.upper()}_FRAME", f"{kf.capitalize()} frame", "path",
+               f"Optional - every clip preview {'starts' if kf == 'first' else 'ends'} on this picture, cropped to the "
+               "preview's shape from its centre. For a LoRA captioned for what happens next in a clip (an "
+               "image-to-video dataset), whose previews mean little without the picture they start from. Leave "
+               "empty for normal previews. A still preview uses neither; the Reference training base ignores both. "
+               "A change reaches a run at its next Start or Resume.",
+               upload=True, start="data") for kf in desc.preview_keyframes],
         # a picture size only for a model that makes pictures (ACE-Step's previews are songs: the launcher then
         # uses the description's own preview size)
         _row("SAMPLE_WIDTH", "Width", "choice", choices=sizes, default=str(desc.preview_width)) if pictures else None,
@@ -1003,7 +1018,7 @@ def _reg_budget_note(desc, values, image_folder):
     """The figure beside Use each epoch: how many regularisation pictures an epoch takes, and what that does to an
     epoch's length (launch.lora_reg_budget: the number the trainer is given)."""
     st = {**values, "image_folder": image_folder, "subfolders": bool(values.get("TRAIN_SUBFOLDERS")),
-          "FAMILY_FT": False, "FAMILY_SLIDER": False, "FAMILY_EDIT": False}
+          "subfolder_repeats": bool(values.get("TRAIN_SUBFOLDER_REPEATS")), "FAMILY_FT": False, "FAMILY_SLIDER": False, "FAMILY_EDIT": False}
     if not launch.lora_reg_dir(desc, st):
         return "Pick the folder to see how many that is."
     per, have, train = launch.lora_reg_budget(desc, st)
@@ -1049,16 +1064,133 @@ def _on(values, o):
     return v not in (None, "", False, "0", 0)
 
 
-SUBFOLDERS_HINT = ("Off: only the pictures directly in the training folder are used.\nOn: the pictures in its "
-                   "sub-folders are trained on too, at any depth, each sub-folder as its own set with its own captions "
-                   "and cache, so a big dataset can stay organised. Every picture trains once an epoch, wherever it "
-                   "is. Image Prep and Captions work on one folder at a time: to caption or mask a sub-folder, choose "
-                   "it as the training folder on the Start tab.")
+SUBFOLDERS_HINT = ("Trains the pictures in every sub-folder too, each with its own captions. Image Prep and "
+                   "Captions work on one folder at a time: choose a sub-folder as the training folder on the Start "
+                   "tab to caption or mask it.")
+
+
+REPEATS_HINT = ("A sub-folder named with a number and an underscore, like 3_blue, is seen that many times each "
+                "epoch; one without a number is seen once. The same naming kohya and OneTrainer use.")
+
+
+MULTI_CAPTION_HINT = ("Each line of a caption file is a separate caption, and each time a picture trains one of its "
+                      "lines is randomly picked. Put the style you prompt with most on line 1: auto-recaption rewrites only "
+                      "line 1, and training maps and Leave the rest of the model alone use it.")
+
+
+def multi_caption_note(desc, values, image_folder):
+    """(show the row, its note): the row shows when the run's caption files have several lines, or it is ticked.
+    Ticked: pictures, captions and the caching cost; unticked: how many files have several lines, and what that does
+    today."""
+    ext = _str(values.get("DATASET_CAPTION_EXT")) or ".txt"
+    folders = [image_folder] if image_folder and os.path.isdir(image_folder) else []
+    if folders and values.get("TRAIN_SUBFOLDERS"):
+        folders += [f for _r, f in launch.subfolders(image_folder, (_str(values.get("LORA_OUTPUT_DIR")),))]
+    counts = {}                     # every picture's caption file: its lines (0 = no caption, it trains on an empty one)
+    for f in folders:
+        counts.update({os.path.join(f, n): k for n, k in launch.caption_line_counts(f, ext).items()})
+    many = {p: k for p, k in counts.items() if k > 1}
+    on = bool(values.get("MULTI_CAPTION"))
+    if not on:
+        if not many:
+            return False, ""
+        names = sorted(os.path.basename(p) for p in many)
+        which = f" ({', '.join(names[:3])}{', ...' if len(names) > 3 else ''})" if len(names) <= 5 else ""
+        captioned = sum(1 for k in counts.values() if k)
+        return True, (f"{len(many):,} of your {captioned:,} caption files {'has' if len(many) == 1 else 'have'} more "
+                      f"than one line{which}. Tick to train each line as its own caption, a random line each time the "
+                      f"picture trains; unticked, each file is one caption.")
+    if not counts:
+        return True, ""
+    if not many:
+        return True, "No caption file here has more than one line, so this changes nothing yet."
+    pics, total = len(counts), sum(max(k, 1) for k in counts.values())
+    span = f"{min(many.values())}-{max(many.values())}" if min(many.values()) != max(many.values()) else \
+        str(max(many.values()))
+    return True, (f"{total:,} captions for {pics:,} picture{'s' if pics != 1 else ''} ({len(many):,} with {span} "
+                  f"lines). Preparing the captions takes about {total / pics:.1f}x as long; training speed doesn't "
+                  f"change.")
+
+
+def _num(values, key, default):
+    try:
+        return max(1, int(float(_str(values.get(key)) or default)))
+    except ValueError:
+        return int(default)
+
+
+def _even_out(rows):
+    """The rename that evens out the smallest folder against the largest, when no folder is numbered yet: a line, or
+    "" when they're already close."""
+    subs = [(lab, n) for lab, _f, n, _r in rows if lab != "the training folder" and n]
+    if len(subs) < 2:
+        return ""
+    big_lab, big = max(subs, key=lambda x: x[1])
+    lab, n = min(subs, key=lambda x: x[1])
+    k = round(big / n)
+    if k < 2:
+        return ""
+    base = lab.rstrip("/").split("/")[-1]
+    total = sum(m for _l, _f, m, _r in rows)
+    return (f"{lab} has the fewest pictures, so it gets the least training ({100 * n / total:.0f}%). To even it out, "
+            f"rename the folder {base} to {k}_{base} in your file browser ({n:,} x {k} = {n * k:,}, close to "
+            f"{big_lab}'s {big:,}), then come back here. That folder is cached again on the next Start.")
+
+
+def repeats_note(desc, values, image_folder):
+    """The Repeats from folder names tick's note: the epoch line, each folder's pictures x repeats and share of an
+    epoch as a table ("| ... |" lines, the first its header; "|!" marks a folder with a very small share), then what
+    the repeats do to the run (its length, previews and saves, steps at a Batch size above 1)."""
+    reg = _str(values.get("FAMILY_REG_DIR")) if reg_ticked(desc, values) else ""
+    subs = launch.subfolders(image_folder, (_str(values.get("LORA_OUTPUT_DIR")), reg))
+    if not subs:
+        return ""
+    st = {"image_folder": image_folder, "LORA_OUTPUT_DIR": values.get("LORA_OUTPUT_DIR")}
+    rows = launch.repeat_rows(desc, st, subs)
+    total = sum(n * r for _l, _f, n, r in rows)
+    pics = sum(n for _l, _f, n, _r in rows)
+    if not total:
+        return ""
+    numbered = [rel for rel, _f in subs if launch.looks_like_repeats(rel)]
+    out = [(f"Each epoch: {total:,} pictures, from {pics:,} in the folders, each seen as many times as its "
+            f"folder's number." if total > pics else
+            f"Each epoch: each of the {pics:,} pictures once."),
+           "| Folder | Pictures | Repeats | Seen per epoch | Share of training |"]
+    small = 3.0
+    for label, _f, n, r in sorted(rows, key=lambda x: -x[2] * x[3]):
+        share = 100 * n * r / total
+        flag = "!" if share < small and len(rows) > 1 else ""
+        out.append(f"|{flag} {label} | {n:,} | {r}x | {n * r:,} | {f'{share:.0f}%' if share >= 1 else '<1%'} |")
+    if not numbered:
+        out.append("None of the folder names starts with a number yet, so every folder is seen once an epoch. "
+                   + (_even_out(rows) or "Start a folder's name with a number (3_name) to see it more often."))
+    for rel, _f in subs:
+        reps, asked = launch.folder_repeats(rel)
+        if asked is not None and asked != reps:
+            out.append(f"{rel}: " + ("0 is read as 1, so it is seen once." if asked < 1 else
+                                     f"{asked} is more than {launch.MAX_FOLDER_REPEATS}, so it is seen "
+                                     f"{launch.MAX_FOLDER_REPEATS} times."))
+    if any(100 * n * r / total < small for _l, _f, n, r in rows) and len(rows) > 1:
+        out.append(f"Marked: under {small:g}% of each epoch, so it will barely train. Check its number if that isn't "
+                   "what you meant.")
+    if total > pics:
+        epochs = _num(values, "MAX_TRAIN_EPOCHS", DEFAULTS["MAX_TRAIN_EPOCHS"])
+        same = max(1, round(epochs * pics / total))
+        line = (f"An epoch takes {total / pics:.1f}x as long, so previews and saves come {total / pics:.1f}x further "
+                f"apart." + (f" For a run of about the same length, set Max Epochs to {same} (it is {epochs})."
+                             if same != epochs else ""))
+        batch = launch.batch_size(desc, values)
+        if batch > 1:
+            line += f" At Batch size {batch} that is about {-(-total // batch):,} steps an epoch."
+        out.append(line)
+    return "\n".join(out)
 
 
 def subfolders_note(desc, values, image_folder):
-    """(the tick's line, its Show all folders / Hide the folders button or None): what it will train and which
-    folders still need captions (on), or what it is leaving out (off)."""
+    """(the tick's line, its one button or None): what it will train and which folders still need captions (on), or
+    what it is leaving out (off). The button: Train them with these repeats / Use these repeats when the folder names
+    look like repeat counts and the repeats tick is off, else Show all folders / Hide the folders (not while the
+    repeats table lists them)."""
     if not image_folder or not os.path.isdir(image_folder):
         return "", None
     # the form's values name the kind of training (a label), not FAMILY_FT: a fine-tune's regularisation folder
@@ -1070,11 +1202,25 @@ def subfolders_note(desc, values, image_folder):
     ext = _str(values.get("DATASET_CAPTION_EXT")) or ".txt"
     counts = [(rel, launch._media_count(f), _uncaptioned(f, ext)) for rel, f in subs]
     more = sum(n for _r, n, _u in counts)
-    if not values.get("TRAIN_SUBFOLDERS"):
-        return (f"{len(subs)} sub-folder{'s' if len(subs) != 1 else ''} with {more:,} more picture"
-                f"{'s' if more != 1 else ''} {'is' if more == 1 else 'are'} not trained on. Tick this to include "
-                f"them."), None
     own = launch._media_count(image_folder)
+    numbered = sorted((rel for rel, _f in subs if launch.looks_like_repeats(rel)),
+                      key=lambda rel: -launch.folder_repeats(rel)[0])       # the clearest example first (3_name)
+    looks = len(numbered) >= 2 and not values.get("TRAIN_SUBFOLDER_REPEATS")
+    if not values.get("TRAIN_SUBFOLDERS"):
+        s = "s" if len(subs) != 1 else ""
+        line = (f"{len(subs)} sub-folder{s} with {more:,} more picture{'s' if more != 1 else ''} "
+                f"{'is' if more == 1 else 'are'} not trained on." if own else
+                f"All {more:,} picture{'s' if more != 1 else ''} {'is' if more == 1 else 'are'} in {len(subs)} "
+                f"sub-folder{s}, which {'is' if len(subs) == 1 else 'are'} not trained on.")
+        if looks:
+            st_ = {"image_folder": image_folder, "LORA_OUTPUT_DIR": values.get("LORA_OUTPUT_DIR")}
+            rr = launch.repeat_rows(desc, st_, subs)
+            x = sum(n * k for _l, _f, n, k in rr) / max(1, sum(n for _l, _f, n, _k in rr))
+            return (line + f" Their names look like repeat counts ({numbered[0]}).",
+                    {"label": f"Train them, with repeats ({x:.1f}x longer epochs)" if x > 1.05 else
+                     "Train them, with repeats",
+                     "values": {"TRAIN_SUBFOLDERS": True, "TRAIN_SUBFOLDER_REPEATS": True}})
+        return line + " Tick this to include them.", None
     rows = ([("the training folder", own, _uncaptioned(image_folder, ext))] if own else []) + counts
     line = f"Training on {len(rows)} folders, {own + more:,} pictures."
     bare = [(rel, u) for rel, _n, u in rows if u]
@@ -1082,6 +1228,11 @@ def subfolders_note(desc, values, image_folder):
         line += (" Not captioned yet, so Start will refuse them: "
                  + " · ".join(f"{rel} ({u:,})" for rel, u in bare[:8])
                  + (f" · and {len(bare) - 8} more folders" if len(bare) > 8 else "") + ".")
+    if looks:
+        return (line + f" These folder names look like repeat counts ({numbered[0]}), but every folder is seen once an "
+                       f"epoch: tick Repeats from folder names below to use them."), None
+    if values.get("TRAIN_SUBFOLDER_REPEATS"):      # the repeats table lists every folder
+        return line, None
     show = bool(values.get("_SUBFOLDER_LIST"))
     if show:
         line += " All folders: " + " · ".join(f"{rel} {n:,}" for rel, n, _u in rows) + "."
@@ -1142,6 +1293,16 @@ def state(desc, values, image_folder="", captioner="", speed_file=False, checkpo
         notes["TRAIN_SUBFOLDERS"], act = subfolders_note(desc, values, image_folder)
         if act:
             actions["TRAIN_SUBFOLDERS"] = act
+    if "TRAIN_SUBFOLDERS" in hidden or not values.get("TRAIN_SUBFOLDERS") or not (
+            image_folder and launch.subfolders(image_folder, (_str(values.get("LORA_OUTPUT_DIR")),))):
+        hidden.add("TRAIN_SUBFOLDER_REPEATS")       # only under the sub-folder tick, on, with sub-folders to read
+    elif values.get("TRAIN_SUBFOLDER_REPEATS") and image_folder and os.path.isdir(image_folder):
+        notes["TRAIN_SUBFOLDER_REPEATS"] = repeats_note(desc, values, image_folder)
+    if desc.multi_caption:              # Several captions per picture: shown when the captions have several lines
+        show, notes["MULTI_CAPTION"] = ((False, "") if kind in ("edit", "slider") else
+                                        multi_caption_note(desc, values, image_folder))
+        if not show:
+            hidden.add("MULTI_CAPTION")
     if not values.get("FACE_BOOST"):
         hidden.add("FACE_BOOST_AREA")
     if desc.element_boost and launch.boost_too_small(desc, values):    # too few pixels in a small face: greyed, kept
@@ -1184,7 +1345,16 @@ def state(desc, values, image_folder="", captioner="", speed_file=False, checkpo
                                        f"with Adafactor. Pick Adafactor (recommended: what every Fizgig fine-tune is "
                                        f"tested on), or AdamW8bit, AdamW, AdEMAMix8bit or Lion8bit.")
     opt = str(values.get("OPTIMIZER_TYPE", "")) if kind != "finetune" else ""
-    if opt in ("automagic3", "automagic4"):
+    # with DOP (Leave the rest of the model alone, or Fizgig LoRA Isolation) Automagic can't train, so the run trains
+    # with AdamW (launch.dop_automagic, #364): its rate is the Learning Rate box's, or Adaptive LR's - none greyed
+    dop_swap = (opt in ("automagic3", "automagic4") and kind == "standard" and desc.subject_isolation
+                and bool(values.get("FAMILY_DOP") or values.get("FAMILY_MULTI_PERSON")))
+    if dop_swap:
+        notes["OPTIMIZER_TYPE"] = (f"With the Subjects card's {PEOPLE_MODES[2] if values.get('FAMILY_MULTI_PERSON') else PEOPLE_MODES[1]}, "
+                                   f"this run trains with AdamW instead: {opt} lowers its own rate until training "
+                                   "stops when the model is also being kept as it was. The Learning Rate box sets "
+                                   "AdamW's rate (2e-4 when it holds Automagic's tiny starting value), or Adaptive LR.")
+    elif opt in ("automagic3", "automagic4"):
         disabled |= {"ADAPTIVE_LR", "KREA2_PER_IMAGE_LR", "KREA2_WARMUP_LOOK"}
         force.update({k: False for k in ("ADAPTIVE_LR", "KREA2_PER_IMAGE_LR", "KREA2_WARMUP_LOOK") if values.get(k)})
         if values.get("ADAPTIVE_LR"):            # turned off now: as it shows with Adaptive LR off
@@ -1292,9 +1462,13 @@ def state(desc, values, image_folder="", captioner="", speed_file=False, checkpo
     if not (kind == "standard" and values.get("FAMILY_MULTI_PERSON")):
         hidden |= {"FAMILY_MP_MANUAL", "FAMILY_MP_FACECROPS_FIRST"}
         hidden |= set(KIND_ROWS)            # what a subject is only changes the group-picture recipe
-    if not (dop and values.get("FAMILY_SUBJECT_FIX")):
-        hidden |= {"FAMILY_DOP_TRIGGER", "FAMILY_DOP_CLASS"} | DOP_EXTRA_ROWS
-    if not (kind == "standard" and values.get("FAMILY_MULTI_PERSON")):   # "what they are" is the joined word's
+    iso = kind == "standard" and values.get("FAMILY_MULTI_PERSON")
+    fix = dop and values.get("FAMILY_SUBJECT_FIX")
+    if not fix:
+        hidden |= {"FAMILY_DOP_TRIGGER"} | {t for _d, t, _c in CONCEPT_ROWS}
+    # "what they are": Isolation's joined word (a correction, so with Correct ticked); with DOP alone, what the trigger
+    # word becomes in the captions that keep the model as it was - Fizgig can't read that, so it's always shown (#365)
+    if not ((iso and fix) or (dop and not iso)):
         hidden |= {"FAMILY_DOP_CLASS"} | {c for _d, _t, c in CONCEPT_ROWS}
     for i, (d, t, c) in enumerate(CONCEPT_ROWS, start=2):     # subject i's folder, line and words, up to the count
         if i > n_sub:
@@ -1404,6 +1578,13 @@ def state(desc, values, image_folder="", captioner="", speed_file=False, checkpo
             notes["_edit_extras_found"] = _extras_found(desc, values, image_folder)
         else:
             hidden |= {"FAMILY_EDIT_EXTRAS_DIR", "_edit_extras_found"}
+    if desc.preview_keyframes and launch._other_base(desc, {"FAMILY_OPTIONS": _option_values(desc, values)}):
+        # the Reference base (H3's ref2va, #376): the two pictures are its reference pictures, not first / last frames
+        labels.update({f"SAMPLE_{kf.upper()}_FRAME": f"Reference {i}" for i, kf in enumerate(desc.preview_keyframes, 1)})
+        notes[f"SAMPLE_{desc.preview_keyframes[0].upper()}_FRAME"] = (
+            "On the Reference training base these are the previews' reference pictures: say <Picture 1> (and "
+            "<Picture 2>) in the preview prompt for them, e.g. \"the woman in <Picture 1> walks along the beach\". "
+            "Each is fitted to the clip's size. Either can be left empty.")
     for key, old, new, *when in desc.value_moves:     # a changed default, moved once in a saved form
         mark = f"_moved_{key}"
         if not values.get(mark):
@@ -1678,6 +1859,8 @@ def inputs(desc, values, *, models, python, repo_dir, image_folder, cache_root, 
                  "height": s("SAMPLE_HEIGHT"), "steps": s("SAMPLE_STEPS"), "cfg": s("SAMPLE_CFG_SCALE") or
                  str(desc.preview_cfg), "negative": s("SAMPLE_NEGATIVE"), "seed": s("SAMPLE_SEED"),
                  "at_first": b("SAMPLE_AT_FIRST"), "prompts": s("SAMPLE_PROMPT").splitlines(), "reference": s("SAMPLE_REFERENCE"),
+                 "keyframes": {kf: s(f"SAMPLE_{kf.upper()}_FRAME") for kf in desc.preview_keyframes
+                               if s(f"SAMPLE_{kf.upper()}_FRAME")},
                  "strengths": list(desc.preview_strengths) if desc.preview_strengths and
                  v.get("SAMPLE_STRENGTHS", True) else [],
                  **({"checkpoint": b("SAMPLE_CHECKPOINT"), "checkpoint_cache": s("CACHE_SAMPLE_MODEL") or "auto",
@@ -1689,6 +1872,8 @@ def inputs(desc, values, *, models, python, repo_dir, image_folder, cache_root, 
                        if b("FAMILY_MULTICONCEPT") and desc.multi_concept and kind not in ("edit", "slider") else []),
         concept_balance=b("FAMILY_CONCEPT_BALANCE"),
         subfolders=b("TRAIN_SUBFOLDERS"),
+        subfolder_repeats=b("TRAIN_SUBFOLDERS") and b("TRAIN_SUBFOLDER_REPEATS"),
+        multi_caption=b("MULTI_CAPTION") and desc.multi_caption,
         FAMILY_OPTIONS=_option_values(desc, v),
     )
     if launch.lora_reg_on(desc, d):        # a regularisation dataset: the rest of the Subjects card gives way (#332)

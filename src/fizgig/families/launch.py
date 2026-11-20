@@ -46,6 +46,7 @@ import re
 from dataclasses import dataclass, field
 from fizgig.utils.upright import upright_size
 
+from fizgig.dataset.caption_file import read_caption
 from fizgig.dataset.masks import is_mask_file
 
 PRECISION_LABELS = {"auto": "Auto (fits your free VRAM)", "bf16": "bf16 (full precision)",
@@ -148,6 +149,47 @@ def slider_on(desc, inputs, source=None):
         have = inputs.get("FAMILY_SLIDER_SOURCE") or "pairs"
         on = (have if have in offered else offered[0]) == source      # a family with one source always uses it
     return on
+
+
+def _slider_value(text):
+    """A slider prompt or anchor as the command gives it: one that starts with "-" ("-a photo of a man,") gets a space
+    before it, so argparse takes it as a value, not an option (the trainer strips it)."""
+    return " " + text if text.startswith("-") else text
+
+
+_FLAG = re.compile(r"--[A-Za-z][\w-]*")
+
+
+def _dash_values(cmd):
+    """A box's value that starts with "-" (a negative "-blurry", a title "-test", a trigger word) goes as
+    --flag=value: argparse reads a lone "-word" after a flag as another option and the run stopped at launch.
+    Numbers stay as they are (argparse takes "-1"); a value after another value (a list) is its builder's
+    (_slider_value)."""
+    out = []
+    for tok in cmd:
+        if tok.startswith("-") and not _FLAG.fullmatch(tok) and out and _FLAG.fullmatch(out[-1]):
+            try:
+                float(tok)
+            except ValueError:
+                out[-1] = f"{out[-1]}={tok}"
+                continue
+        out.append(tok)
+    return out
+
+
+_SWAPS = {}
+
+
+def swaps_blocks(desc):
+    """The family's driver can stream blocks between CPU and GPU (max_blocks_to_swap above 0). SDXL, Anima and ACE-Step
+    can't: their training loads without block swap whatever number it is given, so the Training tab has no Blocks
+    Swap row for them and Start never refuses one. Kept per family (loading the driver takes a second)."""
+    if desc.key not in _SWAPS:
+        try:
+            _SWAPS[desc.key] = desc.load_driver().max_blocks_to_swap() > 0
+        except Exception:
+            _SWAPS[desc.key] = True                  # can't tell: the row stays, as before
+    return _SWAPS[desc.key]
 
 
 def ft_on(desc, inputs):
@@ -275,8 +317,7 @@ def _reg_captions(folder, ext):
         return out
     for n in names:
         try:
-            with open(os.path.join(folder, os.path.splitext(n)[0] + ext), encoding="utf-8", errors="replace") as fh:
-                out[n] = fh.read()
+            out[n] = read_caption(os.path.join(folder, os.path.splitext(n)[0] + ext))   # as training reads it
         except OSError:
             out[n] = None
     return out
@@ -338,7 +379,9 @@ def _training_items(desc, st):
     if not folder or not os.path.isdir(folder):
         return 0
     n = _media_count(folder)
-    if subfolders_on(desc, st):
+    if repeats_on(desc, st):             # Repeats from folder names: an epoch's real length
+        n = sum(c * r for _l, _f, c, r in repeat_rows(desc, st))
+    elif subfolders_on(desc, st):
         n += sum(_media_count(f) for _r, f in subfolders(folder, (_s(st.get("LORA_OUTPUT_DIR")),
                                                                    _s(st.get("cache_root")), reg_folder(desc, st))))
     if detail_crops_on(desc, st):
@@ -414,11 +457,40 @@ def uncached_pictures(toml_text):
         names = os.listdir(cdir) if os.path.isdir(cdir) else []
         # <stem>_<WxH>_<arch>.safetensors and <stem>_<arch>_te.safetensors: the stem is all but the last two parts
         te = {"_".join(f[:-len(".safetensors")].split("_")[:-2]) for f in names if f.endswith("_te.safetensors")}
-        lat = {"_".join(f.split("_")[:-2]) for f in names
-               if f.endswith(".safetensors") and not f.endswith("_te.safetensors")}
+        lat = {"_".join(f.split("_")[:-2]) for f in names      # a caption line's text cache (_tealt<k>) isn't one
+               if f.endswith(".safetensors") and not f.endswith("_te.safetensors")
+               and not re.search(r"_tealt\d+\.safetensors$", f)}
         n += sum(1 for f in os.listdir(img) if os.path.splitext(f)[1].lower() in exts and not is_mask_file(f)
                  and (os.path.splitext(f)[0] not in lat or os.path.splitext(f)[0] not in te))
     return n
+
+
+def multi_caption_on(desc, st):
+    """Several captions per picture (#300, the Training tab tick, off by default): each line of a caption file trains
+    as a caption of its own. A family that caches text the shared way (description multi_caption); not an edit or a
+    slider (their captions describe a pair)."""
+    return (bool(getattr(desc, "multi_caption", False)) and bool(st.get("multi_caption") or st.get("MULTI_CAPTION"))
+            and not edit_on(desc, st) and not slider_on(desc, st))
+
+
+def caption_line_counts(folder, ext=".txt"):
+    """{caption file name: its non-blank lines} for each picture in a folder (top level), 0 when it has no caption.
+    A caption file with no picture beside it (notes, a deleted picture's) isn't counted."""
+    from fizgig.dataset.image_dataset import AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
+    out = {}
+    if not folder or not os.path.isdir(folder):
+        return out
+    ext = ext if ext.startswith(".") else "." + ext
+    exts = {e.lower() for e in (*IMAGE_EXTENSIONS, *VIDEO_EXTENSIONS, *AUDIO_EXTENSIONS)}
+    for f in sorted(os.listdir(folder)):
+        if os.path.splitext(f)[1].lower() not in exts or is_mask_file(f):
+            continue
+        name = os.path.splitext(f)[0] + ext
+        try:
+            out[name] = sum(1 for line in read_caption(os.path.join(folder, name)).splitlines() if line.strip())
+        except OSError:
+            out[name] = 0
+    return out
 
 
 def start_checks(desc, st, image_folder):
@@ -436,8 +508,7 @@ def start_checks(desc, st, image_folder):
         for f in items:
             p = os.path.join(folder, os.path.splitext(f)[0] + cap)
             try:
-                with open(p, encoding="utf-8", errors="replace") as fh:
-                    texts[f] = fh.read()
+                texts[f] = read_caption(p)          # as training reads it: UTF-16, Windows-1252 too
             except OSError:
                 texts[f] = None
         none = [f for f, t in texts.items() if t is None or not t.strip()]
@@ -448,10 +519,38 @@ def start_checks(desc, st, image_folder):
         if trig and trig.lower() != "trigger_word" and not multi_person_on(desc, st):
             pat = re.compile(r"(?<!\w)" + re.escape(trig) + r"(?!\w)", re.I)
             lack = [f for f, t in texts.items() if t and t.strip() and not pat.search(t)]
+            if multi_caption_on(desc, st):  # several captions per picture: each line on its own, read as training does
+                miss = {}
+                for f, t in texts.items():
+                    try:
+                        k = sum(1 for line in read_caption(os.path.join(folder, os.path.splitext(f)[0] + cap))
+                                .splitlines() if line.strip() and not pat.search(line)) if t and t.strip() else 0
+                    except OSError:
+                        k = 0
+                    if k:
+                        miss[f] = k
+                if miss:
+                    n = sum(miss.values())
+                    out.append(f"{n} caption line{'s' if n != 1 else ''} in {len(miss)} picture"
+                               f"{'s' if len(miss) != 1 else ''} {'don' if n != 1 else 'doesn'}'t contain the trigger "
+                               f"word '{trig}' ({', '.join(list(miss)[:3])}{', ...' if len(miss) > 3 else ''}): "
+                               f"{'those lines train' if n != 1 else 'that line trains'} without it. To add it: on the "
+                               f"Captions tab, type {trig} in Add to the start, tick To every line, then Add to all "
+                               f"captions.")
+                lack = []
             if lack:
                 out.append(f"{len(lack)} caption{'s don' if len(lack) != 1 else ' doesn'}'t contain the trigger word "
                            f"'{trig}' ({', '.join(lack[:3])}{', ...' if len(lack) > 3 else ''}): "
                            + ("that picture trains" if len(lack) == 1 else "those pictures train") + " without it.")
+        by_name = {}
+        for f in items:
+            by_name.setdefault(os.path.splitext(f)[0], []).append(f)
+        twins = [fs for fs in by_name.values() if len(fs) > 1]
+        if twins:                        # a.jpg + a.png: one caption file, one cache name (the stem) for the two
+            shown = ", ".join(" and ".join(fs) for fs in twins[:2]) + (", ..." if len(twins) > 2 else "")
+            out.append(f"{len(twins)} name{'s are' if len(twins) != 1 else ' is'} used by two pictures ({shown}): "
+                       "the two share one caption file and one cache file name, so at the same size only one of "
+                       "them trains. Rename one of each.")
     trig = _s(st.get("CAPTION_TRIGGER_WORD"))
     for rel, d in (detail_crop_folders(desc, st) if trig and trig.lower() != "trigger_word" else []):
         # the detail crops for this size: a caption edited without the trigger (the crop stage writes it in)
@@ -462,8 +561,7 @@ def start_checks(desc, st, image_folder):
             if not f.lower().endswith(ext.lower()):
                 continue
             try:
-                with open(os.path.join(d, f), encoding="utf-8", errors="replace") as fh:
-                    text = fh.read()
+                text = read_caption(os.path.join(d, f))
             except OSError:
                 continue
             if text.strip() and not pat.search(text):
@@ -472,6 +570,8 @@ def start_checks(desc, st, image_folder):
             out.append(f"{len(lack)} detail crop caption{'s' if len(lack) != 1 else ''} in {rel} don't contain the "
                        f"trigger word '{trig}': those crops train without it.")
     out += lora_reg_warnings(desc, st)
+    if dop_automagic(desc, st):
+        out.append(dop_automagic_line(desc, st))
     if (not st.get("ADAPTIVE_LR") and (ft_on(desc, st) or not (automagic(st) or prodigy(st)))):
         # Automagic sets its own rate, Prodigy's 1.0 is a multiplier; a fine-tune trains at the box's rate
         kind = "finetune" if ft_on(desc, st) else "slider" if slider_on(desc, st) else "lora"
@@ -489,13 +589,13 @@ def start_checks(desc, st, image_folder):
 
 
 def caches(desc, inputs):
-    """Whether the cache stages run: not on a resume (the cache is already built) unless it trains at a different
-    size from now on (recache: the latents that still fit are kept), not for a prompt slider (no photos), not with
-    Enable Cache off."""
+    """Whether the cache stages run: a fresh run with Enable Cache on; a resume only when it trains at a different
+    size from now on (recache: the latents that still fit are kept), and then whatever Enable Cache says, because
+    nothing is cached at that size; never for a prompt slider (no photos)."""
     resuming = inputs.get("resuming") or bool(_s(inputs.get("RESUME_TRAINING")))
     if multi_person_on(desc, inputs) and not slider_on(desc, inputs, "prompts"):
         return True      # Fizgig LoRA Isolation builds its side-by-sides every start: always cache them (only what's new)
-    return bool(inputs.get("enable_cache", True) and (not resuming or inputs.get("recache"))
+    return bool((inputs.get("recache") or (not resuming and inputs.get("enable_cache", True)))
                 and not slider_on(desc, inputs, "prompts"))
 
 
@@ -573,8 +673,7 @@ def edit_instructions(inputs):
             b, e = os.path.splitext(f)
             cap = os.path.join(folder, b + ext)
             if e.lower() in PAIR_EXTS and os.path.exists(cap):
-                with open(cap, encoding="utf-8") as fh:
-                    line = fh.read().strip().splitlines()
+                line = read_caption(cap).strip().splitlines()      # Windows-1252 / UTF-16 too: never a crash
                 if line and line[0].strip():
                     return [line[0].strip()]
     except OSError:
@@ -771,6 +870,55 @@ def item_prefix(rel):
     Detail crops share one for every size, so a crop keeps one loss history through Start at a smaller size and maps
     to the folder of the size the run trains at."""
     return "fizgig_detail_crops/" if rel.split("/")[0] == "fizgig_detail_crops" else rel + "/"
+
+
+# Repeats from folder names (#300): a sub-folder named "10_Laffey_base" trains 10 times an epoch - the kohya /
+# OneTrainer convention. Only with the Training tab's tick (off by default): without it a "10_" name means nothing.
+_REPEAT_NAME = re.compile(r"(\d+)_(.+)")
+MAX_FOLDER_REPEATS = 100
+
+
+def folder_repeats(rel):
+    """(repeats, what the name asked for or None) from a sub-folder's own name (the last part of its path):
+    "10_Laffey_base" -> (10, 10), "Laffey" -> (1, None), "0_x" -> (1, 0), "500_x" -> (100, 500)."""
+    m = _REPEAT_NAME.fullmatch(str(rel).rstrip("/").split("/")[-1])
+    if not m:
+        return 1, None
+    asked = int(m.group(1))
+    return min(MAX_FOLDER_REPEATS, max(1, asked)), asked
+
+
+def looks_like_repeats(rel):
+    """A sub-folder's name has the N_name form (for the hint that suggests the tick)."""
+    return folder_repeats(rel)[1] is not None
+
+
+def repeats_on(desc, st):
+    """Repeats from folder names applies: the sub-folder tick is on and applies, and its repeats tick is on."""
+    return subfolders_on(desc, st) and bool(st.get("subfolder_repeats"))
+
+
+def repeat_rows(desc, st, subs=None):
+    """[(label, folder, items, repeats)] of the run's own folders with repeats from their names: the training folder
+    (once, when it holds items) and each sub-folder. Detail crops aren't sub-folders here (they train once)."""
+    folder = _s(st.get("image_folder"))
+    if subs is None:
+        subs = subfolders(folder, (_s(st.get("LORA_OUTPUT_DIR")), _s(st.get("cache_root")), reg_folder(desc, st)))
+    own = _media_count(folder) if folder and os.path.isdir(folder) else 0
+    rows = [("the training folder", folder, own, 1)] if own else []
+    return rows + [(rel, f, _media_count(f), folder_repeats(rel)[0]) for rel, f in subs]
+
+
+def repeats_line(desc, st):
+    """The run log's line for Repeats from folder names, or "" (off). Largest share first."""
+    if not repeats_on(desc, st):
+        return ""
+    rows = repeat_rows(desc, st)
+    total = sum(n * r for _l, _f, n, r in rows) or 1
+    rows.sort(key=lambda x: -x[2] * x[3])
+    parts = [f"{label} x{r} ({100 * n * r / total:.0f}%)" for label, _f, n, r in rows]
+    return (f"[repeats] {len(rows)} folders, {total:,} steps an epoch from {sum(n for _l, _f, n, _r in rows):,} "
+            f"pictures: " + ", ".join(parts[:8]) + (f" and {len(parts) - 8} more" if len(parts) > 8 else ""))
 
 
 def detail_crops_on(desc, st):
@@ -1095,6 +1243,11 @@ def train_command(desc, inputs, plan):
     if lora_reg_dir(desc, st):         # a LoRA's regularisation dataset: its LR share, and how many an epoch uses
         cmd += ["--reg_lr_multiplier", f"{_lora_reg_mult(st):g}",
                 "--reg_per_epoch", str(max(1, lora_reg_budget(desc, st)[0]))]
+    if multi_caption_on(desc, st):     # Several captions per picture (#300): recorded in the LoRA's metadata
+        cmd += ["--multi_caption"]
+    if repeats_on(desc, st):           # Repeats from folder names (#300): recorded in the LoRA's metadata
+        import json as _json
+        cmd += ["--folder_repeats", _json.dumps({lab: r for lab, _f, _n, r in repeat_rows(desc, st) if r > 1})]
     if st.get("TRAINING_MAPS") and desc.training_maps:     # training/train_maps.py: the Samples tab's Training maps
         cmd += ["--training_maps"]
     # per-image loss watch (families/loss_watch.py): at any Batch size, a batch's pictures weighed and recorded
@@ -1176,19 +1329,21 @@ def train_command(desc, inputs, plan):
             cmd += ["--train_blocks", ",".join(desc.slider_ultra_blocks)]
         if slider_on(desc, st, "prompts"):
             base = _s(st.get("FAMILY_SLIDER_BASE"))
-            cmd += ["--slider_prompts", base, f"{base} {_s(st.get('FAMILY_SLIDER_POS'))}",
-                    f"{base} {_s(st.get('FAMILY_SLIDER_NEG'))}",       # the user's own comma, if any
+            # the user's own comma, if any; one that starts with "-" goes as a value (_slider_value)
+            cmd += ["--slider_prompts", *map(_slider_value, (base, f"{base} {_s(st.get('FAMILY_SLIDER_POS'))}",
+                                                              f"{base} {_s(st.get('FAMILY_SLIDER_NEG'))}")),
                     "--slider_guidance", _s(st.get("FAMILY_SLIDER_GUIDANCE")) or f"{desc.slider_guidance:g}"]
             anchors = [a.strip() for a in str(st.get("FAMILY_SLIDER_ANCHORS") or "").splitlines() if a.strip()]
             if anchors:                  # prompts the dial must leave alone (#252)
-                cmd += ["--slider_anchors", *anchors,
+                cmd += ["--slider_anchors", *map(_slider_value, anchors),
                         "--slider_anchor_weight", _s(st.get("FAMILY_SLIDER_ANCHOR_WEIGHT")) or "1"]
             try:        # the practice pictures (and so the training) at Target Megapixels, a square on the 16 px grid
                 side = int((float(st.get("megapixels")) * 1_000_000) ** 0.5) // 16 * 16
-                if side >= 256:
-                    cmd += ["--slider_bank_res", str(side)]
             except (TypeError, ValueError):
-                pass
+                side = 0
+            side = max(side, desc.slider_min_side)           # a model's own floor (MiniMax H3: 768)
+            if side >= 256:
+                cmd += ["--slider_bank_res", str(side)]
             for flag, role in (("--text_encoder", "text_encoder"), ("--vae", "vae")):
                 if flag not in cmd:          # the practice images and the three prompts need both
                     cmd += [flag, _model(st, desc, role)]
@@ -1201,7 +1356,7 @@ def train_command(desc, inputs, plan):
     cont = (st.get("FAMILY_FT_CONTINUE") or {}) if ft_on(desc, st) else {}
     if cont.get("checkpoint"):       # after the options: a model option's own --dit (H3's reference base) is what the
         cmd[cmd.index("--dit") + 1] = cont["checkpoint"]     # paused run started from; its checkpoint goes on
-    return cmd
+    return _dash_values(cmd)
 
 
 def _preview_flags(desc, st, plan, cmd):
@@ -1309,6 +1464,12 @@ def _preview_flags(desc, st, plan, cmd):
             # the Samples tab's picture: seen through the vision path, or edited by every preview prompt
             out += ["--sample_image" if desc.reference_kind == "vision" else "--sample_reference",
                     _sample_image(desc, sm)]
+        frames = preview_keyframes(desc, st)
+        if frames and _other_base(desc, st):      # the Reference base: the two pictures are its references (#376)
+            out += ["--sample_ref_images", *[frames[k] for k in desc.preview_keyframes if k in frames]]
+        else:
+            for kf, p in frames.items():          # First / Last frame: clip previews start / end on them (#376)
+                out += [f"--sample_{kf}_frame", p]
         if edit_on(desc, st):
             ref = _s(st.get("FAMILY_EDIT_REF"))
             if not ref:
@@ -1373,6 +1534,31 @@ def _sample_image(desc, sm):
     """The Samples tab's reference image, for families whose previews take one (reference_kind), when it exists."""
     ref = _s(sm.get("reference")) if desc.reference_kind else ""
     return ref if ref and os.path.isfile(ref) else ""
+
+
+def _other_base(desc, inputs) -> bool:
+    """A model option swaps in another base for training (H3's Reference (ref2va) Training Base: --dit=pref:...)."""
+    vals = inputs.get("FAMILY_OPTIONS") or {}
+    for o in desc.options:
+        try:
+            toks = o.resolve(vals.get(o.key, o.default))
+        except Exception:
+            continue
+        if any(str(t).startswith("--dit=") for t in toks):
+            return True
+    return False
+
+
+def preview_keyframes(desc, inputs) -> dict:
+    """{"first": path, "last": path}: the Samples tab's two pictures (#376), set and on disk, not for a slider or an
+    edit run, whose previews show their own pictures. On the model's own base (the first/last-frame checkpoint) clip
+    previews start / end on them; on a base an option swaps in (H3's Reference) they are its reference pictures,
+    Reference 1 and 2."""
+    sm = inputs.get("samples") or {}
+    if not desc.preview_keyframes or edit_on(desc, inputs) or slider_on(desc, inputs):
+        return {}
+    have = sm.get("keyframes") or {}
+    return {kf: _s(have[kf]) for kf in desc.preview_keyframes if _s(have.get(kf)) and os.path.isfile(_s(have[kf]))}
 
 
 # ---------------------------------------------------------------------------------------------------- dataset
@@ -1505,6 +1691,7 @@ def dataset_toml(desc, inputs, cache_suffix=""):
     lines = ["[general]", f"resolution = [{side}, {side}]",
              f'caption_extension = "{_s(inputs.get("caption_ext", ".txt"))}"',
              f"batch_size = {batch}", "num_repeats = 1",
+             *(["multi_caption = true"] if multi_caption_on(desc, inputs) else []),
              f"enable_bucket = {'true' if inputs.get('enable_bucket', True) else 'false'}",
              f"bucket_no_upscale = {'true' if inputs.get('no_upscale', True) else 'false'}"]
     try:
@@ -1546,6 +1733,9 @@ def dataset_toml(desc, inputs, cache_suffix=""):
     for rel, f in subs:                  # Also train on its sub-folders: each its own block and cache folder
         lines += ["", "[[datasets]]", f'image_directory = "{f.replace(chr(92), "/")}"',
                   f'item_prefix = "{_toml_str(item_prefix(rel))}"']
+        reps_ = folder_repeats(rel)[0] if repeats_on(desc, inputs) and rel.split("/")[0] != "fizgig_detail_crops" else 1
+        if reps_ > 1:                    # Repeats from folder names (#300)
+            lines.append(f"num_repeats = {reps_}")
         if root:
             lines.append(f'cache_directory = "{(cache_dir_for(root, f) + cache_suffix).replace(chr(92), "/")}"')
     for n, f in enumerate(extra, start=2):   # Multi Concept: each subject its own block and cache folder
@@ -1607,6 +1797,37 @@ def automagic(inputs):
     return _s(inputs.get("OPTIMIZER_TYPE")).lower() in ("automagic3", "automagic4")
 
 
+DOP_OPTIMIZER = ("adamw", "2e-4")     # what a DOP / Isolation run trains with in Automagic's place (H3's Slider recipe)
+
+
+def dop_automagic(desc, st):
+    """Automagic (v3 or v4) picked for a run with Leave the rest of the model alone or Fizgig LoRA Isolation. DOP's
+    pass runs on every second step and pulls the LoRA back, so each weight's update flips direction step to step;
+    Automagic reads that as overshooting and lowers its rate to its floor within two epochs, and nothing more is
+    learned (#364: H3 Isolation 5e-6 after epoch 1, 1e-8 from epoch 2; the same subject alone held 4e-4). Such a run
+    trains with full-precision AdamW instead (plan), at dop_adamw_rate or Adaptive LR's."""
+    return automagic(st) and not ft_on(desc, st) and (dop_on(desc, st) or multi_person_on(desc, st))
+
+
+def dop_adamw_rate(st):
+    """AdamW's rate for such a run: the Learning Rate box when it holds an AdamW rate (1e-5 to 1e-3: H3 Image's
+    presets start Automagic at 2.5e-4 / 2.8e-4), else 2e-4 - Automagic's own tiny starting value (1e-6 on H3's
+    presets) would leave AdamW learning next to nothing. Adaptive LR, when ticked, sets the rate instead (plan)."""
+    try:
+        lr = float(_s(st.get("LEARNING_RATE")))
+    except ValueError:
+        lr = 0.0
+    return _s(st.get("LEARNING_RATE")) if 1e-5 <= lr <= 1e-3 else DOP_OPTIMIZER[1]
+
+
+def dop_automagic_line(desc, st):
+    mode = "Fizgig LoRA Isolation" if multi_person_on(desc, st) else "Leave the rest of the model alone"
+    adaptive = st.get("ADAPTIVE_LR") and desc.adaptive_lr      # a model without Adaptive LR (H3) ignores the tick
+    rate = "with Adaptive LR setting its rate" if adaptive else f"at {dop_adamw_rate(st)}"
+    return (f"{mode} trains with AdamW {rate} instead of Automagic: Automagic lowers its own rate until training "
+            "stops when the model is also being kept as it was.")
+
+
 def prodigy(inputs):
     return _s(inputs.get("OPTIMIZER_TYPE")).lower() == "prodigy"
 
@@ -1630,12 +1851,14 @@ def _dop_folders(st):
 
 
 def dop_rules(st):
-    """DOP's (words to remove, replacements) over every folder, in order."""
+    """DOP's (words to remove, replacements) over every folder, in order. A subject's "what they are" ("man") takes
+    its trigger's place as "a man" (#365); empty, the trigger is left out."""
+    from fizgig.families.multi_person import class_phrase
     trig, cls = [], []
     for _name, t, c in _dop_folders(st):
         if len(c) == len(t):
             trig += t
-            cls += c
+            cls += [class_phrase(x) for x in c]
     return trig, cls
 
 
@@ -1812,6 +2035,17 @@ def start_problems(desc, inputs):
     out = checks.learning_rate(v)
     out += checks.network(v, lokr="lokr" in desc.network_types and str(v.get("NETWORK_TYPE", "")).startswith("LoKR"))
     out += checks.numbers(v)
+    sm = v.get("samples") or {}
+    if sm.get("enabled"):                # the Samples tab's boxes: "3,5" fell back to the default CFG with nothing said,
+        for label, key, cast, least in (("Samples: CFG Scale", "cfg", float, 0),    # a seed was dropped, and steps
+                                        ("Samples: Steps", "steps", int, 1),       # stopped the trainer at launch
+                                        ("Samples: Seed", "seed", int, None)):
+            if str(sm.get(key) or "").strip():                  # empty = the model's own
+                out += checks.number(label, sm[key], cast, least)
+        for kf, p in (sm.get("keyframes") or {}).items():       # First / Last frame set but not there (#376)
+            if _s(p) and not os.path.isfile(_s(p)):
+                out.append(f"Samples: {kf.capitalize()} frame - {_s(p)} isn't there. Choose the picture again, or "
+                           "clear the box for normal previews.")
     out += checks.dataset_config(v.get("DATASET_CONFIG"), must_exist=False)
     out += problems(desc, inputs)
     out += precision_problems(desc, inputs)
@@ -1831,8 +2065,10 @@ def start_problems(desc, inputs):
     raw_swap = str(v.get("blocks_swap") or "").strip()
     m = re.match(r"\d+", raw_swap)
     swap = 0 if raw_swap.lower().startswith("auto") or not m else int(m.group())   # Auto always fits
+    if not swaps_blocks(desc):
+        swap = 0               # no block swap at all (no row on the form): a saved number loads without it, as it says
     out += checks.run(v, blocks_swap=swap, swap_max=max(0, desc.n_blocks - 2), arch_label=desc.gui_label,
-                      name_error=checks.tidy_name(v.get("LORA_NAME"))[1])
+                      name_error=checks.tidy_name(v.get("LORA_NAME"))[1], numbers_checked=True)
     # a Preferences file an option asks for (H3's ref2va base, an Ostris adapter): set and on disk
     miss = []
     option_tokens(desc, inputs, missing=miss)
@@ -1937,6 +2173,11 @@ def plan(desc, inputs):
     if folder and not os.path.isabs(folder):
         inputs["image_folder"] = os.path.abspath(folder)     # the subprocesses run from the Fizgig folder
     inputs["LORA_NAME"] = tidy_name(_s(inputs.get("LORA_NAME")))[0]
+    dop_swap = dop_automagic(desc, inputs)
+    if dop_swap:                     # Automagic can't train with DOP (#364): the run's optimizer is AdamW, at the box's
+        inputs["LEARNING_RATE"] = dop_adamw_rate(inputs)       # rate (or Adaptive LR's - left as ticked)
+        inputs["OPTIMIZER_TYPE"] = DOP_OPTIMIZER[0]
+        inputs["OPTIMIZER_ARGS"] = ""    # an Automagic setting isn't AdamW's
     if automagic(inputs):            # it owns the rate: Adaptive LR, per-image LR and the look warm-up are off
         inputs["ADAPTIVE_LR"] = False
         inputs["loss_watch"] = {**(inputs.get("loss_watch") or {}), "per_image_lr": False, "warmup": False}
@@ -1945,6 +2186,8 @@ def plan(desc, inputs):
         inputs["loss_watch"] = {**(inputs.get("loss_watch") or {}), "warmup": False}
         inputs["LEARNING_RATE"] = "1.0"            # a multiplier on the rate it finds
     p = LaunchPlan(problems=start_problems(desc, inputs))
+    if dop_swap:
+        p.console.append(f"[optimizer] {dop_automagic_line(desc, inputs)}\n")
     _cp = detail_crops_problem(desc, inputs) if not p.problems else ""
     if _cp:
         p.problems.append(_cp)
@@ -1970,6 +2213,12 @@ def plan(desc, inputs):
     own = own_skipped_line(desc, inputs)
     if own:
         p.console.append(own)
+    reps_line = repeats_line(desc, inputs)
+    if reps_line:
+        p.console.append(reps_line)
+    if multi_caption_on(desc, inputs):
+        p.console.append("[captions] several per picture: each line of a caption file is a caption of its own, and "
+                         "each step uses one of a picture's lines at random")
     train = train_command(desc, inputs, p)
     people = [(f, s, w) for f, s, _why, w in multi_person_subjects(desc, inputs) if s and s["kind"] == "person"] \
         if multi_person_on(desc, inputs) else []
@@ -2000,7 +2249,7 @@ def plan(desc, inputs):
         trig = _s(inputs.get("caption_trigger"))
         if trig and trig.lower() != "trigger_word":
             cmd += ["--trigger", trig]
-        p.stages.append(Stage("Detail crops", cmd))
+        p.stages.append(Stage("Detail crops", _dash_values(cmd)))
     if caches(desc, inputs):
         p.stages += [Stage("Cache Preparation", cache_command(desc, inputs, "latents")),
                      Stage("Text Encoder Caching", cache_command(desc, inputs, "text"))]

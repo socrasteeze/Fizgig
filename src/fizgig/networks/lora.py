@@ -283,6 +283,29 @@ class LoRAInfModule(LoRAModule):
         # elementwise kernels over [tokens, out] per module became one. On the H3 Repair
         # Studio that is ~1,000 module forwards per Dial render (measured 4 Sep: ~0.4 s of
         # a 3.8 s move). Same maths; multiplier x scale is formed once in fp32.
+        m = self.multiplier
+        down = self.lora_down if self.split_dims is None else self.lora_down[0]
+        wd = getattr(getattr(down, "weight", None), "dtype", None)
+        if wd is not None and x.is_floating_point() and x.dtype != wd:
+            # A layer whose input isn't the LoRA's dtype: H3's AdaLN projections kept fp32 by the loader get an fp32
+            # input while the LoRA is bf16 ("expected mat1 and mat2 to have the same dtype"). The LoRA runs in its
+            # own dtype and its result joins the base's output in the base's.
+            y = self.org_forward(x)
+            return y + self.compute_delta(x.to(wd)).to(y.dtype)
+        if self.split_dims is None and not isinstance(m, torch.Tensor) and not torch.is_grad_enabled():
+            # A render (no gradient) through a Linear: the up-projection lands straight in the base's output
+            # (addmm_, one GEMM that accumulates) instead of making a [tokens, out] tensor and adding it in a
+            # second pass. Measured 12 Nov 2026 on the H3 workbench, a 5-second 512x512 clip with two LoRAs
+            # on 250 Linears: 2.0 -> 1.7 s a step. Same maths, without the intermediate's bf16 rounding.
+            up = self.lora_up
+            if type(up) is torch.nn.Linear and up.bias is None:
+                y = self.org_forward(x)
+                lx = self.lora_down(x)
+                if y.dtype == lx.dtype == up.weight.dtype and y.is_contiguous() and y.shape[:-1] == lx.shape[:-1]:
+                    y.view(-1, y.shape[-1]).addmm_(lx.reshape(-1, lx.shape[-1]), up.weight.t(),
+                                                   alpha=float(m) * float(self.scale))
+                    return y
+                return torch.add(y, up(lx), alpha=float(m) * float(self.scale))
         if self.split_dims is None:
             lx = self.lora_down(x)
             lx = self.lora_up(lx)
@@ -290,7 +313,6 @@ class LoRAInfModule(LoRAModule):
             lxs = [lora_down(x) for lora_down in self.lora_down]
             lxs = [lora_up(lx) for lora_up, lx in zip(self.lora_up, lxs)]
             lx = torch.cat(lxs, dim=-1)
-        m = self.multiplier
         if isinstance(m, torch.Tensor):                    # a tensor multiplier keeps the old path
             return self.org_forward(x) + lx * m * self.scale
         return torch.add(self.org_forward(x), lx, alpha=float(m) * float(self.scale))
@@ -543,9 +565,9 @@ class LoKRInfModule(torch.nn.Module):
         org = self.org_forward(x)
         if not self.enabled or self.multiplier == 0.0:
             return org
-        update = _lokr_forward_update(x, self._w1(), self._w2(),
-                                      self.a, self.b, self.c, self.d)
-        return org + self.multiplier * self.scale * update
+        w1, w2 = self._w1(), self._w2()
+        update = _lokr_forward_update(x.to(w1.dtype), w1, w2, self.a, self.b, self.c, self.d)
+        return org + (self.multiplier * self.scale * update).to(org.dtype)   # an fp32 layer under a bf16 LoKR
 
     def compute_delta(self, x: torch.Tensor) -> torch.Tensor:
         """LoKR contribution for input x (base NOT included)."""
@@ -621,8 +643,9 @@ class LoHaInfModule(torch.nn.Module):
         W1 = self.hada_w1_a @ self.hada_w1_b    # (out_dim, in_dim)
         W2 = self.hada_w2_a @ self.hada_w2_b    # (out_dim, in_dim)
         W = W1 * W2                              # Hadamard product — same shape
-        # x @ W.T: for x of shape (..., in_dim), produces (..., out_dim).
-        return org + self.multiplier * self.scale * (x @ W.transpose(-1, -2))
+        # x @ W.T: for x of shape (..., in_dim), produces (..., out_dim). An fp32 layer under a bf16 LoHa: the
+        # update runs in the LoHa's dtype and joins the base's output in the base's.
+        return org + (self.multiplier * self.scale * (x.to(W.dtype) @ W.transpose(-1, -2))).to(org.dtype)
 
     def compute_delta(self, x: torch.Tensor) -> torch.Tensor:
         """LoHa contribution for input x (base NOT included)."""

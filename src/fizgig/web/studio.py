@@ -23,7 +23,10 @@ _lock = threading.Lock()
 _S = {"proc": None, "sock": None, "port": 0, "state": "idle", "family": "", "primary": "", "donor": "", "primary_blocks": [],
       "donor_blocks": [], "hash": "", "status": "", "progress": None, "gen": 0, "shown": 0, "baseline": "",
       "tweaked": "", "pending": None, "rendering": False, "error": "", "saved": None, "profile": None,
-      "used": 0.0, "log": []}
+      "used": 0.0, "log": [], "gens": {}, "out_saved": {}, "out_said": None, "load_key": None, "load_id": 0,
+      "page_key": None, "page_waiting": 0.0}
+PAGE_WAIT_S = 20           # how long the Studio queue holds back for the page to load its LoRA again
+on_job_end = None          # studio_queue.job_ended: a queued job's render finished (its files), failed or was cancelled
 
 
 _send_lock = threading.Lock()
@@ -68,9 +71,11 @@ def _reader(proc):
             current = _S["proc"] is proc
         if current:                              # a worker being stopped (a model switch) has its say no more
             _event(ev)
+    stopped = f"The Studio worker stopped (exit code {proc.wait()})."
     with _lock:
         if _S["proc"] is proc:
-            _S.update(proc=None, state="idle", rendering=False, status="The Studio worker stopped.", progress=None)
+            _S.update(proc=None, state="idle", rendering=False, status=stopped, error=stopped, progress=None)
+            _S["log"] = (_S["log"] + [stopped])[-200:]
             if _R["state"] == "rendering":
                 _R.update(state="failed", error="The GPU worker stopped.", status="The GPU worker stopped.")
             for t in _T.values():
@@ -141,15 +146,21 @@ def _event(ev):
                       error=ev.get("error") or ("" if ok else "No renders produced."),
                       status=("Stopped." if ev.get("cancelled") else
                               f"Rendered {len(ok)} of {_R['total']}." if ok else "No renders produced."))
-        elif kind in ("loaded", "donor"):
+        elif kind in ("loaded", "donor", "primary"):
             _S.update({k: ev.get(k) for k in ("primary_blocks", "donor_blocks", "hash", "eq")})
+            if kind == "primary":                # swapped in place: what's loaded is no longer any load's settings,
+                _S.update(primary=ev.get("primary", ""), load_key=None, page_key=None, page_waiting=0.0,  # so a queue
+                          status="Primary unloaded: the base model on its own." if not ev.get("primary")  # job loads
+                          else "Primary loaded.")                                                          # again
+                _S["profile"] = _profile(ev.get("hash", ""))
             if kind == "loaded":
                 _S.update(nolora="", nolora_media="", nolora_gen=0, nolora_busy=False)
                 _S.pop("map", None)              # a map cut off with the old worker never answers: idle_unload must not wait for it
                 _S.update(state="ready", family=ev.get("family", ""), primary=ev.get("primary", ""),
                           donor=ev.get("donor", ""), status="Loaded.", error="", used=time.time())
                 _S["profile"] = _profile(ev.get("hash", ""))
-            else:
+                _S["up_room"] = ev.get("up_room")      # H3 Upscale: the memory its section hint is worked out from
+            elif kind == "donor":
                 _S.update(donor=ev.get("donor", ""), status="Donor loaded, fully on in its blocks: turn a block down or off to use less of it."
                           if ev.get("donor") else "Donor unloaded.")
         elif kind == "early" and _S.get("rendering"):     # H3's Show early: the tweaked pane's unfinished look
@@ -177,11 +188,13 @@ def _event(ev):
                 _S["status"] = "The No-LoRA render failed: " + ev["msg"]
         elif kind == "aborted":
             _S.update(rendering=False, progress=None)
+            if _S.pop("cancel_asked", False):    # the Cancel button: said so, and the early look goes
+                _S.update(status="Cancelled.", early="")
             nxt, _S["pending"] = _S["pending"], None
         elif kind == "error":
             where = ev.get("where")
             _S.update(error=ev.get("msg", ""), progress=None,
-                      status=("Preview error: " if where == "render" else "Couldn't load: " if where == "load" else "")
+                      status=("Render error: " if where == "render" else "Couldn't load: " if where == "load" else "")
                       + ev.get("msg", ""))
             if where == "render":
                 _S["rendering"] = False
@@ -194,12 +207,147 @@ def _event(ev):
         elif kind == "reset":
             _S.update(state="idle", primary="", donor="", primary_blocks=[], donor_blocks=[], hash="", profile=None,
                       rendering=False, pending=None, progress=None, status="Models unloaded.")
+    job = _gen_job(ev.get("gen")) if kind in ("rendered", "error", "aborted") else ""
+    # a render you asked for while a queue job rendered goes next - before the queue hears the job ended, so the next
+    # job can't take the worker first - and only on your own LoRA: with the job's loaded, the page loads yours again
+    if nxt is not None and job:
+        with _lock:
+            mine = _S["load_key"] is not None and _S["load_key"] == _S["page_key"]
+            if not mine:
+                _S["page_waiting"] = time.time()   # the queue waits for that reload (server: _studio_queue_busy)
+        if not mine:
+            nxt = None
     if nxt is not None:
         render(*nxt)
+    if kind == "rendered":
+        try:
+            paths = autosave(ev.get("gen", 0))
+            if job and on_job_end:
+                on_job_end(job, True, paths)
+        except Exception as e:                   # a full disk or a folder gone: said, the render still shows
+            with _lock:
+                _S["out_said"] = {"error": f"Couldn't save the render: {e}"}
+            if job and on_job_end:
+                on_job_end(job, False, error=f"Rendered, but couldn't save it: {e}")
+    elif job and on_job_end and (kind == "aborted" or ev.get("where") == "render"):
+        on_job_end(job, False, error="Cancelled." if kind == "aborted" else ev.get("msg") or "The render failed.")
+
+
+# ---- Studio outputs: Save and Save every render write into one folder (Preferences), by what was made ----
+OUT_KINDS = {"image": "images", "video": "videos", "song": "songs"}
+
+
+def outputs_dir():
+    """Preferences' Studio outputs folder (Studio_Outputs inside Fizgig unless changed)."""
+    from fizgig.web.server import BASE_DIR, load_prefs, pref_path
+    return pref_path(load_prefs(), "studio_outputs_dir") or os.path.join(BASE_DIR, "Studio_Outputs")
+
+
+def output_file(path):
+    """A file saved into the Studio outputs folder (a queue job's link), or "" for anything outside it."""
+    root = os.path.normcase(os.path.realpath(outputs_dir()))
+    p = os.path.realpath(str(path or ""))
+    if not os.path.isfile(p) or not os.path.normcase(p).startswith(root + os.sep):
+        return ""
+    return p
+
+
+def autosave_on(family):
+    from fizgig.web.server import load_prefs
+    return str(load_prefs().get(f"studio_autosave_{family}") or "") == "1"
+
+
+def _clean(part):
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", str(part or "")).strip("-.") or "render"
+
+
+def output_path(root, kind, model, lora, word, seed, ext, when=None):
+    """<root>/<images|videos|songs>/<model>_<lora>_<original|tweaked>_seed<seed>_<YYYYMMDD-HHMMSS>.<ext>; -2, -3...
+    after it when that name is taken (two saves in one second). The folder is made when missing."""
+    folder = os.path.join(root, OUT_KINDS[kind])
+    os.makedirs(folder, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(when if when is not None else time.time()))
+    stem = "_".join([_clean(model), _clean(lora), word] + ([f"seed{seed}"] if seed not in (None, "") else []) + [stamp])
+    out, n = os.path.join(folder, stem + ext), 1
+    while os.path.exists(out):
+        n += 1
+        out = os.path.join(folder, f"{stem}-{n}{ext}")
+    return out
+
+
+def save_output(which, setup=None):
+    """Save (Studio's Save original / Save tweaked, the song's Save): the render in that pane into the Studio outputs
+    folder - a clip as its mp4, a song as its WAV, a still as its PNG (a tweaked still with Studio's setup inside).
+    A render already saved (by Save every render too) isn't saved again: {"already": True, "path"}."""
+    import hashlib
+    import shutil
+    if which not in ("baseline", "tweaked"):
+        raise ValueError("Not a render.")
+    with _lock:
+        png, media, gen = _S.get(which) or "", _S.get(which + "_media") or "", _S.get("shown", 0)
+        fam = _S.get("family", "")
+        lora = os.path.splitext(os.path.basename(_S.get("primary") or ""))[0] or "base"     # no LoRA: the base
+        info = _S["gens"].get(gen) or {}
+    if not png or not os.path.isfile(png):
+        raise ValueError("Nothing rendered in that pane yet.")
+    with open(png, "rb") as f:                   # the pane's picture says which render it is (an unchanged Baseline
+        key = hashlib.sha1(f.read()).hexdigest()  # rendered again writes the same bytes)
+    with _lock:
+        done = _S["out_saved"].get(key)
+    if done and os.path.isfile(done):
+        return {"ok": True, "already": True, "path": done}
+    src = media if media and os.path.isfile(media) else png
+    ext = os.path.splitext(src)[1].lower()
+    kind = "video" if ext == ".mp4" else "song" if ext == ".wav" else "image"
+    try:
+        from fizgig.families.registry import get as get_family
+        model = getattr(get_family(fam), "label", "") or fam
+    except Exception:
+        model = fam
+    out = output_path(outputs_dir(), kind, model, lora, "original" if which == "baseline" else "tweaked",
+                      info.get("seed"), ext)
+    setup = setup if setup is not None else info.get("setup")
+    data = png_with_setup(src, setup) if which == "tweaked" and kind == "image" and setup else None
+    if data is not None:
+        with open(out, "wb") as f:
+            f.write(data)
+    else:
+        shutil.copyfile(src, out)
+    with _lock:
+        _S["out_saved"][key] = out
+    return {"ok": True, "path": out}
+
+
+def autosave(gen):
+    """Save every render (Studio's tick, per model): a finished render's Tweaked pane, and its Baseline when that
+    rendered again - an unchanged Baseline (only the Tweaked one changed) is already saved, so it isn't saved twice.
+    Nothing moved: the two panes are one render, saved once (as the original). A Studio queue job is always saved.
+    Returns the render's saved files (those saved before included)."""
+    with _lock:
+        fam, same, has_base = _S.get("family", ""), bool(_S.get("same")), bool(_S.get("baseline"))
+        job = (_S["gens"].get(gen) or {}).get("job")
+        if _S.get("shown") != gen:
+            return []
+    if not fam or not (job or autosave_on(fam)):    # a Studio queue job is always saved
+        return []
+    got, paths = [], []
+    with _lock:
+        has_tweak = bool(_S.get("tweaked"))
+    for which in (["baseline"] if has_base else []) + ([] if (same and has_base) or not has_tweak else ["tweaked"]):
+        r = save_output(which)
+        paths.append(r["path"])
+        if not r.get("already"):
+            got.append(r["path"])
+    if got:
+        with _lock:
+            _S["out_said"] = {"auto": True, "paths": got, "gen": gen}
+    return paths
 
 
 def _profile(h):
     """The Profiler's sidecar for this LoRA (same file hash), for the pills panel; None without one."""
+    if not h:                                    # no LoRA loaded (the base model on its own): no profile
+        return None
     try:
         from fizgig.utils.lora_files import find_profile_for_hash
         from fizgig.web.server import load_prefs, pref_path
@@ -305,7 +453,7 @@ def plan(desc, prefs, pref_path, fast=True, samples=None, negative=None):
     ro = studio_tokens(desc, prefs)          # Studio's own picks of the Samples-tab choices it offers (the sampler)
     if ro:
         kw["render_options"] = ro
-    status = f"Loading {desc.display_name} ({ck.name + ', ' if ck else ''}{steps}-step previews)…"
+    status = f"Loading {desc.display_name} ({ck.name + ', ' if ck else ''}{steps}-step renders)…"
     return kw, settings, status, problems
 
 
@@ -365,14 +513,15 @@ def studio_tokens(desc, prefs):
 
 
 def load(desc, primary, donor, kw, settings, status, turbo, canvas=None):
-    if not primary or not os.path.isfile(primary):
-        raise ValueError("Choose a primary LoRA first (that file isn't there).")
+    if primary and not os.path.isfile(primary):        # empty: the base model on its own (Studio as a generator)
+        raise ValueError("That primary LoRA isn't there.")
     if donor and not os.path.isfile(donor):
         raise ValueError("That donor LoRA isn't there.")
     with _lock:
         other = _S["family"] and _S["family"] != desc.key
         _S.update(state="loading", status="Starting the Studio worker…", error="", progress=None, pending=None,
-                  family=desc.key, used=time.time())
+                  family=desc.key, used=time.time(), out_saved={}, out_said=None, load_key=None)
+        _S["load_id"] += 1                       # the page knows a load it didn't ask for (the Studio queue's)
         if not _idle_watch:
             _idle_watch.append(threading.Thread(target=_idle_loop, daemon=True))
             _idle_watch[0].start()
@@ -392,6 +541,13 @@ def load(desc, primary, donor, kw, settings, status, turbo, canvas=None):
     threading.Thread(target=go, daemon=True).start()
 
 
+def primary(path):
+    """Unload primary (path ""), or another primary in its place, without reloading the model."""
+    if path and not os.path.isfile(path):
+        raise ValueError("That primary LoRA isn't there.")
+    _send({"cmd": "primary", "path": path or ""})
+
+
 def donor(path):
     if path and not os.path.isfile(path):
         raise ValueError("That donor LoRA isn't there.")
@@ -409,28 +565,113 @@ def settings(turbo=None, preview_settings=None, render_options=None):
     _send(c)
 
 
+def render_job(state, extra, job):
+    """The Studio queue's render of a job: starts only when the model is ready and nothing renders (False otherwise)."""
+    with _lock:
+        if _S["state"] != "ready" or _S["rendering"] or _S["proc"] is None:
+            return False
+        _S["used"] = time.time()
+        _S["gen"] += 1
+        gen = _S["gen"]
+        _S.update(rendering=True, progress=None, status="Studio queue: rendering a job…", cancel_asked=False)
+        _S["gens"] = {g: v for g, v in _S["gens"].items() if g > gen - 8}
+        _S["gens"][gen] = {"seed": (state or {}).get("seed"), "setup": (extra or {}).get("_setup"), "job": job}
+    _send({"cmd": "render", "gen": gen, "state": state, "out_dir": OUT_DIR,
+           **{k: v for k, v in (extra or {}).items() if k != "_setup"}})
+    return True
+
+
+def generating():
+    """Something has Studio's worker busy: a model loading, a render (Studio's, a queued job's, Royale's, a
+    Travel, RefMod's) or one waiting to start."""
+    with _lock:
+        return (_S["state"] == "loading" or _S["rendering"]
+                or _R["state"] == "rendering" or _M["state"] == "rendering"
+                or any(t["state"] == "rendering" for t in _T.values()))
+
+
+def current_job():
+    """The Studio queue's job rendering now ("" for none)."""
+    with _lock:
+        return ((_S["gens"].get(_S["gen"]) or {}).get("job") or "") if _S["rendering"] else ""
+
+
+def load_key():
+    with _lock:
+        return _S.get("load_key")
+
+
+def set_load_key(key, page=False):
+    """What is loaded (the load's settings as JSON): a queue job with the same load renders on it without loading
+    again. page: the Studio page's own load - its renders run only on that."""
+    with _lock:
+        _S["load_key"] = key
+        if page:
+            _S.update(page_key=key, page_waiting=0.0)
+
+
+def page_waiting():
+    """A render you asked for waits for Studio to load your LoRA again (a queue job had another loaded). It lapses
+    after PAGE_WAIT_S: a page that left the tab (or closed) doesn't hold the queue up."""
+    with _lock:
+        t = _S.get("page_waiting") or 0.0
+    return bool(t) and time.time() - t < PAGE_WAIT_S
+
+
+def _gen_job(gen):
+    with _lock:
+        return (_S["gens"].get(gen) or {}).get("job") or ""
+
+
 def render(state, extra=None):
     """Render this slider state: now if nothing renders, else it waits (replacing any older wait) and the render
-    going is cancelled - the newest state is what renders next."""
+    going is cancelled - the newest state is what renders next. Never on a model the page didn't load (a Studio
+    queue job's): {"reload": True} - the page loads its own first."""
     with _lock:
         if _S["state"] != "ready":
             return {"error": "Load a LoRA first."}
+        if _S["load_key"] != _S["page_key"] and not ((_S["gens"].get(_S["gen"]) or {}).get("job")
+                                                       and _S["rendering"]):
+            _S["page_waiting"] = time.time()
+            return {"ok": True, "reload": True}
         _S["used"] = time.time()
+        job_on = False
         if _S["rendering"]:
             _S["pending"] = (state, extra)
             busy, cut = True, False
+            job_on = bool((_S["gens"].get(_S["gen"]) or {}).get("job"))
         else:
             _S["gen"] += 1
             gen = _S["gen"]
-            _S.update(rendering=True, progress=None, status="Generating preview…")
+            _S.update(rendering=True, progress=None, status="Rendering…", cancel_asked=False)
+            # what Save and Save every render name the files by: this render's seed (and a picture's setup)
+            _S["gens"] = {g: v for g, v in _S["gens"].items() if g > gen - 8}
+            _S["gens"][gen] = {"seed": (state or {}).get("seed"), "setup": (extra or {}).get("_setup")}
             busy = False
             cut = _S.get("nolora_busy")
+    if busy and job_on:                          # the Studio queue's job finishes first; this edit renders after it
+        return {"ok": True, "queued": True, "after_job": True}
     if busy or cut:                              # the newest edit takes the engine (from a No-LoRA render too)
         _send({"cmd": "cancel"})
     if busy:
         return {"ok": True, "queued": True}
-    _send({"cmd": "render", "gen": gen, "state": state, "out_dir": OUT_DIR, **(extra or {})})
+    _send({"cmd": "render", "gen": gen, "state": state, "out_dir": OUT_DIR,
+           **{k: v for k, v in (extra or {}).items() if k != "_setup"}})
     return {"ok": True, "gen": gen}
+
+
+def cancel():
+    """The Cancel button: the render going stops within a block, and nothing waiting takes its place. True when
+    there was one to stop."""
+    with _lock:
+        busy = bool(_S.get("rendering") or _S.get("nolora_busy"))
+        if busy:
+            _S["pending"] = None
+            _S["cancel_asked"] = bool(_S.get("rendering"))
+            _S["status"] = "Cancelling…"
+    if busy:
+        _send({"cmd": "cancel"})
+    return busy
 
 
 def lora_trigger(path):
@@ -452,7 +693,7 @@ def map_request(state, trigger="", blocks=False):
             return {"error": "Load a LoRA first."}
         pic, shown = _S.get("tweaked") or "", _S.get("shown", 0)
         if not (pic and os.path.isfile(pic)):
-            return {"error": "Render a preview first."}
+            return {"error": "Render something first."}
         trig = str(trigger or "").strip() or lora_trigger(_S.get("primary") or "")
         # each request its own number, echoed by the worker: a result is only ever the answer to its own request
         # (a map asked for while another was being made used to take the earlier one's result)
@@ -506,7 +747,7 @@ def keep_tweaked():
     with _lock:
         src = _S.get("tweaked_media") or ""
     if not src or not os.path.isfile(src) or not src.lower().endswith(".wav"):
-        raise ValueError("Nothing to use yet: the Tweaked song renders after the first preview.")
+        raise ValueError("Nothing to use yet: the Tweaked song renders after the first render.")
     folder = os.path.join(OUT_DIR, "sources")
     os.makedirs(folder, exist_ok=True)
     out = os.path.join(folder, f"take_{int(time.time() * 1000)}.wav")
@@ -519,6 +760,8 @@ def save(out, state, include_donor):
         if _S["state"] != "ready":               # Royale or RefMod took the worker: its LoRA is on the engine now
             raise ValueError("Studio's LoRA isn't loaded (LoRA Royale or RefMod used the GPU worker since). Load it "
                              "again, then Save.")
+        if not _S.get("primary"):
+            raise ValueError("No LoRA is loaded: Save repaired LoRA saves a LoRA you've tweaked. Load one in Setup.")
         _S["saved"] = None
         primary = _S["primary"]                  # the worker refuses when the engine holds another LoRA by now
     _send({"cmd": "save", "out": out, "state": state, "include_donor": bool(include_donor), "primary": primary})
@@ -793,15 +1036,26 @@ def status():
         d = {k: _S[k] for k in ("state", "family", "primary", "donor", "primary_blocks", "donor_blocks", "status",
                                 "progress", "shown", "rendering", "error", "saved", "profile")}
         d["notes"] = _S.get("notes")
+        d["up_room"] = _S.get("up_room")
         d["same"] = bool(_S.get("same"))           # the Tweaked render on screen is the Baseline
         d["eq"] = _S.get("eq") or {}
         d["media"] = {k: bool(_S.get(k + "_media")) for k in ("baseline", "tweaked", "nolora")}
+        # a pane hidden when it rendered (the page's arrows): nothing of it to show
+        d["baseline_skipped"] = bool(_S.get("shown")) and bool(_S.get("tweaked")) and not _S.get("baseline")
+        d["tweaked_skipped"] = bool(_S.get("shown")) and bool(_S.get("baseline")) and not _S.get("tweaked")
         d["act"] = {k: bool(_S.get(k + "_act")) for k in ("baseline", "tweaked")}
         d["nolora_gen"], d["nolora_busy"] = _S.get("nolora_gen", 0), bool(_S.get("nolora_busy"))
         d["pending"] = _S["pending"] is not None
         d["early"] = _S.get("early_gen", 0) if _S.get("early") and _S.get("rendering") else 0
         d["baseline_early"] = _S.get("baseline_gen", 0) if _S.get("rendering") else 0
         d["log"] = _S["log"][-12:]                 # the worker's own lines (the engine's log), for when it goes wrong
+        d["out_said"] = _S.get("out_said")         # Save every render's latest files (or why it couldn't)
+        d["load_id"] = _S.get("load_id", 0)        # a load the page didn't ask for (the Studio queue's) changes it
+        # LoRA Royale, a Travel or RefMod rendering on the worker: Studio's Render waits for it too
+        d["worker_busy"] = (_R["state"] == "rendering" or _M["state"] == "rendering"
+                            or any(t["state"] == "rendering" for t in _T.values()))
+        t = _S.get("page_waiting") or 0.0          # your render waits for your LoRA to load again
+        d["page_waiting"] = bool(t) and time.time() - t < PAGE_WAIT_S
     return d
 
 
@@ -810,6 +1064,39 @@ def image(which, gen):
         p = _S.get(which) if which in ("baseline", "tweaked", "nolora", "baseline_media", "tweaked_media",
                                        "nolora_media", "baseline_act", "tweaked_act", "early") else ""
     return p if p and os.path.isfile(p) else ""
+
+
+_pp_lock = threading.Lock()
+
+
+def pingpong(path):
+    """A clip's ping-pong file: the clip forward then backward (the turn-around frame once), made once beside it
+    as <name>_pp.mp4 and looped by the page. Its sound plays on the way out only. The clip itself comes back when
+    ffmpeg is missing or fails."""
+    if not path.lower().endswith(".mp4"):
+        return path
+    out = path[:-4] + "_pp.mp4"
+    with _pp_lock:
+        try:
+            if os.path.isfile(out) and os.path.getmtime(out) >= os.path.getmtime(path):
+                return out
+            from fizgig.minimax.common import _find_ffmpeg
+            ff = _find_ffmpeg()
+            if not ff:
+                return path
+            tmp = path[:-4] + "_pp.tmp.mp4"
+            cmd = [ff, "-y", "-hide_banner", "-loglevel", "error", "-i", path, "-filter_complex",
+                   "[0:v]split[a][b];[b]reverse,trim=start_frame=1,setpts=PTS-STARTPTS[r];[a][r]concat=n=2:v=1:a=0[v]",
+                   "-map", "[v]", "-map", "0:a?", "-c:v", "libx264", "-crf", "18", "-preset", "veryfast",
+                   "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", tmp]
+            r = subprocess.run(cmd, capture_output=True, timeout=120,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if r.returncode != 0 or not os.path.isfile(tmp):
+                return path
+            os.replace(tmp, out)
+            return out
+        except Exception:
+            return path
 
 
 SETUP_KEY = "fizgig_studio_setup"     # the PNG text chunk Download tweaked writes the setup into
@@ -956,6 +1243,10 @@ def layout(desc, prefs, pref_path, samples=None):
     vc = desc.video_controls
     return {"key": desc.key, "name": desc.display_name, "groups": groups, "kind": kind,
             "video": {"lengths": [n for n, _ in vc.lengths], "length_frames": dict(vc.lengths),
+                      # the model's frame grid, for a length typed in seconds (the Clip row's Other…)
+                      "clip": {"fps": desc.clip_spec.fps, "step": desc.clip_spec.frame_step,
+                               "offset": desc.clip_spec.frame_offset, "max": desc.clip_spec.max_frames}
+                      if desc.clip_spec else None,
                       "length": vc.default_length or vc.lengths[0][0], "dims": [str(d) for d in vc.sizes],
                       "size": [str(d) for d in vc.default_size],
                       "scales": [n for n, _ in vc.scales], "scale_of": dict(vc.scales),
@@ -974,6 +1265,7 @@ def layout(desc, prefs, pref_path, samples=None):
                       # the clip row's line on what Steps and the speed LoRA give: for the shared video engine's sampling
                       "clip_note": _shared_clip_engine(desc),
                       "bases": [n for n, _ in vc.bases], "speed_boost": bool(vc.speed_boost),
+                      "pieces": int(vc.pieces), "upscale": bool(vc.upscale),
                       "sound": bool(audio_vae and os.path.exists(audio_vae))} if kind == "video" and vc else None,
             "song_lengths": SONG_LENGTHS if kind == "audio" else None,
             "prompt_blend": bool(getattr(desc.load_driver(), "supports_prompt_blend", False)),
@@ -987,7 +1279,9 @@ def layout(desc, prefs, pref_path, samples=None):
             "presets": presets, "lucky_zones": [list(z) for z in (desc.lucky_zones or ())],
             "detail_blocks": list(desc.detail_blocks or ()),
             "reference_kind": desc.reference_kind or "", "reference_strength": bool(desc.reference_strength),
-            "size": str(desc.repair_size or 768), "sizes": SONG_LENGTHS if kind == "audio" else STILLS_SIZES,
+            "size": str(desc.repair_size or 768),
+            "sizes": SONG_LENGTHS if kind == "audio" else
+            [str(s) for s in sorted({int(x) for x in STILLS_SIZES} | {int(x) for x in desc.studio_more_sizes})],
             "default_strength": float(desc.repair_default_strength or 1.0),
             "negative_default": desc.preview_negative, "turbo_preview": bool(desc.activation_cache),
             "follows_samples": bool(desc.workbench_follows_samples),

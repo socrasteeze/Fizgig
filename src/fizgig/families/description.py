@@ -211,6 +211,12 @@ class VideoWorkbench:
     # Studio's Speed Boost tick (on by default): the first half of a clip's steps at half size, then full size. The
     # family's sampler honours speed_boost=True (H3: minimax/sampling.py with minimax/speed_boost.py)
     speed_boost: bool = False
+    # Studio's In pieces tick: a clip longer than `pieces` frames built piece by piece, each shown the end of the one
+    # before, so memory stays at one piece's worth (H3: minimax/continuation.py). 0 = the family has none
+    pieces: int = 0
+    # Studio's Upscale fold: the clip in the Tweaked pane made again at a larger size, a section at a time, at a low
+    # denoise (H3: minimax/upscale.py, the engine's upscale_clip)
+    upscale: bool = False
 
     def checkpoint(self, label, refmod=False) -> VideoCheckpoint:
         """The checkpoint a picker label names (the first when it names none)."""
@@ -537,6 +543,10 @@ class FamilyDescription:
     # {} = Auto just takes the first precision
     train_memory: dict = field(default_factory=dict)
     own_plan: bool = False            # no train_memory: the driver plans precision + swap itself (plan_run, plan_pictures)
+    # Block swap through an H2D ring (MiniMax H3 Image): the ring's card slots, each holding a streamed block, so the
+    # first this-many swapped blocks free no card memory; train_memory's GB per swapped block is then per block past
+    # them (quant.swap_saved_gb). 0: every swapped block frees its share (the exchange offloaders)
+    swap_ring_slots: int = 0
     # the same figures for a card under 20 GB, where the trainer parks the model for each preview's decode and caps the
     # preview at 768 px (train._small_card_previews) - so train_memory's big-card preview peak doesn't apply there.
     # Measured on a small card, or training's own peak without the preview. {} = train_memory everywhere.
@@ -580,6 +590,9 @@ class FamilyDescription:
     adaptive_lr_clip_signal: bool = False
     adaptive_lr: bool = True          # the Adaptive LR control (off: hidden, never sent - MiniMax H3)
     loss_watch: bool = True           # the per-image loss watch toggles (off: hidden, never sent - MiniMax H3)
+    # Several captions per picture (#300): each line of a caption file its own text cache, one picked each step - the
+    # shared text cache (families/cache.py) does it; off for a family that caches text its own way (H3, ACE-Step)
+    multi_caption: bool = True
     # Training maps (training/train_maps.py): where a few fixed pictures are still wrong and where the LoRA acts, each
     # epoch - through the driver's noise_latents / predict / map_target, stills (4-D latents) only
     training_maps: bool = True
@@ -648,6 +661,11 @@ class FamilyDescription:
     #                                   training_loss(diff_ref=, diff_weight=) and noise_latents / predict
     slider_guidance: float = 2.0      # a prompt slider's default push strength (the Training tab box when empty)
     slider_sources: tuple = ("pairs", "prompts")   # where a slider's two ends come from (one = no chooser shown)
+    # the Samples tab's First frame / Last frame pictures: every clip preview starts / ends on them (("first", "last");
+    # the driver takes preview_keyframes={...} and conditions its clip on them). () = no rows. MiniMax H3 (#376)
+    preview_keyframes: tuple = ()
+    slider_min_side: int = 0          # a prompt slider's practice pictures are at least this square side, whatever
+    #                                   Target Megapixels says (0 = no floor)
     # the Kind of training row in the family's own words: ((kind, radio label, hint), ...) for "standard" / "edit" /
     # "slider" / "finetune"; "" keeps the shared text (which speaks of photos and looks). () = all shared
     kind_notes: tuple = ()
@@ -699,6 +717,8 @@ class FamilyDescription:
     # works at 4-20 MP (#348). The default stays preview_width / preview_height
     preview_more_sizes: tuple = ()
     repair_size: int = 768            # Repair Studio's starting preview size (its Res dropdown) for the family
+    # Studio's Width / Height go past the shared list to these (a model made for very large pictures); () = the list
+    studio_more_sizes: tuple = ()
     block_activity: bool = False      # Repair Studio lights each block's slider as the song plays (BlockMeter)
     repair_default_strength: float = 1.0   # Repair Studio's primary / donor "at strength" on a family switch (ACE-Step 0.5)
     preview_speed_lora: str = ""      # name of the SpeedLoRA previews use when its file is set in Preferences

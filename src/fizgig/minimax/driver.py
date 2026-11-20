@@ -104,9 +104,12 @@ class MiniMaxDriver(FamilyDriver):
         if clip_t > 1:
             logger.info(f"[vram] the heaviest item is a {clip_t}-latent-frame clip - planning against its effective "
                         f"{mp:.2f} MP (spatial size x frames).")
-        bsz = max(int(getattr(ds, "batch_size", 1) or 1) for ds in group.datasets)
+        bsz = max((int(getattr(ds, "batch_size", 1) or 1) for ds in group.datasets), default=1)
         stills = [k[-2] * k[-1] / 1e6 for ds in group.datasets for k in ds.batch_manager.bucket_resos
                   if k[0] not in ("clip", "audio")]
+        if not group.datasets and getattr(group, "megapixels", 0):   # a prompt-pair slider: no dataset, one practice
+            mp = group.megapixels                                     # still a step at its bank size
+            stills = [mp]
         mode, n, why = self._plan(precision, blocks_to_swap, run, mp, max(stills or [0.0]), bsz)
         self._plan_previews(n)
         return mode, n, why
@@ -642,6 +645,80 @@ class MiniMaxDriver(FamilyDriver):
         txt = (txt[None] if txt.dim() == 2 else txt).to(state["x"].device, DTYPE)
         return dit(state["x"], state["tt"], txt)
 
+    def load_reference_text_encoder(self, path, device):
+        """The vision-capable build: prompts that see reference pictures (the Reference base's previews)."""
+        from fizgig.minimax.embedder import load_minimax_h3_te_planned
+        return load_minimax_h3_te_planned(path, device=device, compute_dtype=DTYPE, quantize=True, with_vision=True)
+
+    @staticmethod
+    def reference_pictures(paths, width, height):
+        """The Reference base's preview pictures, each on the reference canvas for a width x height clip - the SAME
+        resized picture goes to the text encoder's vision blocks and to the VAE (minimax/reference.py)."""
+        from fizgig.minimax.reference import resize_reference
+        from fizgig.utils.image import flatten
+        from fizgig.utils.upright import open_upright
+        return [resize_reference(flatten(open_upright(p)).convert("RGB"), int(width), int(height), "match")
+                for p in paths]
+
+    @torch.no_grad()
+    def encode_text_with_ref_pictures(self, te, captions, pictures):
+        """Each prompt with the reference pictures ahead of it (<Picture 1>, <Picture 2>): its hidden states and the
+        per-row modality tags the DiT needs for those rows."""
+        out = []
+        for c in captions:
+            hidden, tags = te.encode_with_reference(c, list(pictures))
+            out.append({"hidden_states": (hidden[0] if hidden.dim() == 3 else hidden).detach().cpu(),
+                        "token_tags": tags.reshape(-1).detach().cpu()})
+        return out
+
+    def set_preview_references(self, vae, pictures):
+        """The Reference base's preview pictures (PIL, already on the reference canvas): every preview carries them
+        as condition rows; encoded through `vae` once, at the first preview (their grid is their own, so a smaller
+        preview rung keeps them)."""
+        self._ref_vae, self._ref_pictures, self._ref_latents = vae, list(pictures or []), None
+
+    def _preview_ref_kw(self, cond):
+        """{ref_latents, text_token_tags} for a preview on the Reference base, or {}."""
+        pics = getattr(self, "_ref_pictures", None)
+        tags = cond.get("token_tags") if isinstance(cond, dict) else None
+        if not pics or tags is None:
+            return {}
+        if self._ref_latents is None:
+            import numpy as np
+            self._ref_latents = [self.encode_images(self._ref_vae, [np.asarray(p)])[0][None, :, None] for p in pics]
+            logger.info(f"[preview] {len(pics)} reference picture(s) encoded for the Reference base")
+        return {"ref_latents": self._ref_latents, "text_token_tags": tags}
+
+    def set_preview_keyframes(self, vae, paths):
+        """First / Last frame for the clip previews (#376): kept as paths and encoded per preview size, at the
+        first preview that asks (an out-of-memory step down to a smaller size encodes again at that size)."""
+        self._kf_vae, self._kf_paths, self._kf_cache = vae, dict(paths or {}), {}
+
+    def _preview_keyframes(self, width, height, frames):
+        """[(pixel frame, latent [1, 24, 1, h, w]), ...] for a clip preview at width x height, or None (no pictures
+        set, or a still). Each picture is cropped to the preview's shape from its centre, as Studio's frames are
+        sized to the clip's own canvas (the DiT refuses any other grid)."""
+        paths = getattr(self, "_kf_paths", None)
+        if not paths or int(frames) <= 1:
+            return None
+        import numpy as np
+        from PIL import Image, ImageOps
+        from fizgig.utils.image import flatten
+        from fizgig.utils.upright import open_upright
+        w, h = (int(width) // 32) * 32, (int(height) // 32) * 32
+        out = []
+        for kf, path in paths.items():
+            key = (kf, path, w, h)
+            z = self._kf_cache.get(key)
+            if z is None:
+                img = ImageOps.fit(flatten(open_upright(path)).convert("RGB"), (w, h), Image.LANCZOS)
+                z = self.encode_images(self._kf_vae, [np.asarray(img)])[0][None, :, None]     # [1, 24, 1, h, w]
+                self._kf_cache = {k: v for k, v in self._kf_cache.items() if k[0] != kf}   # one size per picture
+                self._kf_cache[key] = z
+                logger.info(f"[preview] {kf} frame {path} encoded at {w}x{h}")
+            out.append((0 if kf == "first" else int(frames) - 1, z))
+        return out
+
     def encode_images(self, vae, images):
         """uint8 (H, W, 3) arrays -> (24, h, w) latents through the H3 VAE encoder, loaded on first use (the
         previews' VAE is the decoder only) - a prompt slider's practice renders are re-encoded here."""
@@ -725,20 +802,23 @@ class MiniMaxDriver(FamilyDriver):
     def encode_text(self, te, captions):
         return [{"hidden_states": te.encode(c)[0].detach().cpu()} for c in captions]       # (L, 5120)
 
+    def save_text_cache(self, item, cond):
+        """A caption re-encoded mid-run (the loss watch): H3's own text cache layout (hidden_states + mask), which
+        batch_cond reads - not the shared cond__ file, which would leave the next step without its text."""
+        from fizgig.minimax.caching import save_text_encoder_output_cache_minimax
+        save_text_encoder_output_cache_minimax(item, cond["hidden_states"])
+
     def load_vae(self, path, device):
         """The video decoder in fp16 on the CPU (it rides to the GPU for the decode only, as the old previews) and,
         with the audio_vae option, the audio decoder."""
-        from safetensors import safe_open
-        from fizgig.minimax.vae import MiniMaxH3VideoVAEDecoder
-        dec = MiniMaxH3VideoVAEDecoder()
-        with safe_open(path, framework="pt", device="cpu") as f:
-            dec.load_state_dict({k: f.get_tensor(k) for k in f.keys()}, strict=False)
+        from fizgig.minimax.vae import load_video_decoder
+        dec = load_video_decoder(path)
         audio = None
         apath = self.options.get("audio_vae")
         if apath:
             from fizgig.minimax.audio_vae import load_minimax_h3_audio_vae_decoder
             audio = load_minimax_h3_audio_vae_decoder(apath, device="cpu")
-        return {"video": dec.to(torch.float16).eval(), "audio": audio, "device": device, "path": path}
+        return {"video": dec, "audio": audio, "device": device, "path": path}
 
     def initial_noise(self, seed, width, height):
         raise NotImplementedError("H3 travel previews come with the workbench wrap")
@@ -822,12 +902,14 @@ class MiniMaxDriver(FamilyDriver):
             unc = neg_cond["hidden_states"]
             unc = (unc[None] if unc.dim() == 2 else unc).to(device, DTYPE)
         lat, arows, width, height, frames = self._ladder(sampling, dit, txt, unc, width, height, steps, cfg, seed,
-                                                         device, frames, on_step=on_step)
+                                                         device, frames, on_step=on_step,
+                                                         ref_kw=self._preview_ref_kw(cond))   # the Reference base's
         want_audio = want_audio and frames > 1
         return {"latent": lat.cpu(), "audio": arows.cpu() if (want_audio and arows is not None) else None,
                 "size": (width, height)}
 
-    def _ladder(self, sampling, dit, txt, unc, width, height, steps, cfg, seed, device, frames, on_step=None):
+    def _ladder(self, sampling, dit, txt, unc, width, height, steps, cfg, seed, device, frames, on_step=None,
+                ref_kw=None):
         """The old previews' OOM ladder: an out-of-memory render - or one paging into system RAM, which Windows never
         raises - retries one rung down, a shorter clip first (141 -> 56 -> 22 -> still never: 22 is the floor), then
         the resolution down the standard sizes to 512. Both caps stick for later epochs; a resolution step prints the
@@ -871,9 +953,11 @@ class MiniMaxDriver(FamilyDriver):
         while True:
             state["wh"], state["frames"] = (width, height), frames
             try:
+                kfs = self._preview_keyframes(width, height, frames)        # First / Last frame (#376), or None
                 lat, arows = sampling.sample_image(dit, txt, width=width, height=height, steps=steps, cfg_scale=cfg,
                                                    uncond_embeds=unc, seed=seed, device=device, dtype=DTYPE,
                                                    num_frames=frames, return_audio=True, on_slow_step=slow,
+                                                   keyframes=kfs, **(ref_kw or {}),
                                                    **({"slow_step_s": 0.0} if on_step is not None else {}))
                 return lat, arows, width, height, frames
             except oom:

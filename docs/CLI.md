@@ -122,7 +122,7 @@ Headless, there is no Preferences tab: **model locations are passed as flags on 
 | DiT, pruned int8 (~21 GB) | [minimax_h3_fl2va_pruned_int8_convrot.safetensors](https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors) | training (`--dit`) — the same file ComfyUI runs |
 | DiT, reference build *(optional)* | [minimax_h3_ref2va_pruned_int8_convrot.safetensors](https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors) | `--dit` for LoRAs that live in the reference-to-video workflow, and for reference distillation (`--family_option distill=1`) |
 | Text encoder, nvfp4 (~15.7 GB) | [qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors](https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors) | `--text_encoder` (caching, and pre-encoding preview prompts) |
-| Video VAE | [minimax_h3_video_vae_fp16.safetensors](https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/vae/minimax_h3_video_vae_fp16.safetensors) | `--vae` |
+| Video VAE | [minimax_h3_video_vae_int8_convrot.safetensors](https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/vae/minimax_h3_video_vae_int8_convrot.safetensors) (the fp16 file works too) | `--vae` |
 | Audio VAE *(optional)* | [minimax_h3_audio_vae_fp32.safetensors](https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/vae/minimax_h3_audio_vae_fp32.safetensors) | `--aux audio_vae=` (caching) and `--family_option audio_vae=` (training) — sound in clips, voice recordings, previews with sound |
 | Turbo LoRA *(optional)* | [minimax_h3_turbo_v4_step600.safetensors](https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora/blob/main/minimax_h3_turbo_v4_step600.safetensors) | 6-step previews (`--speed_lora`) |
 | Training adapter *(recommended)* | [minimax_h3_training_adapter_v3.safetensors](https://huggingface.co/ostris/minimax_h3_training_adapter/blob/main/minimax_h3_training_adapter_v3.safetensors) (fl2va) · [ref2va file](https://huggingface.co/ostris/minimax_h3_training_adapter/blob/main/minimax_h3_ref2va_training_adapter_v3.safetensors) | `--training_adapter` — match it to `--dit` |
@@ -224,7 +224,7 @@ python src/fizgig/families/train.py --family krea2 --dataset_config my_dataset.t
 **MiniMax H3:**
 
 ```bash
-python src/fizgig/families/cache.py --family minimax --stage latents --dataset_config my_dataset.toml --model /models/minimax_h3_video_vae_fp16.safetensors --aux audio_vae=/models/minimax_h3_audio_vae_fp32.safetensors --aux clip_still=1
+python src/fizgig/families/cache.py --family minimax --stage latents --dataset_config my_dataset.toml --model /models/minimax_h3_video_vae_int8_convrot.safetensors --aux audio_vae=/models/minimax_h3_audio_vae_fp32.safetensors --aux clip_still=1
 python src/fizgig/families/cache.py --family minimax --stage text    --dataset_config my_dataset.toml --model /models/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
 python src/fizgig/families/train.py --family minimax --dataset_config my_dataset.toml ...   # full example below
 ```
@@ -265,14 +265,14 @@ Field notes:
 
 - **`resolution`** — `[width, height]`. With bucketing enabled this is the *area* target: each image is assigned to the nearest aspect-ratio bucket of roughly `width × height` pixels, so mixed portrait/landscape/square datasets train at their natural aspect ratios. `[1024, 1024]` ≈ 1 MP is the sweet spot for both Klein and Krea 2; `[768, 768]` trains faster on smaller cards at some quality cost.
 - **`batch_size`** — 1 trains one picture a step, the default. Families that support it take more; see [Batch size](#batch-size). For a larger effective batch at the memory of batch 1, keep 1 and pass `--gradient_accumulation_steps N` to the trainer.
-- **`num_repeats`** — multiplies how often each image appears per epoch. Leave at 1 and train more epochs instead, unless you're balancing multiple `[[datasets]]` blocks against each other.
+- **`num_repeats`** — multiplies how often each image appears per epoch (the web UI's **Repeats from folder names** sets it per sub-folder from names like `10_name`). Leave at 1 and train more epochs instead, unless you're balancing multiple `[[datasets]]` blocks against each other.
 - **`cache_directory`** — where latents and text embeddings are stored. **Give every dataset its own cache directory.** The training set is built from the cache, and a shared cache directory can mix a previous dataset's images into your run. (Fizgig cross-checks the cache against `image_directory` and skips orphans with a warning, but a dedicated directory per dataset is the clean way.)
 - **Multiple `[[datasets]]` blocks** are supported — each with its own `image_directory`, `cache_directory`, and optional per-dataset overrides of any `[general]` key (e.g. a different `num_repeats` to weight one folder more heavily).
 - **`caption_replace = [["zwxem, a woman", "zwxemwoman"]]`** — rewrites captions as they're read (whole words, any case, in order); your `.txt` files aren't changed. Fizgig LoRA Isolation uses it to join each trigger to its class.
 - **`photos_only = true`** — a family that trains clips or voice (MiniMax H3) reads only the pictures in this folder. Fizgig LoRA Isolation sets it on H3, which trains people from their photos.
 - **`is_reg = true`** — marks a regularisation set, a fine-tune's or a LoRA's: those images train at `--reg_lr_multiplier` (default 0.2 on the command line; the Training tab's LoRA regularisation dataset sends 1.0 unless you pick another) times the learning rate, as an anchor on the kind of thing your subject is. `--reg_per_epoch N` trains on N of them an epoch, a different N each epoch (0, the default, trains every one). The per-image loss watch, masks, Boost the face and training maps leave the set alone.
 
-If you change captions, re-run the text cache step. If you add/remove/edit images, re-run both cache steps (a picture edited after it was cached is encoded again even with `--skip_existing`).
+If you change captions, re-run the text cache step. If you add/remove/edit images, re-run both cache steps (a picture edited after it was cached is encoded again even with `--skip_existing`). Pictures are read in sRGB: a photo's embedded colour profile (an iPhone's Display P3, Adobe RGB) is applied as it's read. Latents cached before 9.7.6 from such photos keep the old colours until you re-run the latent step without `--skip_existing`.
 
 ---
 
@@ -280,7 +280,7 @@ If you change captions, re-run the text cache step. If you add/remove/edit image
 
 ### Images
 
-A dataset is just a folder of images with caption sidecars — no manifest, no subfolder structure (each folder is read at its top level; the web UI's **Also train on its sub-folders** writes one `[[datasets]]` block per sub-folder, with `item_prefix = "<path inside the training folder>/"` so the loss watch keys each picture by its folder). Accepted formats: `.png`, `.jpg`, `.jpeg`, `.webp`, `.bmp` (plus `.jxl` if jxlpy is installed). You do **not** need to pre-resize or crop to a fixed size: with `enable_bucket = true` the loader assigns each image to its nearest aspect-ratio bucket at the target megapixel area, and `bucket_no_upscale = true` keeps undersized images at their native resolution instead of upscaling them. Aim for source images at or above ~1 MP; a mix of framings (close-up, half-body, full-body, varied backgrounds) trains better identity than 40 near-identical headshots.
+A dataset is just a folder of images with caption sidecars — no manifest, no subfolder structure (each folder is read at its top level; the web UI's **Also train on its sub-folders** writes one `[[datasets]]` block per sub-folder, with `item_prefix = "<path inside the training folder>/"` so the loss watch keys each picture by its folder; with **Repeats from folder names** a sub-folder named `10_name` gets `num_repeats = 10`, and `--folder_repeats` records them in the LoRA's metadata). `multi_caption = true` under `[general]` reads each line of a caption file as a caption of its own: line 1 is cached as `<name>_<arch>_te.safetensors`, the others as `_tealt1`, `_tealt2`…, and each step picks one (`--multi_caption` records it in the metadata). Accepted formats: `.png`, `.jpg`, `.jpeg`, `.webp`, `.bmp` (plus `.jxl` if jxlpy is installed). You do **not** need to pre-resize or crop to a fixed size: with `enable_bucket = true` the loader assigns each image to its nearest aspect-ratio bucket at the target megapixel area, and `bucket_no_upscale = true` keeps undersized images at their native resolution instead of upscaling them. Aim for source images at or above ~1 MP; a mix of framings (close-up, half-body, full-body, varied backgrounds) trains better identity than 40 near-identical headshots.
 
 The GUI's Image Prep tab (batch resize, PNG conversion, face-crop detection) is convenience, not requirement — anything that produces ordinary image files works.
 
@@ -604,7 +604,7 @@ The GUI's default recipe as it builds it (rank 8 LoRA, the Default training mode
 python src/fizgig/families/train.py --family minimax \
   --dataset_config my_dataset.toml \
   --dit /models/minimax_h3_fl2va_pruned_int8_convrot.safetensors \
-  --vae /models/minimax_h3_video_vae_fp16.safetensors \
+  --vae /models/minimax_h3_video_vae_int8_convrot.safetensors \
   --text_encoder /models/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors \
   --output_dir ./output_loras/my_subject --output_name my_subject_mmh3 \
   --network_dim 8 --network_alpha 8 --learning_rate 2e-4 \
@@ -957,12 +957,14 @@ Every family, Standard LoRA and fine-tune runs. `--dop` adds a second pass to ea
 
 A caption with several triggers (a photo of both people) has each one swapped. Images whose caption has no trigger train as usual. Each epoch logs the preservation loss: how far the LoRA moves the trigger-free prompt from the base model.
 
-The web app's **Subjects** card always uses the tested recipe, `--dop --dop_every 2 --dop_weight 2`. **Fizgig LoRA Isolation** adds three things, which the launch builds for you:
+The web app's **Subjects** card always uses the tested recipe, `--dop --dop_every 2 --dop_weight 2`. Its **Subject 1 - what they are** box is `--dop_class`, sent as a phrase (`man` goes as `a man`); a caption that already names the class right after the trigger (`zwxem, a man walking`) isn't doubled, it trains as `a man walking`. **Fizgig LoRA Isolation** adds three things, which the launch builds for you:
 - each subject's 16 side-by-side pictures, built first by `src/fizgig/scripts/multi_person.py --subject FOLDER FUSED_WORD OUT_DIR` (one `--subject` per person) and trained as one more dataset block per subject;
 - `--lr_boost fizgig_mp_=2`, so those pictures train at 2x the learning rate;
 - a `caption_replace` list in each subject's dataset block, which reads `zwxem, a woman` as `zwxemwoman`, with `--dop_trigger zwxemwoman --dop_class "a woman"`.
 
 How to caption for it: [People in group pictures](MULTI_PERSON.md).
+
+**With Automagic, train DOP and Isolation with AdamW.** A preservation pass on every second step makes the update's sign alternate; `automagic3` / `automagic4` read that as overshooting and lower their rate to its floor within two epochs, so the LoRA learns nothing. The web app sends `--optimizer_type adamw` in their place, at the Learning Rate box's rate (2e-4 when it holds Automagic's tiny starting value) or with `--adaptive_lr` when that's ticked. Do the same by hand. Two subjects of the same class (two women, two men) need more epochs than one.
 
 ## Sample previews during training
 
@@ -1097,6 +1099,7 @@ python -m fizgig.scripts.extract_finetune --base /models/base.safetensors --tune
 - **Auto-recaption's tasks** — `--recaption_instruction TEXT` and `--recaption_instruction_detailed TEXT` are the first and second tries' instructions (the GUI fills them from its **First try uses** / **Second try uses** picks); `--recaption_task` and `--recaption_task_detailed` name those tasks for the log. `--recaption_triggers '{"outfits/red/": "zwxred"}'` gives other dataset blocks their own trigger word, keyed by `item_prefix`.
 - **Fine-tune windows** — `--ft_fused_backward` steps each weight as its gradient lands and frees it (the GUI's "Free each gradient as soon as it's used", on by default: less VRAM, no clipping or accumulation); `--ft_max_parts N` caps the parts per window (0 = as many as fit; 1 = one part per window, the most headroom).
 - `--preview_small_card_cap PX` — on a card under 20 GB, the previews' long side is capped at this many pixels (the Samples tab's Faster, smaller previews).
+- **A value that starts with `-`** (a trigger word, a title, a negative, a slider prompt) — write it as `--flag=value`: argparse reads `--sample_negative -blurry` as two options. The web app sends such values this way.
 - **Cache steps** — `--batch_size`, `--num_workers` and `--device` tune the cache scripts; the defaults suit most machines.
 
 The trainer also has options Fizgig itself uses between computers (`--share_worker`, the `--ft_*` window and continue options, `--preview_checkpoint_cache`); you don't need them by hand.

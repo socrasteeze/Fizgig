@@ -31,10 +31,41 @@ from fizgig.families.train import (CONTEXT, LOOK, SPEED, TRAINABLE_PREVIEW, _enc
 logger = logging.getLogger("fizgig.preview_worker")
 
 
+# a clip family's preview is a still with its clip and sound beside it (same name): all go back to the
+# lead, not the still alone (H3 / Vimoo previews from a helper came back as their middle frame only)
+PREVIEW_COMPANIONS = (".mp4", ".wav")
+
+
+def _with_companions(paths):
+    out = []
+    for p in paths:
+        out.append(os.path.basename(p))
+        stem = os.path.splitext(p)[0]
+        out += [os.path.basename(stem + e) for e in PREVIEW_COMPANIONS if os.path.isfile(stem + e)]
+    return out
+
+
 def _write(path, data):
     with open(path + ".tmp", "w", encoding="utf-8") as f:
         json.dump(data, f)
     os.replace(path + ".tmp", path)
+
+
+def plan(desc, driver, setup, precision):
+    """(precision, blocks_to_swap, why) for the base this helper loads. A model that plans itself (description.own_plan:
+    MiniMax H3) is asked as the Batch size note asks it (driver.plan_pictures, web/batch_plan.py), at the run's
+    precision, then the trainer's preview caps apply (_plan_previews: 768x640 / 22 frames on a 16 GB card). The shared
+    planner has no figures for it: an int8 run's helper loaded int8 with nothing streamed and ran out of memory on a
+    16 GB card (#372, @Nessa2026691). The others plan from their measured figures, as before."""
+    if not desc.own_plan:
+        return quant.plan(desc, driver, precision, -1)
+    paths, n = setup["paths"], setup.get("network") or {}
+    run = {"dit_path": paths["dit"], "network_type": n.get("type") or "lora", "network_dim": int(n.get("dim") or 16),
+           "lokr_factor": int(n.get("factor") or 8), "context_lora_path": paths.get("context") or ""}
+    mode, swap = driver.plan_pictures(precision, -1, megapixels=1.0, pictures=1, run=run)
+    if hasattr(driver, "_plan_previews"):
+        driver._plan_previews(swap)
+    return mode, swap, "the model's own plan for this card"
 
 
 class Worker:
@@ -53,8 +84,7 @@ class Worker:
         if self.ck:
             self._load_checkpoint(setup, paths)
             return
-        precision = setup.get("precision") or "auto"
-        precision, swap, why = quant.plan(self.desc, self.driver, precision, -1)
+        precision, swap, why = plan(self.desc, self.driver, setup, setup.get("precision") or "auto")
         self.say("loading", f"Loading {self.desc.display_name} ({precision}" + (f", {swap} blocks swapped" if swap else "")
                  + ")")
         logger.info(f"[helper] {self.desc.display_name} at {precision}, block swap {swap} ({why})")
@@ -132,7 +162,7 @@ class Worker:
                                      output_name=job["output_name"], steps=int(job["steps"]), cfg=float(job["cfg"]),
                                      neg=neg, width=int(job["width"]), height=int(job["height"]),
                                      seed=int(job["seed"]), speed=settings, swapped=bool(self.swapped))
-        return {"ok": True, "files": [os.path.basename(p) for p in files], "seconds": round(time.time() - t0, 1),
+        return {"ok": True, "files": _with_companions(files), "seconds": round(time.time() - t0, 1),
                 "precision": self.precision}
 
     def say(self, state, text, **extra):
@@ -157,6 +187,12 @@ class Worker:
         return self.enc, neg
 
     def run(self, job):
+        if self.desc.preview_keyframes:      # First / Last frame (#376): this round's, or none (a worker outlives runs)
+            self.driver.set_preview_keyframes(self.vae, {k: p for k, p in (job.get("keyframes") or {}).items()
+                                                         if p and os.path.isfile(p)})
+            from PIL import Image
+            self.driver.set_preview_references(self.vae, [Image.open(p).convert("RGB") for p in
+                                                          job.get("references") or [] if p and os.path.isfile(p)])
         if self.ck:
             return self._run_checkpoint(job)
         t0 = time.time()
@@ -178,13 +214,13 @@ class Worker:
                                      seed=int(job["seed"]), speed=speed, lowmem=self.lowmem,
                                      swapped=bool(self.swapped), strengths=tuple(job.get("strengths") or ()),
                                      look=look)
-        return {"ok": True, "files": [os.path.basename(p) for p in files], "seconds": round(time.time() - t0, 1),
+        return {"ok": True, "files": _with_companions(files), "seconds": round(time.time() - t0, 1),
                 "precision": self.precision}
 
     def loop(self, idle):
         last = time.time()
         while True:
-            todo = sorted(glob.glob(os.path.join(self.jobs, "*.job.json")))
+            todo = sorted(glob.glob(os.path.join(glob.escape(self.jobs), "*.job.json")))
             if not todo:
                 if os.path.exists(os.path.join(self.jobs, "stop")) or time.time() - last > idle:
                     self.say("stopped", "Stopped")

@@ -27,7 +27,7 @@ import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif", ".avif"}   # as the Captions tab (web/captions.py)
 VIDEO_EXTENSIONS = {".mp4"}
 
 
@@ -91,14 +91,42 @@ def _load_image_list(list_file: str) -> list[str]:
     return out
 
 
-def _write_caption(path: str, caption: str, ext: str = ".txt") -> None:
-    with open(os.path.splitext(path)[0] + (ext or ".txt"), "w", encoding="utf-8") as f:
+def _write_caption(path: str, caption: str, ext: str = ".txt", add_line: bool = False,
+                   first_line: bool = False) -> None:
+    """Write a picture's caption file; add_line (Several captions per picture): keep what it says and add the caption
+    on a line of its own (not when that line is already there); first_line: replace its first line, keep the rest."""
+    p = os.path.splitext(path)[0] + (ext or ".txt")
+    lines = []
+    if (first_line or add_line) and os.path.exists(p):
+        # read as training reads it (a UTF-16 or Windows-1252 file too), so the lines kept are written back intact
+        from fizgig.dataset.image_dataset import decode_caption
+        with open(p, "rb") as f:
+            lines = [ln.strip() for ln in decode_caption(f.read(), p).splitlines() if ln.strip()]
+    if first_line and not add_line and os.path.exists(p):
+        caption = "\n".join([caption] + lines[1:])
+    elif add_line and os.path.exists(p):
+        if caption.strip() in lines:
+            return
+        caption = "\n".join(lines + [caption])
+    with open(p, "w", encoding="utf-8") as f:
         f.write(caption)
 
 
 class CaptionState:
     def __init__(self, desc, captioner, include_video: bool):
         self.desc, self.captioner, self.include_video = desc, captioner, include_video
+
+
+def _download_first(desc, files) -> None:
+    """A captioner not on this machine yet is downloaded before it loads, saying so (#366): the page shows
+    "Downloading ..." and then "Loading ... into memory", not one message for both."""
+    from fizgig import captioners
+    try:
+        from huggingface_hub import snapshot_download
+        snapshot_download(files["repo"], revision=files["revision"], local_files_only=True)
+    except Exception:
+        print(f"INFO: Downloading {desc.label} (the first time only)...", flush=True)
+        captioners.captioner_class(desc).fetch(desc, files)
 
 
 def _load_state_from_config(config: dict, device: str) -> CaptionState:
@@ -113,6 +141,8 @@ def _load_state_from_config(config: dict, device: str) -> CaptionState:
         files = {"path": (config.get("files") or {}).get("path") or ""}
         if not files["path"]:
             raise ValueError(f"{desc.label} needs its model file")
+    if isinstance(desc.files, captioners.HFRepo):
+        _download_first(desc, files)
     free = None
     if device == "cuda" and desc.precisions:
         free = torch.cuda.mem_get_info()[0] / 2 ** 30
@@ -180,7 +210,8 @@ def _run_job(state: CaptionState, job: dict) -> bool:
             if not caption:
                 print(f"FAIL: {base} (empty caption)", flush=True)
                 continue
-            _write_caption(path, caption, job.get("caption_ext") or ".txt")
+            _write_caption(path, caption, job.get("caption_ext") or ".txt", bool(job.get("add_line")),
+                           bool(job.get("first_line")))
             print(f"OK: {base}", flush=True)
         except Exception as exc:
             print(f"FAIL: {base} ({exc})", flush=True)

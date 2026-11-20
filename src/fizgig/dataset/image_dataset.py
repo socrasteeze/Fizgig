@@ -32,45 +32,41 @@ from fizgig.training.metadata import (ARCHITECTURE_KLEIN_9B, ARCHITECTURE_KLEIN_
 
 import logging
 from fizgig.utils.upright import open_upright
+from fizgig.dataset.caption_file import decode_caption, read_caption  # noqa: F401  (light: Start reads captions too)
 
 logger = logging.getLogger(__name__)
 
 
-def decode_caption(raw: bytes, caption_path: str) -> str:
-    """Decode a caption file's bytes, tolerating encodings other than UTF-8.
+def caption_lines(text: str, replace=()) -> list:
+    """Several captions per picture: a caption file's non-blank lines, each stripped and with `replace` (compiled
+    (pattern, to) pairs, multi-person fusing) applied to it on its own."""
+    out = []
+    for line in str(text).splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        for pat, to in replace:
+            line = pat.sub(lambda _m, t=to: t, line)
+        out.append(line)
+    return out
 
-    Captions written by the Captions tab are UTF-8, but datasets assembled elsewhere
-    routinely carry Windows-1252 text — one curly apostrophe (0x92) in one file out of a
-    hundred used to abort the whole caching run with a bare UnicodeDecodeError deep in a
-    worker thread that named no file at all.
 
-    Order: UTF-16 if there's a BOM (Notepad's "Unicode" save), then UTF-8 (BOM tolerated),
-    then cp1252, then latin-1 — which maps every byte and so cannot fail. Anything past
-    UTF-8 is logged with the path, so a genuinely mis-encoded caption is still visible
-    instead of being silently mangled into the training data.
-    """
-    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
-        try:
-            text = raw.decode("utf-16")
-            logger.warning("Caption %s is UTF-16 — decoded, but re-save it as UTF-8.", caption_path)
-            return text
-        except UnicodeDecodeError:
-            pass
-    try:
-        return raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        pass
-    for encoding in ("cp1252", "latin-1"):
-        try:
-            text = raw.decode(encoding)
-        except UnicodeDecodeError:
-            continue  # cp1252 leaves a handful of bytes undefined; latin-1 won't.
-        logger.warning("Caption %s is not valid UTF-8 — decoded as %s. Re-save it as UTF-8 to "
-                       "silence this warning.", caption_path, encoding)
-        return text
-    logger.warning("Caption %s could not be decoded in any known encoding — undecodable bytes "
-                   "replaced.", caption_path)
-    return raw.decode("utf-8", errors="replace")
+def text_cache_alt_path(te_path: str, k: int) -> str:
+    """The text cache of a picture's caption line k+1 (k >= 1) beside its first line's `<stem>_<arch>_te.safetensors`:
+    `<stem>_<arch>_tealt<k>.safetensors` - outside the `*_te.safetensors` glob, as the `_teref` files are."""
+    stem, ext = os.path.splitext(te_path)
+    return f"{stem}alt{k}{ext}"
+
+
+def text_cache_alts(te_path: str) -> list:
+    """The extra caption lines' text caches that exist for a picture, in order."""
+    out, k = [], 1
+    while os.path.exists(text_cache_alt_path(te_path, k)):
+        out.append(text_cache_alt_path(te_path, k))
+        k += 1
+    return out
+
+
 logging.basicConfig(level=logging.INFO)
 
 
@@ -568,7 +564,12 @@ class BucketBatchManager:
 
         for item_info in bucket[start:end]:
             sd_latent = load_file(item_info.latent_cache_path)
-            sd_te = load_file(item_info.text_encoder_output_cache_path)
+            # Several captions per picture: one of its lines at random, a fresh pick every time it comes round. Looked up
+            # each time, so a caption fixed mid-run (more or fewer lines) is followed from the next step
+            _alts = (text_cache_alts(item_info.text_encoder_output_cache_path)
+                     if getattr(item_info, "multi_caption", False) else None)
+            sd_te = load_file(random.choice([item_info.text_encoder_output_cache_path] + _alts) if _alts
+                              else item_info.text_encoder_output_cache_path)
             if getattr(item_info, "still_only", False):
                 # the clip's still item: the cached sharpest-face frame when the cache pass
                 # made one, else frame 0 sliced from the clip latent [C, T, H, W] -> [C, H, W]
@@ -713,8 +714,12 @@ class ImageDirectoryDatasource:
         family=None,
         caption_replace=None,
         extra_reference_directory: Optional[str] = None,
+        multi_caption: bool = False,
     ):
         import re
+        # Several captions per picture (#300, the Training tab tick): each line of a caption file is a caption of its
+        # own; get_caption hands them on joined by "\n", each stripped and fused on its own, blank lines dropped
+        self.multi_caption = bool(multi_caption)
         self.caption_replace = [(re.compile(r"(?<!\w)" + re.escape(str(a)) + r"(?!\w)", re.I), str(b))
                                 for a, b in (caption_replace or []) if str(a)]
         self.image_directory = image_directory
@@ -882,6 +887,8 @@ class ImageDirectoryDatasource:
         with open(caption_path, "rb") as f:
             raw = f.read()
         caption = decode_caption(raw, caption_path).strip()
+        if self.multi_caption:
+            return image_path, "\n".join(caption_lines(caption, self.caption_replace))
         for pat, to in self.caption_replace:
             caption = pat.sub(lambda _m, t=to: t, caption)
         return image_path, caption
@@ -950,9 +957,11 @@ class ImageDataset(torch.utils.data.Dataset):
         photos_only: bool = False,
         mask_directory: Optional[str] = None,
         item_prefix: str = "",
+        multi_caption: bool = False,
         **kwargs,
     ):
         super().__init__()
+        self.multi_caption = bool(multi_caption)      # Several captions per picture (#300): one per line
         # Each picture's training key is item_prefix + its name: a training folder's own pictures have none, a
         # sub-folder's is its path ("outfits/red/"), another subject's or the regularisation set's a tag ("s2:",
         # "reg:") - so same-named pictures in two folders stay apart, and the loss watch finds each one's folder
@@ -1006,7 +1015,8 @@ class ImageDataset(torch.utils.data.Dataset):
         self.datasource = ImageDirectoryDatasource(image_directory, caption_extension,
                                                    control_directory, extra_extensions=_extra,
                                                    family=self.family, caption_replace=caption_replace,
-                                                   extra_reference_directory=extra_reference_directory)
+                                                   extra_reference_directory=extra_reference_directory,
+                                                   multi_caption=multi_caption)
 
         if self.cache_directory is None:
             self.cache_directory = self.image_directory
@@ -1232,7 +1242,18 @@ class ImageDataset(torch.utils.data.Dataset):
                     item_key, caption = future.result()
                     item_info = ItemInfo(item_key, caption, (0, 0), (0, 0))
                     item_info.text_encoder_output_cache_path = self.get_text_encoder_output_cache_path(item_info)
-                    data.append(item_info)
+                    if self.multi_caption and "\n" in caption:   # each line its own cache; the first at the usual path
+                        lines = caption.split("\n")
+                        item_info.caption = lines[0]
+                        data.append(item_info)
+                        for k, line in enumerate(lines[1:], start=1):
+                            alt = ItemInfo(item_key, line, (0, 0), (0, 0))
+                            alt.caption_alt = True       # counted once with its picture in the cache progress
+                            alt.text_encoder_output_cache_path = text_cache_alt_path(
+                                item_info.text_encoder_output_cache_path, k)
+                            data.append(alt)
+                    else:
+                        data.append(item_info)
                     futures.remove(future)
 
         def submit_batch(flush: bool = False):
@@ -1363,6 +1384,7 @@ class ImageDataset(torch.utils.data.Dataset):
 
         bucketed: dict[Tuple, list[ItemInfo]] = {}   # (w, h), or ("audio", w, h) for voice items
         _mask_names, masked_items, misfit_masks = None, 0, []
+        multi_items = multi_lines = 0
         _pic_names, face_items = None, 0
         for cache_file in latent_cache_files:
             tokens = os.path.basename(cache_file).split("_")
@@ -1412,6 +1434,11 @@ class ImageDataset(torch.utils.data.Dataset):
             item_info = ItemInfo(self.item_prefix + item_key, "", image_size, bucket_reso,
                                  latent_cache_path=cache_file)
             item_info.text_encoder_output_cache_path = te_cache
+            if self.multi_caption:          # its other caption lines' caches: one is picked at random each step
+                item_info.multi_caption = True
+                _alts = text_cache_alts(te_cache)
+                multi_items += bool(_alts)
+                multi_lines += 1 + len(_alts)
             _mdir = self.mask_directory or self.image_directory
             # a regularisation set's pictures train whole and plain: no mask, no Boost the face (an anchor for the kind
             # of thing they show, not a subject)
@@ -1489,6 +1516,9 @@ class ImageDataset(torch.utils.data.Dataset):
                     f"[dataset] {still_frame0_fallback} clip(s) were cached without a picked "
                     f"still — their frame 0 is used instead. Re-run caching with the tick on "
                     f"(or flush the cache) to pick sharp frames for them.")
+        if self.multi_caption:
+            logger.info(f"[captions] {self.image_directory}: {multi_items} pictures have more than one line, "
+                        f"{multi_lines} captions in all")
         if self.face_boost != 1.0:
             what = {"face": "a face", "head": "a face (with its hair)"}.get(self.face_area, self.face_area.replace("_", " "))
             logger.info(f"[face boost] {face_items} picture(s) in {self.image_directory} have {what} found: it counts "

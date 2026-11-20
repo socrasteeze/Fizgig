@@ -421,7 +421,13 @@ def _anchor_lines(raw):
     return [str(x).strip() for x in (raw or []) if str(x).strip()]
 
 
-def _encode_override(driver, te_path, prompts, dit, device, parkable=True, references=None):
+def _prompt_texts(prompts):
+    """--slider_prompts as typed: without the space the launch puts before one that starts with "-" (so argparse takes
+    it as a value, launch._slider_value)."""
+    return [str(x).strip() for x in prompts] if prompts else prompts
+
+
+def _encode_override(driver, te_path, prompts, dit, device, parkable=True, references=None, ref_pictures=None):
     """Encode the override's prompts mid-run. The text encoder loads beside the training DiT when it fits; otherwise the
     DiT waits on CPU for the encode (a block-swapped DiT is small enough to stay, and the driver picks a smaller
     encoder when VRAM is short)."""
@@ -433,13 +439,15 @@ def _encode_override(driver, te_path, prompts, dit, device, parkable=True, refer
         quant.move(dit, "cpu")
         torch.cuda.empty_cache()
     try:
-        if references:
+        if references or ref_pictures:
             te = driver.load_reference_text_encoder(te_path, device)
         else:
             te = driver.load_text_encoder(te_path, device)
         try:
             if references:
                 return driver.encode_text_with_references(te, list(prompts), [references] * len(prompts))
+            if ref_pictures:            # the Reference base's pictures (#376): the prompt sees them as <Picture i>
+                return driver.encode_text_with_ref_pictures(te, list(prompts), ref_pictures)
             return driver.encode_text(te, list(prompts))
         finally:
             driver.unload_text_encoder(te)
@@ -954,11 +962,12 @@ class _CheckpointPreviews:
 
 
 def _largest_bucket_mp(group):
-    """Megapixels of the run's largest actual bucket (what sets activation memory), or None."""
+    """Megapixels of the run's largest actual bucket (what sets activation memory), or None. A prompt-pair slider has
+    no dataset: its practice pictures' size (_SliderBank.megapixels)."""
     try:
         return max(k[-2] * k[-1] / 1e6 for ds in group.datasets for k in ds.batch_manager.bucket_resos)
     except Exception:
-        return None
+        return getattr(group, "megapixels", None) or None
 
 
 class _FineTune:
@@ -1148,7 +1157,7 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                  vae_path=None, te_path=None, sample_prompts=None, sample_every_n_epochs=0, sample_until_epoch=0,
                  sample_every_n_epochs_after=0, sample_width=None,
                  sample_height=None, sample_steps=None, sample_cfg_scale=None, sample_negative=None,
-                 sample_at_first=False, sample_seed=42, sample_reference=None, sample_image=None,
+                 sample_at_first=False, sample_seed=42, sample_reference=None, sample_image=None, sample_keyframes=None, sample_ref_images=None,
                  sample_strengths=(), slider_pairs=False, slider_diff_weight=1.0, slider_prompts=None, slider_guidance=3.0,
                  slider_anchors=(), slider_anchor_weight=1.0,
                  train_blocks=None,
@@ -1165,7 +1174,7 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                  recaption_instruction_detailed=None, recaption_task=None, recaption_task_detailed=None,
                  captioner=None, finetune=False, ft_rotations=10, ft_save_every_rotations=1, ft_rotate_every=1, ft_max_parts=0,
                  ft_start_window=0,
-                 ft_epochs_done=0, ft_fused_backward=False, reg_lr_multiplier=0.2, reg_per_epoch=0,
+                 ft_epochs_done=0, ft_fused_backward=False, reg_lr_multiplier=0.2, reg_per_epoch=0, folder_repeats=None, multi_caption=False,
                  preview_checkpoint=None,
                  preview_checkpoint_cache="auto", preview_int8=False, family_options=None,
                  dop=False, dop_trigger=None, dop_class="", dop_weight=1.0, dop_every=1, dop_ft_samples=8,
@@ -1224,6 +1233,7 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
     os.makedirs(output_dir, exist_ok=True)
 
     # ---- sliders: a signed dial, trained at +1 and -1 ------------------------------------------------
+    slider_prompts = _prompt_texts(slider_prompts)     # as typed (the launch's space before a "-" goes)
     slider = bool(slider_pairs or slider_prompts)
     if slider:
         if not desc.slider_training:
@@ -1310,6 +1320,7 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
     if slider_prompts:
         user_config = {"general": {"resolution": [slider_bank_res, slider_bank_res]}}
         group = _SliderBank([None] * max(1, int(slider_bank)))    # filled once the DiT is loaded
+        group.megapixels = slider_bank_res * slider_bank_res / 1e6  # what a step trains at, for a memory plan
     else:
         if not dataset_config:
             raise RuntimeError("--dataset_config is required (only a prompt-pair slider trains without a dataset)")
@@ -1505,7 +1516,7 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
     if share_worker is None and not slider_prompts:
         try:                     # for a helper's training share (web/helpers.py): this run's command and its cache
             os.makedirs(os.path.join(output_dir, SHARE_DIR), exist_ok=True)
-            for _old in glob.glob(os.path.join(output_dir, SHARE_DIR, "[0-9]" * 6)):
+            for _old in glob.glob(os.path.join(glob.escape(output_dir), SHARE_DIR, "[0-9]" * 6)):
                 shutil.rmtree(_old, ignore_errors=True)     # an earlier run's rounds: never this run's to combine
             with open(dataset_config, encoding="utf-8") as f:
                 _ds_text = f.read()
@@ -1572,14 +1583,16 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                     "run goes (Windows spilling into system memory), or it runs out of memory: turn Weight averaging "
                     "(EMA) off, lower Target Megapixels, or use a standard LoRA")
             from fizgig.utils.gpu_backend import is_rocm
-            if not kept and precision == "nf4" and "closely" in why and os.name == "nt" and is_rocm():
-                # Windows AMD has no expandable segments: a close fit runs short once pictures of many shapes train at
-                # full size (1.8 GB in unusable pieces, #341, measured on ROCm); a Windows card then spills into system
-                # memory and crawls. EMA off fitted the same run (15.5 GB peak of 15.8)
+            from fizgig.utils.rocm_alloc import expandable_in_effect
+            if not kept and precision == "nf4" and "closely" in why and is_rocm() and not expandable_in_effect():
+                # AMD without expandable segments (Windows, and consumer Radeons on Linux: they corrupt memory there,
+                # #363): a close fit runs short once pictures of many shapes train at full size (1.8 GB in unusable
+                # pieces, #341, measured on ROCm); a Windows card then spills into system memory and crawls. EMA off
+                # fitted the same run (15.5 GB peak of 15.8)
                 logger.warning(
-                    "[precision] tight fit: on an AMD card on Windows this run may run short once its full-size "
-                    "pictures start. If steps slow down as the run goes, or it runs out of memory: turn Weight "
-                    "averaging (EMA) off, lower Target Megapixels, or use a standard LoRA")
+                    "[precision] tight fit: on this AMD card this run may run short once its full-size pictures "
+                    "start. If steps slow down as the run goes, or it runs out of memory: turn Weight averaging (EMA) "
+                    "off, lower Target Megapixels, or use a standard LoRA")
             why += f" at {mp:.2f} MP" + (f" x {bsz} pictures a step" if bsz > 1 else "")
             if adapter_gb >= 0.1 and not kept:
                 why += (f", counting {adapter_gb:.1f} GB more for the "
@@ -1602,10 +1615,7 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
     do_compile = False
     cb = str(compile_blocks or "off").lower()
     if desc.compiles and cb != "off":
-        try:
-            mp_max = max(k[-2] * k[-1] / 1e6 for ds in group.datasets for k in ds.batch_manager.bucket_resos)
-        except Exception:
-            mp_max = 0.25
+        mp_max = _largest_bucket_mp(group) or 0.25    # a prompt-pair slider: its practice pictures' size
         do_compile, why = driver.compile_plan(cb, group.num_train_items * max_train_epochs, precision,
                                               max(0, blocks_to_swap) if precision != "nf4" else 0,
                                               mp=mp_max * bsz if bsz > 1 else mp_max)
@@ -1649,7 +1659,7 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
     gradient_checkpointing = bool(gradient_checkpointing)
 
     # ---- previews: encode prompts once, keep the VAE ---------------------------------------------
-    encoded = neg = vae = ref_imgs = ref_latents = None
+    encoded = neg = vae = ref_imgs = ref_latents = ref_pictures = None
     slider_enc = slider_neg = None
     anchor_enc = []
     if slider_prompts:
@@ -1657,7 +1667,9 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
         _all = [{k: v[None] for k, v in c.items()}
                 for c in driver.encode_text(te, [str(x) for x in slider_prompts] + list(slider_anchors))]
         slider_enc, anchor_enc = _all[:3], _all[3:]
-        if sample_cfg_scale > 1.0 and desc.preview_negative is not None:
+        # a Turbo LoRA's own recipe can use CFG too (MOSS-Image's: CFG 2), and then it needs the negative as well
+        if ((sample_cfg_scale > 1.0 or (speed_desc is not None and speed_desc.settings.cfg > 1.0))
+                and desc.preview_negative is not None):
             # the practice pictures render as previews do: the Samples tab's negative (else the family's default)
             text = sample_negative if sample_negative is not None else desc.preview_negative
             slider_neg = {k: v[None] for k, v in driver.encode_text(te, [text])[0].items()}
@@ -1773,6 +1785,17 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
             encoded = driver.encode_text_with_references(te, sample_prompts, [ref_imgs] * len(sample_prompts))
             if sample_cfg_scale > 1.0 or not desc.samples_cfg_free:
                 neg = driver.encode_text_with_references(te, [sample_negative or ""], [ref_imgs])[0]
+        elif sample_ref_images and desc.preview_keyframes:
+            # the Reference base (#376): every preview prompt sees the pictures as <Picture 1> / <Picture 2>, the same
+            # resized pictures the previews carry as condition rows
+            ref_pictures = driver.reference_pictures(sample_ref_images, sample_width, sample_height)
+            logger.info("[sample] previews see " + ", ".join(os.path.basename(p) for p in sample_ref_images) +
+                        " as their reference pictures (<Picture 1>" + (", <Picture 2>" if len(ref_pictures) > 1 else "")
+                        + " in the prompt)")
+            te = driver.load_reference_text_encoder(te_path, device)
+            encoded = driver.encode_text_with_ref_pictures(te, sample_prompts, ref_pictures)
+            if sample_cfg_scale > 1.0 or not desc.samples_cfg_free:
+                neg = driver.encode_text(te, [sample_negative or ""])[0]     # negatives stay text-only
         elif sample_image and desc.preview_image:
             from PIL import Image
             logger.info(f"[sample] previews see {os.path.basename(sample_image)} through the text encoder's vision "
@@ -1790,6 +1813,14 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
         del te
         torch.cuda.empty_cache()
         vae = driver.load_vae(vae_path, device)
+        if ref_pictures:
+            driver.set_preview_references(vae, ref_pictures)
+        if sample_keyframes and desc.preview_keyframes:
+            # First / Last frame (#376): the driver encodes them at each preview's own size, through this VAE
+            driver.set_preview_keyframes(vae, {k: v for k, v in sample_keyframes.items() if v})
+            logger.info("[sample] clip previews " + " and ".join(
+                f"{'start' if k == 'first' else 'end'} on {os.path.basename(v)}" for k, v in sample_keyframes.items()
+                if v))
         if ref_imgs:
             # one at a time: extra pictures have their own shapes, and a driver may stack its batch (Klein)
             ref_latents = [driver.encode_images(vae, [im])[0][None].cpu() for im in ref_imgs]
@@ -1914,13 +1945,15 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                 if use_speed:
                     lat = driver.generate(dit, n_c, slider_bank_res, slider_bank_res, steps=speed_desc.settings.steps,
                                           seed=seed + 1000 + i, cfg=speed_desc.settings.cfg,
-                                          sigmas=speed_desc.settings.sigmas, options=speed_desc.settings.options)
+                                          sigmas=speed_desc.settings.sigmas, options=speed_desc.settings.options,
+                                          **({"neg_cond": {k: v[0].to(device) for k, v in slider_neg.items()}}
+                                             if slider_neg is not None and speed_desc.settings.cfg > 1.0 else {}))
                 else:
                     lat = driver.generate(dit, n_c, slider_bank_res, slider_bank_res, steps=desc.preview_steps,
                                           seed=seed + 1000 + i, cfg=sample_cfg_scale,
                                           # on the GPU with the prompt: SDXL joins the two before moving them
                                           **({"neg_cond": {k: v[0].to(device) for k, v in slider_neg.items()}}
-                                             if slider_neg is not None else {}))
+                                             if slider_neg is not None and sample_cfg_scale > 1.0 else {}))
                 bank.append(driver.practice_latent(vae, lat, slider_bank_res))
         if use_speed:
             net.set_enabled(SPEED, False)
@@ -1938,7 +1971,7 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
     if do_compile:                       # decided before the load (below the Auto plan), applied last
         driver.compile_blocks(dit, "outside" if do_compile == "outside" else "inside",
                               blocks_to_swap if swapped else 0)
-    from fizgig.training.optimizers import (automagic4_detail, create_optimizer, group_rates, owns_its_rate,
+    from fizgig.training.optimizers import (automagic4_braked, automagic4_detail, create_optimizer, group_rates, owns_its_rate,
                                             shown_lr)
     if ftr is not None:
         params, optimizer, opt_label = [], None, ftr.opt_label
@@ -2171,6 +2204,10 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                        "ss_masked_images": str(masked_images)})
             if mask_prior:
                 md["ss_mask_prior"] = f"{mask_prior:g}"
+        if folder_repeats:
+            md["ss_folder_repeats"] = str(folder_repeats)
+        if multi_caption:
+            md["ss_multi_caption"] = "True"
         if face_on:
             md["ss_face_weight"] = f"{float(face_weight):g}"
             md["ss_face_area"] = str(face_area or "face")
@@ -2254,7 +2291,8 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
             try:
                 if ov_cache[0] != ov["prompts"]:     # encoded again only when the prompts changed
                     ov_cache[:] = [list(ov["prompts"]), _encode_override(driver, te_path, ov["prompts"], dit, device,
-                                                                         parkable=not swapped, references=ref_imgs)]
+                                                                         parkable=not swapped, references=ref_imgs,
+                                                                         ref_pictures=ref_pictures)]
                 conds = ov_cache[1]
                 sd, prompts = ov["seed"], list(ov["prompts"])
                 if ov.get("steps"):
@@ -2419,6 +2457,18 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                        "options": dict(family_options or {}),
                        "precision": precision, "context": [context_lora_path, context_lora_strength]
                        if context_lora_path else None, "lowmem": bool(lowmem)}
+                if sample_keyframes and desc.preview_keyframes:
+                    # First / Last frame (#376): the pictures go with the round, the helper encodes them as here
+                    job["keyframes"] = {}
+                    for kf, src in sample_keyframes.items():
+                        name = f"kf_{kf}{os.path.splitext(src)[1].lower() or '.png'}"
+                        shutil.copyfile(src, os.path.join(rd, name))
+                        job["keyframes"][kf] = name
+                if ref_pictures:            # the Reference base's pictures, as resized here (#376)
+                    job["references"] = []
+                    for i, pic in enumerate(ref_pictures, 1):
+                        pic.save(os.path.join(rd, f"ref_{i}.png"))
+                        job["references"].append(f"ref_{i}.png")
                 if hp.get("compare"):
                     compared[0] = hp["compare"]
                     compare = (rd, job)
@@ -2483,6 +2533,43 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
         return None
 
     ckpt_previews = _make_ckpt_previews(preview_checkpoint) if (preview_checkpoint and encoded is not None) else None
+    def preview_settings(mode, look=False):
+        """Every setting a preview renders with, as [label, value] rows for the Samples tab (to-do #9, @Kaoru8 #330):
+        the model, the LoRAs and their strengths, the sampling recipe (sampler, scheduler, its options such as shift),
+        steps, CFG, the negative, size and seeds. Read from what this round really used (mode) and the family's recipe
+        for that path: the preview checkpoint's, the Turbo LoRA's, else the model's own."""
+        s = (desc.preview_checkpoint_sampling if mode.get("model") else
+             speed_desc.settings if mode.get("turbo") and speed_desc is not None else desc.default_sampling())
+        rows = [["Model", mode.get("model") or os.path.basename(str(dit_path))]]
+        rows.append(["This run's LoRA", "1.0" + (" (its EMA weights)" if ema is not None else "")])
+        if context_lora_path:
+            rows.append(["Context LoRA", f"{os.path.basename(context_lora_path)} at {context_lora_strength:g}"])
+        if mode.get("turbo"):
+            rows.append(["Turbo LoRA", f"{mode['turbo']} at {mode.get('strength')}"])
+        if look and preview_lora:
+            rows.append(["Look LoRA", f"{os.path.basename(str(preview_lora))} at {preview_lora_strength:g}"])
+        if s is not None:
+            rows += [["Sampler", s.sampler], ["Scheduler", s.scheduler]]
+            rows += [[str(k).replace("_", " ").capitalize(), str(v)] for k, v in (s.options or ())]
+        rows += [["Steps", str(mode.get("steps"))], ["CFG", f"{float(mode.get('cfg') or 1):g}"]]
+        fo = {k: v for k, v in (family_options or {}).items()
+              if k.startswith("preview_") or "sampler" in k or "slg" in k or k in ("noise", "shift")}
+        for k, v in sorted(fo.items()):        # a family option (H3 Image's sampler=lcm) replaces the recipe's row
+            label = k.replace("_", " ").capitalize()
+            hit = next((r for r in rows if r[0] == label), None)
+            if hit is not None:
+                hit[1] = str(v)
+            else:
+                rows.append([label, str(v)])
+        if float(mode.get("cfg") or 1) > 1:
+            rows.append(["Negative prompt", (sample_negative if sample_negative is not None
+                                             else desc.preview_negative) or "(empty)"])
+        else:
+            rows.append(["Negative prompt", "none (CFG 1 doesn't use one)"])
+        rows += [["Size", f"{sample_width} × {sample_height}"],
+                 ["Seed", f"{sample_seed} for the first prompt, then one more for each prompt after it"]]
+        return rows
+
     def write_mode(mode, epoch=None, look=False, helper=""):
         """What this run's previews render with now, for the gallery (<sample_dir>/.previews_<name>.json): written at
         the start and after each preview round, so a live change of steps, CFG or Turbo strength shows. After a round
@@ -2499,7 +2586,12 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
             rounds[str(epoch)] = {"checkpoint": bool(mode.get("model")), "look": bool(look),
                                   **({"small": f"{sample_width} × {sample_height}"} if small_from else {}),
                                   "turbo": bool(mode.get("turbo")), **({"helper": helper} if helper else {})}
-        mode = {**mode, "family": desc.key, "rounds": rounds}
+        try:
+            settings = preview_settings(mode, look)
+        except Exception:                      # never let the list stop a preview round
+            logger.debug("[sample] preview settings list failed", exc_info=True)
+            settings = None
+        mode = {**mode, "family": desc.key, "rounds": rounds, **({"settings": settings} if settings else {})}
         try:
             os.makedirs(sample_dir, exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
@@ -2837,7 +2929,7 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
         _write_json(os.path.join(share_worker, "ready.json"), {"at": time.time(), "steps_per_epoch": steps_per_epoch})
         idle = time.time()
         while True:
-            jobs = sorted(glob.glob(os.path.join(share_worker, "*.job.json")))
+            jobs = sorted(glob.glob(os.path.join(glob.escape(share_worker), "*.job.json")))
             if os.path.exists(os.path.join(share_worker, "stop")) or (not jobs and time.time() - idle > 1800):
                 return
             if not jobs:
@@ -3130,7 +3222,8 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                      _rate=(None if global_step % 20 else      # the rate now and then (Automagic's averages it)
                             _step_rate())):
                 recorder.add(epoch=_e, step=_i, loss=lv)
-                steplog.add(step_off + _g, _e + 1 + (ftr.epochs_done if ftr is not None else 0), lv, _rate)
+                steplog.add(step_off + _g, _e + 1 + (ftr.epochs_done if ftr is not None else 0), lv, _rate,
+                            automagic4_braked(optimizer) if _rate is not None else None)
                 if per is not None:            # a batch: one record per picture
                     watch.observe_each(_e + 1, _g, _keys, _ts, per, _kept)
                 else:
@@ -3150,7 +3243,9 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
             # the run card's Learning: loss, the step's learning rate (Adaptive LR's, Automagic's) and grad norm
             progress.set_postfix(avr_loss=f"{recorder.moving_average:.4f}",
                                  lr=f"{_step_rate(raw=True):.2e}",
-                                 **({"gn": f"{last_gn[0]:.3f}"} if last_gn[0] is not None else {}), refresh=False)
+                                 **({"gn": f"{last_gn[0]:.3f}"} if last_gn[0] is not None else {}),
+                                 **({"brk": f"{100 * automagic4_braked(optimizer):.0f}"}      # Automagic v4's braked share
+                                    if automagic4_braked(optimizer) is not None else {}), refresh=False)
             progress.update(1)
 
         if pending:                        # a partial group: settle the optimizer before the epoch-end work
@@ -3254,7 +3349,8 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
     while face_phase.get("said"):
         logger.info(face_phase["said"].pop(0))
     steplog.flush()
-    for _old in glob.glob(os.path.join(output_dir, SHARE_DIR, "*")):   # the share's rounds and bundles: done with
+    # the share's rounds and bundles: done with
+    for _old in glob.glob(os.path.join(glob.escape(output_dir), SHARE_DIR, "*")):
         if os.path.basename(_old) != "setup.json":
             try:                         # a file the web UI has open stays (Windows): never the run's final save
                 shutil.rmtree(_old, ignore_errors=True) if os.path.isdir(_old) else os.remove(_old)
@@ -3364,6 +3460,12 @@ def setup_parser():
     p.add_argument("--preview_int8", action="store_true", help="INT8 matmuls on the preview checkpoint")
     p.add_argument("--sample_reference", nargs="+", default=None,
                    help="Edit previews: the photo every preview prompt edits, then any extra pictures it brings in")
+    p.add_argument("--sample_ref_images", nargs="+", default=None,
+                   help="Reference pictures every preview sees (a family's Reference base, preview_keyframes, #376)")
+    p.add_argument("--sample_first_frame", default=None,
+                   help="A picture every clip preview starts on (families with preview_keyframes, #376)")
+    p.add_argument("--sample_last_frame", default=None,
+                   help="A picture every clip preview ends on (families with preview_keyframes, #376)")
     p.add_argument("--sample_image", default=None,
                    help="A picture previews see through the text encoder's vision path (families with preview_image)")
     p.add_argument("--slider_pairs", action="store_true",
@@ -3412,6 +3514,12 @@ def setup_parser():
                         "regularisation set)")
     p.add_argument("--reg_per_epoch", type=int, default=0,
                    help="regularisation images an epoch trains on (a different handful each epoch); 0 = all of them")
+    p.add_argument("--multi_caption", action="store_true",
+                   help="Several captions per picture: recorded in the LoRA's metadata (the dataset config's "
+                        "multi_caption does it)")
+    p.add_argument("--folder_repeats", default=None,
+                   help="JSON {sub-folder: repeats} of Repeats from folder names, for the LoRA's metadata (the "
+                        "repeats themselves are the dataset config's num_repeats)")
     p.add_argument("--batch_size_auto", action="store_true",
                    help="Batch size Auto: the family's measured fastest batch on a 40 GB+ card (description batch_auto)")
     p.add_argument("--gradient_checkpointing", default="auto", choices=("auto", "on"),
@@ -3476,9 +3584,12 @@ def setup_parser():
 
 def main():
     if sys.platform != "win32" and os.environ.get("FIZGIG_NO_EXPANDABLE") != "1":
-        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-        if os.environ.get("FIZGIG_GPU_BACKEND") == "rocm":    # ROCm reads its own name, not the CUDA one (#341)
-            os.environ.setdefault("PYTORCH_HIP_ALLOC_CONF", "expandable_segments:True")
+        from fizgig.utils.rocm_alloc import expandable_ok
+        if os.environ.get("FIZGIG_GPU_BACKEND") != "rocm":
+            os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+        elif expandable_ok():      # AMD: datacenter cards only - consumer Radeons corrupt memory with them (#363)
+            os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+            os.environ.setdefault("PYTORCH_HIP_ALLOC_CONF", "expandable_segments:True")   # ROCm's own name (#341)
     os.environ.setdefault("KMP_BLOCKTIME", "0")
     os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
     logging.basicConfig(level=logging.INFO)
@@ -3516,6 +3627,8 @@ def main():
         sample_negative=a.sample_negative, sample_at_first=a.sample_at_first, sample_seed=a.sample_seed,
         sample_strengths=tuple(float(x) for x in a.sample_strengths.split(",") if x.strip()),
         sample_reference=list(a.sample_reference) if a.sample_reference else None, sample_image=a.sample_image,
+        sample_keyframes={k: v for k, v in (("first", a.sample_first_frame), ("last", a.sample_last_frame)) if v},
+        sample_ref_images=list(a.sample_ref_images) if a.sample_ref_images else None,
         slider_pairs=a.slider_pairs, slider_diff_weight=a.slider_diff_weight, slider_prompts=a.slider_prompts,
         slider_guidance=a.slider_guidance, slider_anchors=a.slider_anchors or (),
         slider_anchor_weight=a.slider_anchor_weight, slider_bank=a.slider_bank, slider_bank_res=a.slider_bank_res,
@@ -3534,7 +3647,7 @@ def main():
         finetune=a.finetune, ft_rotations=a.ft_rotations, ft_save_every_rotations=a.ft_save_every_rotations,
         ft_rotate_every=a.ft_rotate_every, ft_max_parts=a.ft_max_parts, ft_start_window=a.ft_start_window, ft_epochs_done=a.ft_epochs_done,
         ft_fused_backward=a.ft_fused_backward, reg_lr_multiplier=a.reg_lr_multiplier,
-        reg_per_epoch=a.reg_per_epoch,
+        reg_per_epoch=a.reg_per_epoch, folder_repeats=a.folder_repeats, multi_caption=a.multi_caption,
         preview_checkpoint=a.preview_checkpoint, preview_checkpoint_cache=a.preview_checkpoint_cache,
         preview_int8=a.preview_int8,
         family_options=dict(o.split("=", 1) for o in a.family_option if "=" in o),

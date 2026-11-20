@@ -58,7 +58,8 @@ _LIKENESS_EXPLAIN = (
     "these numbers: a late epoch has usually gone past its best.")
 
 
-def _preset(rank, epochs=30, slider=False, mp="0.25", edit=False, likeness=False, optimizer="automagic3", lr=2.8e-4):
+def _preset(rank, epochs=30, slider=False, mp="0.25", edit=False, likeness=False, optimizer="automagic3", lr=2.8e-4,
+            ft=False, rotations="10"):
     """Krea 2's presets (families/krea2.py _preset; Peter, 10 Nov 2026: "mirror the Krea 2 presets exactly"), plus the
     two this model needs: Fizgig's training adapter on (without it people turn into caricatures) and an edit flag for
     the Edit preset. Every preset trains on Automagic v3 (Peter, 11 Nov 2026), which starts at 2.8e-4 and finds its own
@@ -82,6 +83,9 @@ def _preset(rank, epochs=30, slider=False, mp="0.25", edit=False, likeness=False
         # on in Standard only (Peter, 11 Nov 2026), on run six's schedule (12 Nov 2026, LIKENESS_DEFAULTS)
         "MINIMAX_IMAGE_LIKENESS_OPT": "1" if likeness else "",
         **{"MINIMAX_IMAGE_LIKENESS_" + k: v for k, v in LIKENESS_DEFAULTS.items()},
+        # a full fine-tune (Peter, 19 Nov 2026): MiniMax H3's rotation fine-tune, the training adapter on (frozen) as
+        # in every family that has one, Likeness optimization on its LoRA defaults. registry.py puts it on Adafactor
+        "FAMILY_FT": ft, **({"FAMILY_FT_ROTATIONS": rotations} if ft else {}),
     }
 
 
@@ -175,21 +179,24 @@ MINIMAX_IMAGE = FamilyDescription(
     # Measured 10 Nov 2026 on an RTX 5090 (docs/drivers/STILLS.md section 4): rank 8, Muon, EMA 0.98, the training
     # adapter on, 2 epochs on 4 pictures with a 2048x2048 6-step preview after each. The preview sets the peak at every
     # size: int8 trains at 21.0 GB (0.25 MP) / 21.7 (1 MP) and previews at 22.7; NF4 11.3 / 11.9, preview 12.8.
-    # Per swapped block: int8 0.29 GB (1 MP, 10 blocks: 18.7 train / 19.8 preview; the header's 0.387 GB of int8
-    # weights less what stays resident); NF4 0.15 GB (1 MP, 10 blocks: 10.3 train / 11.3 preview). HQQ (a manual
-    # pick, not in Auto) 1 MP: 17.0 train / 17.3 preview; 0.22 GB per block (10 swapped: 14.8 train / 15.2 preview,
-    # RTX PRO 6000, 11 Nov 2026).
-    train_memory={"int8": (((0.25, 22.7), (1.0, 22.7)), 0.29), "nf4": (((0.25, 12.8), (1.0, 12.8)), 0.15),
-                  "hqq": (((0.25, 17.3), (1.0, 17.3)), 0.22)},
+    # Swapped blocks stream through a ring of 2 card slots (swap_ring_slots below), so the first 2 free nothing and
+    # the GB per block is per block past them: the saving at 10 swapped over 8 (20 Nov 2026 - it was over 10, which
+    # over-counted 1-9 swapped by up to 0.58 GB; found by the simulated-GPU checks), rounded down. 1 MP, 10 swapped:
+    # int8 18.7 train / 19.8 preview -> 0.36 GB (the header's 0.387 GB of int8 weights less what stays resident); NF4
+    # 10.3 / 11.3 -> 0.18. HQQ (a manual pick, not in Auto) 1 MP: 17.0 train / 17.3 preview, 10 swapped 14.8 / 15.2
+    # -> 0.26 (RTX PRO 6000, 11 Nov 2026).
+    train_memory={"int8": (((0.25, 22.7), (1.0, 22.7)), 0.36), "nf4": (((0.25, 12.8), (1.0, 12.8)), 0.18),
+                  "hqq": (((0.25, 17.3), (1.0, 17.3)), 0.26)},
+    swap_ring_slots=2,
     # Under 20 GB the 2048 preview's peak above doesn't apply: the decode parks tail blocks until ~3 GB is free
     # (driver.park_for), and the denoise holds at most 1.15 GB over the weights (measured under a 12 GB cap, #354), so
     # training sets the peak. Measured 16 Nov 2026 on an RTX PRO 4500 with that preview treatment (Standard preset:
     # rank 32, Automagic v4, EMA, the training adapter; 12 photos, 2048 previews), less the 1.4 GB adapter_extra_gb
     # counts for that preset: training peaks NF4 11.8 / 12.3 GB (0.25 / 1 MP), HQQ 17.0 / 17.6, int8 21.4 / 22.0, each
-    # point at least the weights + 1.2 GB for the preview's denoise. Per swapped block (1 MP): NF4 0.17 (20 swapped:
-    # 8.9 GB), HQQ 0.245 (20: 12.7), int8 0.338 (34: 10.5).
-    train_memory_small={"int8": (((0.25, 20.5), (1.0, 20.6)), 0.33), "nf4": (((0.25, 10.8), (1.0, 10.9)), 0.17),
-                        "hqq": (((0.25, 15.6), (1.0, 16.2)), 0.24)},
+    # point at least the weights + 1.2 GB for the preview's denoise. Per swapped block past the ring's 2 (1 MP),
+    # rounded down: NF4 20 swapped 8.9 GB -> 0.18, HQQ 20: 12.7 -> 0.27, int8 34: 10.5 -> 0.35.
+    train_memory_small={"int8": (((0.25, 20.5), (1.0, 20.6)), 0.35), "nf4": (((0.25, 10.8), (1.0, 10.9)), 0.18),
+                        "hqq": (((0.25, 15.6), (1.0, 16.2)), 0.27)},
     # Auto keeps the 4-bit base there: int8 never fits under 20 GB unswapped, and int8 with ~37 blocks streamed (what
     # those figures would allow on a 12 GB card) holds ~14 GB more in system RAM than 4-bit with ~15
     auto_precisions_small=("nf4",),
@@ -237,9 +244,12 @@ MINIMAX_IMAGE = FamilyDescription(
     # fullgraph, and the checkpoint outside the compiled region (a break can't sit inside a checkpoint in the graph)
     compile_fullgraph=False,
     compile_boundary="outside",
-    finetune=False,                   # not built for H3-Image yet (Peter, 11 Nov 2026): no Fine-tune kind until it is
-    not_offered={"finetune": "not done for H3-Image yet (Peter, 11 Nov 2026)"},
-    ft_learning_rate=3e-5,            # MiniMax H3's tested fine-tune rate (families/minimax.py); to confirm here
+    # a full fine-tune (Peter, 19 Nov 2026): MiniMax H3's rotation fine-tune as the driver borrows it (component
+    # windows on a 4-bit trunk, int8 ConvRot saves in the file's own layout), the training adapter on
+    finetune=True,
+    # Peter, 19 Nov 2026 (pod test, 53-photo person set, 0.25 MP): 3e-5 kept quality but the face barely moved by
+    # epoch 6; 5e-5 had the face by epoch 4 and a strong, clean likeness at epoch 30
+    ft_learning_rate=5e-5,
 
     sampling=(
         SamplingSettings("MiniMax-H3-Image (distilled)", steps=6, cfg=1.0, sampler="euler", scheduler="simple",
@@ -264,6 +274,13 @@ MINIMAX_IMAGE = FamilyDescription(
     preview_height=2048,
     preview_more_sizes=(3072, 4096),  # 9 and 16 MP for those with the memory (#348); 2048 stays the default
     repair_size=1280,                 # Studio's starting size (Peter, 15 Nov 2026: higher than 1024)
+    # Studio up to the model's own range (Peter, 19 Nov 2026: "supports some enormous sizes"): 4-20 MP, best ~16 MP
+    # (the model card's 3552 x 4736); every side a multiple of 32. Up to 12288 for a very long side against a short
+    # one (Peter, 19 Nov 2026: "all the way to circa 12k ... worst that can happen is an oom")
+    # 2144 / 2176 and 7680 (Peter, 19 Nov 2026): as near as 32-multiples get to 7680 x 2160, a 32:9 ultrawide -
+    # 7680 x 2176 cropped 8 px top and bottom is exactly it
+    studio_more_sizes=(2144, 2176, 2560, 3072, 3552, 3584, 4096, 4480, 4736, 5120, 5632, 6144, 6656, 7168, 7680, 8192,
+                       9216, 10240, 11264, 12288),
     # Likeness optimization (H3 Image's own, in place of the Clean-end share box, Peter 11 Nov 2026): the share of
     # steps at the noise level below sigma 0.5 (0.232, the last of the 6) follows LIKENESS_DEFAULTS' schedule; the
     # rest spread evenly over the 5 above. Off = the model's own even draw, 1 in 6 (~17%).
@@ -321,6 +338,7 @@ MINIMAX_IMAGE = FamilyDescription(
         ("✨ MiniMax H3 Image Style (rank 16)", _preset(16, epochs=64)),
         ("✨ MiniMax H3 Image Edit (rank 8)", _preset(8, epochs=12, edit=True)),
         ("✨ MiniMax H3 Image Slider (rank 8)", _preset(8, epochs=20, slider=True)),
+        ("✨ MiniMax H3 Image Fine-tune (5e-5)", _preset(16, likeness=True, lr=5e-5, ft=True)),
     ),
     start_lr_bands=(("lora", 3e-5, 3e-4), ("slider", 7e-5, 6e-4)),     # Krea 2's, as the presets are its
 )

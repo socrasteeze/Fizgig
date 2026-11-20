@@ -83,6 +83,7 @@ async function boot() {
   S.webPort = pr.web_port;
   S.portNow = pr.port_now;
   S.onPod = pr.on_pod;
+  podFetchInit();                          // on a pod: the Start tab's Download a training folder card
   S.hostName = pr.host_name || "";
   if (S.podLocal && S.podLocal.list.length) podLocalDraw();   // drawn before login: now it can say where it sends to
   S.passwordOn = pr.password_on;
@@ -92,7 +93,8 @@ async function boot() {
   S.pod = pr.pod;
   S.outputDefault = pr.output_default || "";
   S.outputPref = pr.lora_output_dir || "";
-  S.set = pr.settings || {}; S.setAbs = pr.abs || {}; S.sageAttentionOption = !!pr.sageattention_option;
+  S.set = pr.settings || {}; S.setAbs = pr.abs || {}; S.sageAttentionOption = !!pr.sageattention_option; S.rocm = !!pr.rocm;
+  S.studioAutosave = pr.studio_autosave || {};
   S.gpu = {chosen: pr.cuda_device || "", list: pr.gpus || [], envLocked: pr.gpu_env_locked};
   S.all = st.values || {};
   S.imageFolder = st.image_folder || "";
@@ -375,7 +377,7 @@ function renderRow(r) {
   const kind = {check: "check", radio: "radio", note: "note", text: "wide", path: "wide", folder: "wide", shown: "wide",
     cadence: "cadence", split: "cadence"}[r.kind] || "field";
   const wrap = el("div", {class: "form-row kind-" + kind + (r.featured ? " row-featured" : "") +
-    (r.boxed ? " row-boxed" : ""), "data-key": r.key});
+    (r.boxed ? " row-boxed" : "") + (r.full ? " row-full" : "") + (r.child ? " row-child" : ""), "data-key": r.key});
   if (r.kind === "shown") {                       // a value from elsewhere (the Start tab's folder), read-only here
     const shownRow = el("div", {class: "field-row"}, el("span", {class: "field-label", text: r.label + ":"}),
       el("input", {type: "text", class: "w-path", id: "note_" + r.key, readonly: true, tabindex: -1}));
@@ -482,7 +484,8 @@ function renderRow(r) {
     if (actMsg) wrap.append(actMsg);
     if (upStatus) wrap.append(upStatus);
   }
-  wrap.append(el("div", {class: "field-hint row-note", id: "note_" + r.key}));
+  wrap.append(el("div", {class: "field-hint row-note" + (r.note_table ? " note-table" : "") +
+    (r.note_info ? " note-info" : ""), id: "note_" + r.key}));
   const link = r.link ? el("a", {class: "inline-link", target: "_blank", rel: "noopener", href: r.link.href,
     text: r.link.text + " →"}) : null;      // a row's guide on GitHub, under its hint
   if (r.hint && r.hint_labels) {                  // one spaced line per choice, "Name: what it does" with the name bold
@@ -981,7 +984,17 @@ async function refreshState() {
     }
     if (n) {
       if (n.tagName === "INPUT") { n.value = S.state.notes[k] || ""; return; }
-      if (n.classList.contains("note-lines")) {    // one line each, "Label: text" with the label bold (Subjects card)
+      if (n.classList.contains("note-table")) {   // "| a | b |" lines are a table's rows, other lines plain text
+        const lines = String(S.state.notes[k] || "").split("\n").filter(Boolean);
+        const rows = lines.filter((l) => l.startsWith("|"));
+        const cells = (l) => l.replace(/^\|\s*|\s*\|$/g, "").split(/\s*\|\s*/);
+        const table = rows.length ? el("table", {class: "note-grid"}, ...rows.map((l, i) => el("tr",
+          {class: l.startsWith("|!") ? "note-grid-flag" : ""}, ...cells(l.replace(/^\|!/, "|")).map((c) =>
+            el(i ? "td" : "th", {text: c}))))) : null;
+        n.replaceChildren(...lines.filter((l) => !l.startsWith("|")).slice(0, 1).map((l) => el("div", {text: l})),
+          ...(table ? [table] : []),
+          ...lines.filter((l) => !l.startsWith("|")).slice(1).map((l) => el("div", {text: l})));
+      } else if (n.classList.contains("note-lines")) {    // one line each, "Label: text" with the label bold (Subjects card)
         n.replaceChildren(...String(S.state.notes[k] || "").split("\n").filter(Boolean).map((line) => {
           const at = line.indexOf(": ");
           return at > 0 ? el("div", {}, el("b", {text: line.slice(0, at) + ": "}), line.slice(at + 2))
@@ -1170,7 +1183,8 @@ function renderPrefs() {
         if (e.target.dataset.sure !== "1") { e.target.dataset.sure = "1"; e.target.textContent = "Reset? Click again"; return; }
         await api("/api/prefs", {reset: true});
         const pr = await api("/api/prefs");
-        S.set = pr.settings || {}; S.setAbs = pr.abs || {}; S.sageAttentionOption = !!pr.sageattention_option;
+        S.set = pr.settings || {}; S.setAbs = pr.abs || {}; S.sageAttentionOption = !!pr.sageattention_option; S.rocm = !!pr.rocm;
+        S.studioAutosave = pr.studio_autosave || {};
         S.outputPref = pr.lora_output_dir || ""; S.outputDefault = pr.output_default;
         renderPrefs();
       }})),
@@ -1281,6 +1295,7 @@ function foldersCard() {
     el("div", {class: "card-content"},
       settingRow("profiles_dir", "Profiles:", "Where the Profiler's reports go (Studio finds a LoRA's profile there).", "profiles inside Fizgig"),
       settingRow("cache_dir", "Cache:", "Cached latents and text encodings: each training folder gets its own folder in here.", "cache inside Fizgig"),
+      settingRow("studio_outputs_dir", "Studio outputs:", "Where Studio's Save buttons (and Save every render) put renders: pictures in images, clips in videos, songs in songs.", "Studio_Outputs inside Fizgig"),
       settingRow("input_lora_dir", "LoRA loading:", "Where the pickers for LoRAs start: Studio, Royale, Profiler, Extract, Context LoRA."),
       settingRow("input_ref_dir", "Reference images:", "Where the pickers for reference pictures start: Studio and Royale.")));
 }
@@ -1297,7 +1312,7 @@ function inferenceCard() {
   swap.addEventListener("change", () => api("/api/prefs", {changes: {inference_blocks_to_swap: swap.value}})
     .then(() => { S.set.inference_blocks_to_swap = swap.value; }));
   const int8 = el("input", {type: "checkbox"});
-  int8.checked = String(S.set.inference_int8 ?? "1") !== "0";
+  int8.checked = String(S.set.inference_int8 ?? (S.rocm ? "0" : "1")) !== "0";
   int8.addEventListener("change", () => api("/api/prefs", {changes: {inference_int8: int8.checked}})
     .then(() => { S.set.inference_int8 = int8.checked ? "1" : "0"; }));
   const sage = el("input", {type: "checkbox"});
@@ -1318,9 +1333,12 @@ function inferenceCard() {
       "between steps to save memory, at some speed. Training manages its own and ignores these."}),
     el("div", {class: "card-content"},
       el("div", {class: "field-row"}, el("span", {class: "field-label", text: "DiT block swap:"}), swap),
-      el("label", {class: "checkbox-label"}, int8, " INT8 fast inference (recommended)"),
-      el("div", {class: "field-hint", text: "On by default: same memory as fp8, near-identical pictures, previews only. " +
-        "Turn it off to use fp8."}), ...sageControls));
+      el("label", {class: "checkbox-label"}, int8, S.rocm ? " INT8 fast inference" : " INT8 fast inference (recommended)"),
+      el("div", {class: "field-hint", text: S.rocm
+        ? "Off by default on AMD cards: there the model's stored fp8 file renders faster and uses far less memory " +
+          "(Krea 2 at 2048 x 2048 on an RX 9070 XT: about twice as fast, a quarter of the RAM). Previews only."
+        : "On by default: same memory as fp8, near-identical pictures, previews only. Turn it off to use fp8."}),
+      ...sageControls));
 }
 
 // where the LoRA and reference pickers start (Preferences > Other folders, else what they used before)
@@ -1899,6 +1917,7 @@ async function start(path, body) {
     r = await startAnyway(path, sent, r);
     if (r.fetching) { S.fetchStart = true; watchFetch(); return; }    // the model isn't here yet: it downloads first
     showProblems(r.problems || (r.error ? [r.error] : []));    // stays up: the run line below refreshes itself
+    if (r.queued && r.note) $("runStatus").textContent = r.note;   // waits for Studio's render, first in the queue
     // the form went to a run that started: it isn't the queued run being edited any more (Save to queue would have
     // put this run's settings in its place)
     if (r.ok && S.viewJob && !S.editQueue) viewJob(null);   // a run started: the gallery follows it
@@ -1949,6 +1968,7 @@ async function resumeClick() {
       const sent = {...body, samples};
       const x = await startAnyway("/api/resume", sent, await api("/api/resume", sent));
       showProblems(x.problems || (x.error ? [x.error] : []));
+      if (x.queued && x.note) $("runStatus").textContent = x.note;     // waits for a Studio render, then resumes
     }
     catch (e) { showProblems([e.message]); }
     pollRun();
@@ -2014,7 +2034,7 @@ async function pollRun() {
   $("runCardBadge").dataset.state = r.state;
   showProgress(r.progress, r.state, r.lora, r.stage);
   const moveBusy = !!(r.move && ["moving", "back", "moved"].includes(r.move.state));
-  $("btnStart").disabled = live || moveBusy || !!S.starting || ctxKind() === "run";
+  $("btnStart").disabled = live || moveBusy || !!S.starting || ["run", "capjob"].includes(ctxKind());
   startResumeNote(live);
   $("btnPause").disabled = !r.running;
   // a model that can't pause (a RefMod is made in one go): no Pause button for its runs
@@ -2320,13 +2340,17 @@ function renderWebQueue(q) {
   host.innerHTML = "";
   items.forEach((it, i) => host.append(el("div", {class: "checkpoint-row queue-row"},
     el("span", {class: "checkpoint-name", text: `${i + 1}. ${it.lora}`}),
-    el("span", {class: "field-hint", text: `${famName(it.family)} · ${it.image_folder} · queued ${it.queued_at}` +
+    el("span", {class: "field-hint", text: it.kind === "captions" ? `AI captions · ${it.image_folder} · queued ${it.queued_at}` :
+      `${famName(it.family)} · ${it.image_folder} · queued ${it.queued_at}` +
       (it.continues ? " · continues from its last save" : "")}),
     el("span", {class: "queue-actions"},
       el("button", {class: "btn btn-sm", text: "↑", title: "Earlier", disabled: i === 0,
         onclick: () => api("/api/queue/move", {id: it.id, delta: -1}).then(pollRun)}),
       el("button", {class: "btn btn-sm", text: "↓", title: "Later", disabled: i === items.length - 1,
         onclick: () => api("/api/queue/move", {id: it.id, delta: 1}).then(pollRun)}),
+      it.kind === "captions" ? el("button", {class: "btn btn-sm", text: "Edit",
+        title: "Show its settings on the Captions tab; Save to queue there keeps a change, in its place",
+        onclick: () => ctxSwitch({kind: "capjob", id: it.id}).then(() => showTab("captions"))}) :
       el("button", {class: "btn btn-sm", text: "Edit",
         title: "Load its settings into the form on the Training tab; Save to queue puts them back in its place",
         onclick: async () => {
@@ -2450,8 +2474,11 @@ function runSummary() {
   if (String(v.OPTIMIZER_TYPE || "").toLowerCase() === "automagic4") lrCell.title = "Automagic v4 sets its own " +
     "rate and slows each weight's step by how sensitive that weight is. This is its working rate: its rate times " +
     "that slowdown on average, so the weights' real movement. The epoch lines in the log give both parts.";
+  const brakedCell = p.braked ? cell("Weights braked", p.braked + "%") : null;   // Automagic v4 only
+  if (brakedCell) brakedCell.title = "The share of weights Automagic v4 is slowing right now because they are more " +
+    "sensitive than its reference. The epoch lines in the log give each group's reference.";
   const learning = sec("Learning", [
-    lrCell, cell("Grad norm", p.grad_norm), cell("Loss", p.loss),
+    lrCell, brakedCell, cell("Grad norm", p.grad_norm), cell("Loss", p.loss),
     lk ? cell("Likeness", `${Math.round(lk.now * 100)}% (epoch ${lk.epoch})` +
       (lk.bestEpoch !== lk.epoch ? ` · best ${Math.round(lk.best * 100)}% at ${lk.bestEpoch}` : "")) : null,
   ]);
@@ -2739,11 +2766,15 @@ const ctxIsLiveRun = () => training() && ((ctxKind() === "run" && !(S.ctx || {})
 function ctxLock() {
   // paused: nothing is locked. What a Resume takes from the form (the previews, the size, block swap, the save
   // schedule, the learning rate) is changed here, on the paused run's own settings
-  const on = ctxKind() === "run" && training();
+  // a queued caption job on show: nothing to train (its folder is on the Start tab), so the same parts are looked at
+  const capjob = ctxKind() === "capjob";
+  const on = (ctxKind() === "run" && training()) || capjob;
   const parts = [$("trainingForm"), $("datasetsCard"), $("imageFolder").closest(".section-card"),
     ...document.querySelectorAll(".preset-row"), ...[...document.querySelectorAll(".family-pick")].map((x) => x.parentElement)];
   for (const p of parts) if (p) p.inert = on;
   for (const id of ["btnQueue", "btnCheck"]) $(id).disabled = on;
+  if (capjob) $("btnStart").disabled = true;
+  capJobButtons();
   document.body.classList.toggle("ctx-view", ctxKind() !== "draft");
 }
 
@@ -2765,10 +2796,26 @@ async function ctxSwitch(to) {
     const from = ctxKind();
     if (from === "draft" && to.kind !== "draft") {
       if (S.saveWaiting) { S.saveWaiting = false; saveState(); }        // your setup as it is now, kept
-      S.draft = {family: S.family, values: {...S.values}, image_folder: S.imageFolder, all: {...S.all}};
+      // ...and your Captions tab as it is now (a queued caption job puts its own settings there)
+      S.draft = {family: S.family, values: {...S.values}, image_folder: S.imageFolder, all: {...S.all},
+        cap: capSettings(), addLine: $("capAddLine").checked};
+      api("/api/state", {captions: S.draft.cap}).catch(() => {});
     }
+    const mine = S.draft ? {cap: S.draft.cap, addLine: S.draft.addLine} : null;
     if (from === "queue") queueEditing(null);                            // an edit not saved is left as it was
-    if (to.kind === "run" && jobAlive()) {
+    if (to.kind === "capjob") {                    // a queued caption job: its folder and Captions tab settings
+      const items = (S.run.web_queue && S.run.web_queue.items) || [], n = items.findIndex((i) => i.id === to.id) + 1;
+      const item = await api("/api/queue/item?id=" + encodeURIComponent(to.id));
+      if (from !== "draft" && from !== "capjob" && S.draft) {   // from a run on show: your own setup in the form again
+        S.ctx = {kind: "loading"};
+        S.all = S.draft.all;
+        await ctxLoad(S.draft, true);
+        S.all[S.family] = S.values;
+      }
+      S.ctx = {kind: "capjob", id: to.id, n, lora: (items[n - 1] || {}).lora || item.lora || ""};
+      await capJobShow(item);
+      S.viewJob = null;
+    } else if (to.kind === "run" && jobAlive()) {
       S.ctx = {kind: "run", key: runKey(S.run), lora: S.run.lora};
       await ctxLoad({family: S.run.family, values: S.run.values, image_folder: S.run.image_folder});
       S.values.__SAMPLE_LIVE = true;                 // a change on its Samples tab goes to its next previews
@@ -2795,10 +2842,12 @@ async function ctxSwitch(to) {
       }
       S.viewJob = null;
     }
+    if (from === "capjob" && ctxKind() !== "capjob") await capMineBack(mine);   // your own Captions tab settings back
     S.galleryRun = ""; S.gal = null;
   } catch (e) {
     $("runStatus").textContent = e.message;
     if (ctxKind() !== "draft" && !S.draft) S.ctx = {kind: "draft"};
+    if (S.capViewing && ctxKind() !== "capjob") await capMineBack(mine).catch(() => {});
   } finally {
     S.ctxBusy = false;
   }
@@ -2826,6 +2875,11 @@ function ctxTick() {
     const items = (S.run.web_queue && S.run.web_queue.items) || [], at = items.findIndex((i) => i.id === c.id);
     if (at >= 0) c.n = at + 1;
     else if (liveKey && S.run.lora === c.lora) ctxSwitch({kind: "run"});      // its turn came: it is the run now
+    else ctxSwitch({kind: "draft"});
+  } else if (c.kind === "capjob") {
+    // its turn came (or it was removed): your own setup again; the Captions tab shows its progress as it captions
+    const items = (S.run.web_queue && S.run.web_queue.items) || [], at = items.findIndex((i) => i.id === c.id);
+    if (at >= 0) c.n = at + 1;
     else ctxSwitch({kind: "draft"});
   } else if (c.kind === "draft") {
     // your setup was the run training: when that run ends, the pill says so, as for any job on show
@@ -2861,7 +2915,7 @@ function jobPillShow() {
   const same = ctxSetupIsRun(), doing = paused() ? "paused" : "training";
   const [name, state] = c.ended ? [c.lora, "finished"] :
     c.kind === "run" ? [c.lora, doing] :
-    c.kind === "queue" ? [c.lora, `queued ${c.n || ""}`.trim()] :
+    c.kind === "queue" || c.kind === "capjob" ? [c.lora, `queued ${c.n || ""}`.trim()] :
     same ? [S.run.lora, doing] :
     // not a job yet: beside it, what is going on - the run training (or paused), then how many wait behind it
     ["not yet queued", [live ? `${paused() ? "Paused" : "Training"}: ${S.run.lora}` : "",
@@ -2871,6 +2925,7 @@ function jobPillShow() {
     el("span", {class: "job-pill-state", text: " · " + state})), el("span", {class: "job-pill-caret", text: "▾"}));
   $("jobPillText").title = c.ended
     ? `${c.lora} is finished` + (c.next ? `, and ${c.next} is training. Press to switch.` : ".")
+    : c.kind === "capjob" ? "The queued caption job these tabs show: its settings are on the Captions tab. Press to switch."
     : (c.kind === "draft" && !same ? "These tabs show a run that is not yet queued or started. Press to look at a job instead."
     : "The job these tabs show. Press to switch to another, or back to the normal view.") +
       (window.innerWidth > 900 ? " Drag it to move it; double-click puts it back." : "");
@@ -2882,13 +2937,19 @@ function jobPillShow() {
       : `Showing the run training now: ${c.lora}. Its training settings can be looked at, not changed; a change on ` +
         "the Samples tab goes to its next previews.") :
     c.kind === "queue" ? `Showing queued run ${c.n}: ${c.lora}. Changes are kept with Save to queue.` : "";
+  // a queued caption job: its settings are on the Captions tab; the other tabs show its folder, nothing to change
+  const capSay = (t) => t === "captions"
+    ? `Showing queued caption job ${c.n}: ${c.lora}. Change its settings here; Save to queue keeps them, in its place.`
+    : `Showing queued caption job ${c.n}: its folder, ${baseName(S.imageFolder)}. A caption job has no training ` +
+      "settings: its own are on the Captions tab. The pill switches back.";
   for (const t of CTX_TABS) {
     const panel = $("tab-" + t);
     if (!panel) continue;
     let line = panel.querySelector(":scope > .ctx-line");
     if (!line) { line = el("div", {class: "ctx-line"}); panel.prepend(line); }
-    line.textContent = say;
-    line.style.display = say ? "" : "none";
+    const text = c.kind === "capjob" ? capSay(t) : say;
+    line.textContent = text;
+    line.style.display = text ? "" : "none";
   }
   if (!$("jobPillMenu").hidden) jobPillMenu(true);         // open: its rows follow what changed
 }
@@ -2909,8 +2970,10 @@ function jobPillMenu(open) {
   // the run training now: your own setup when that is what is training (it stays changeable for the next run)
   else if (live) rows.push(row(paused() ? "Paused" : "Training now", S.run.lora, c.kind === "run" || (c.kind === "draft" && same),
     () => ctxSwitch(same ? {kind: "draft"} : {kind: "run"})));
-  items.forEach((it, i) => rows.push(row(`Queued ${i + 1}`, it.lora, c.kind === "queue" && c.id === it.id,
-    () => ctxSwitch({kind: "queue", id: it.id}))));
+  // a caption job opens on the Captions tab, where its settings are
+  items.forEach((it, i) => rows.push(row(`Queued ${i + 1}`, it.lora, ["queue", "capjob"].includes(c.kind) && c.id === it.id,
+    it.kind === "captions" ? () => ctxSwitch({kind: "capjob", id: it.id}).then(() => showTab("captions"))
+      : () => ctxSwitch({kind: "queue", id: it.id}))));
   // a run is training: another like it, without going back to Start for the folder
   if (live && activeTab() === "training") rows.push(row("Set up a new run with these settings", "", false, ctxNewLike));
   // Back to the normal view: out of the job, to a clean start (the Start tab, no training folder, the model's
@@ -3307,18 +3370,22 @@ function rvDraw(g, im, fr, W, H) {
   const sc = Math.min(W / im.naturalWidth, H / im.naturalHeight), dw = im.naturalWidth * sc, dh = im.naturalHeight * sc;
   g.fillStyle = "#fff"; g.fillRect((W - dw) / 2, (H - dh) / 2, dw, dh);    // a transparent sample on white
   g.drawImage(im, (W - dw) / 2, (H - dh) / 2, dw, dh);
+  let tickerEnd = 0;                             // where the epoch ticker's box ends, across the bottom
   if ($("rvTicker").checked) {
     const label = "Epoch " + fr.epoch;
     g.font = "bold 26px sans-serif";
     const tw = g.measureText(label).width;
     g.fillStyle = "rgba(0,0,0,0.65)"; g.fillRect(16, H - 56, tw + 24, 40);
     g.fillStyle = "#fff"; g.fillText(label, 28, H - 28);
+    tickerEnd = 16 + tw + 24;
   }
-  if ($("rvTag").checked) {                      // scaled with the frame, so it reads at full size too
-    const fs = Math.max(28, Math.round(H * 0.055));
+  if ($("rvTag").checked) {                      // scaled with the frame (its shorter side), so it reads at full size too
+    const fs = Math.max(28, Math.round(Math.min(W, H) * 0.055));
     g.font = `bold ${fs}px sans-serif`;
-    const tw = g.measureText("Fizgig").width;
-    g.fillStyle = "rgba(255,255,255,0.7)"; g.fillText("Fizgig", W - tw - 20, H - 20);
+    const tw = g.measureText("Fizgig").width, x = W - tw - 20;
+    // no room beside the ticker (a portrait or small frame, #374): the tag goes to the top-right corner instead
+    const y = tickerEnd && x < tickerEnd + 16 ? 20 + fs : H - 20;
+    g.fillStyle = "rgba(255,255,255,0.7)"; g.fillText("Fizgig", x, y);
   }
 }
 const rvLoad = (fr) => new Promise((res) => { const im = new Image(); im.onload = () => res({fr, im}); im.onerror = () => res(null); im.src = rvSrc(fr.path); });
@@ -3373,10 +3440,12 @@ async function loadCheckpoints() {
   const out = S.run.output_dir || S.values.LORA_OUTPUT_DIR;
   const host = $("checkpoints");
   if (!out) { host.innerHTML = ""; return; }
-  const r = await api("/api/checkpoints?dir=" + encodeURIComponent(out)).catch(() => ({items: []}));
+  const run = currentRunName();
+  // only this run's files unless all are asked for: a folder of thousands of LoRAs took minutes to list
+  const r = await api(`/api/checkpoints?dir=${encodeURIComponent(out)}` + (S.ckptAll || !run ? "" :
+    `&run=${encodeURIComponent(run)}`)).catch(() => ({items: []}));
   host.innerHTML = "";
   const size = (b) => b >= 2 ** 30 ? (b / 2 ** 30).toFixed(1) + " GB" : (b / 2 ** 20).toFixed(0) + " MB";
-  const run = currentRunName();
   const mine = r.items.filter((it) => it.run === run);
   const shown = S.ckptAll ? r.items : mine;
   for (const it of shown) {
@@ -3388,7 +3457,7 @@ async function loadCheckpoints() {
       it.kind === "finetune" ? null : studioButton(it.path, S.fam && S.fam.key),
       el("a", {class: "btn btn-sm btn-primary", href, download: it.name, text: "Download"})));
   }
-  const others = r.items.length - mine.length;
+  const others = S.ckptAll ? r.items.length - mine.length : (r.others || 0);   // filtered by run: the server counts the rest
   $("checkpointsInfo").replaceChildren(
     document.createTextNode(S.ckptAll ? `All ${r.items.length} saved in ${out}, newest first. ` :
       mine.length ? `${mine.length} saved by ${run} in ${out}, newest first. ` :
@@ -3411,6 +3480,19 @@ function previewMode(m) {
       "LoRA strength to 0 above (Steps and CFG go back with it); tick Change the previews of the run going now " +
       "for it to apply from this run's next preview."
     : `Previews render on ${m.model || "the model being trained"}: ${how}, no Turbo LoRA.`;
+  // every setting the previews use, a row each (to-do #9, #330): what to set elsewhere (ComfyUI) to match them
+  if (m.settings && m.settings.length) {
+    const rows = el("table", {class: "data-table preview-settings"},
+      ...m.settings.map(([k, v]) => el("tr", {}, el("td", {text: k}), el("td", {text: v}))));
+    const copy = el("button", {class: "btn btn-sm", text: "Copy", title: "Copy these settings as text",
+      onclick: () => navigator.clipboard.writeText(m.settings.map(([k, v]) => `${k}: ${v}`).join("\n"))
+        .then(() => { copy.textContent = "Copied"; setTimeout(() => { copy.textContent = "Copy"; }, 1500); })});
+    const det = el("details", {class: "preview-settings-box"},
+      el("summary", {text: "Every setting these previews use"}), rows, copy);
+    det.open = !!S._previewSettingsOpen;
+    det.addEventListener("toggle", () => { S._previewSettingsOpen = det.open; });
+    box.append(det);
+  }
   box.style.display = "";
 }
 
@@ -3576,8 +3658,9 @@ async function loadRuns() {
         if (x.problems) { alertRow.textContent = x.problems.join(" "); return; }
         contBox.style.display = "none";
         if (x.form) await loadIntoForm(x.form);   // the tab shows the run going on, not the settings before it
-        alertRow.textContent = x.queued ? "A run is training now: this one is on the queue, and continues when its " +
-          "turn comes." : `Continuing ${run.lora || "the run"}: it's on the Training tab.`;
+        alertRow.textContent = x.queued ? (x.note ? x.note + " It continues then, by itself." :
+          "A run is training now: this one is on the queue, and continues when its turn comes.") :
+          `Continuing ${run.lora || "the run"}: it's on the Training tab.`;
         pollRun();
         if (!x.queued) {                    // to the run card itself, as the sidebar's run opens it
           showTab("training");
@@ -3620,8 +3703,34 @@ async function loadRuns() {
       delBox.style.display = "";
       delBox.textContent = "Checking…";
       try {
-        const w = await api("/api/runs/delete", {id: run.id});
+        const [w, k, ka] = await Promise.all([api("/api/runs/delete", {id: run.id}),
+          api("/api/runs/delete", {id: run.id, keep: true}).catch(() => null),
+          api("/api/runs/delete", {id: run.id, keep: "all"}).catch(() => null)]);
         const gb = (b) => b >= 2 ** 30 ? (b / 2 ** 30).toFixed(1) + " GB" : (b / 2 ** 20).toFixed(0) + " MB";
+        // the middle button: Delete, keep the newest 5 epochs - Delete, except the newest 5 epochs (all of them when
+        // fewer are left) stay on disk: the run goes off the list, its kept LoRA files and their previews don't
+        const n = (k && k.keep) || 5;
+        const plural = (x, w) => `${x} ${w}${x > 1 ? "s" : ""}`;
+        const goes = !k ? [] : [k.checkpoints && plural(k.checkpoints, "older checkpoint"),
+          k.states && plural(k.states, "saved state"), k.previews && plural(k.previews, "older preview")].filter(Boolean);
+        const keepBtn = el("button", {class: "btn btn-sm", text: `Delete, keep the newest ${n} epochs`, disabled: !k,
+          title: !k ? "" : "Deletes the run from this list" + (goes.length ? `, and ${goes.join(", ")} ` +
+            `(${gb(k.bytes)})` : "") + ". Keeps on disk " + (k.kept ? `its newest ${plural(k.kept, "epoch")}` +
+            (k.epochs < n ? " (all it has)" : "") + "' LoRA files, " : "") + "the finished LoRA, any Save now " +
+            "checkpoints and their previews. Your training folder isn't touched.",
+          onclick: async () => {
+            try { await api("/api/runs/delete", {id: run.id, keep: true, confirm: true}); loadRuns(); loadOutputs(); }
+            catch (e) { delBox.replaceChildren(el("div", {class: "problems", text: e.message})); }
+          }});
+        // Delete, keep all epochs: the run goes off the list, every epoch's LoRA file (and its previews) stays
+        const allBtn = el("button", {class: "btn btn-sm", text: "Delete, keep all epochs", disabled: !ka,
+          title: !ka ? "" : "Deletes the run from this list" + (ka.states ? `, and ${plural(ka.states, "saved state")} ` +
+            `(${gb(ka.bytes)})` : "") + ". Keeps on disk every epoch's LoRA file" + (ka.epochs ? ` (${ka.epochs})` : "") +
+            ", the finished LoRA, any Save now checkpoints and the previews. Your training folder isn't touched.",
+          onclick: async () => {
+            try { await api("/api/runs/delete", {id: run.id, keep: "all", confirm: true}); loadRuns(); loadOutputs(); }
+            catch (e) { delBox.replaceChildren(el("div", {class: "problems", text: e.message})); }
+          }});
         const parts = [w.checkpoints && `${w.checkpoints} checkpoint${w.checkpoints > 1 ? "s" : ""}`,
           w.states && `${w.states} saved state${w.states > 1 ? "s" : ""} (for resuming)`,
           w.previews && `${w.previews} preview${w.previews > 1 ? "s" : ""}`].filter(Boolean);
@@ -3635,6 +3744,7 @@ async function loadRuns() {
               try { await api("/api/runs/delete", {id: run.id, confirm: true}); loadRuns(); loadOutputs(); }
               catch (e) { delBox.replaceChildren(el("div", {class: "problems", text: e.message})); }
             }}),
+            keepBtn, allBtn,
             el("button", {class: "btn btn-sm", text: "Cancel", onclick: () => { delBox.style.display = "none"; }})));
       } catch (e) { delBox.replaceChildren(el("div", {class: "problems", text: e.message})); }
     }});
@@ -4298,7 +4408,15 @@ function ryShowTool(key) {
 
 function rySource() { return (document.querySelector('input[name="rySource"]:checked') || {}).value || "folder"; }
 function rySourceChanged() {
-  $("tab-royale").classList.toggle("single", rySource() === "single"); ryRemember();
+  const single = rySource() === "single";
+  $("tab-royale").classList.toggle("single", single); ryRemember();
+  // Epochs stays in the row so it can be found: greyed with a Single LoRA, saying what it needs (a class, not
+  // disabled - a disabled button shows no hover text)
+  const ep = document.querySelector('#ryTabs .ry-tab[data-ry="epochs"]');
+  ep.classList.toggle("ry-tab-off", single);
+  ep.setAttribute("aria-disabled", single ? "true" : "false");
+  ep.title = single ? "Epochs compares a training run's epochs: choose Training folder (compare epochs) as the " +
+    "Source above." : "Every epoch of the run on one seed, crossfaded";
   ryShowTool(S.ry.tool || rySaved().tool || "epochs");
 }
 
@@ -4439,7 +4557,9 @@ async function ryScSave(sc, fmt) {
 
 async function wireRoyaleTravel() {
   document.querySelectorAll('input[name="rySource"]').forEach((r) => r.addEventListener("change", rySourceChanged));
-  document.querySelectorAll("#ryTabs .ry-tab").forEach((b) => b.addEventListener("click", () => ryShowTool(b.dataset.ry)));
+  document.querySelectorAll("#ryTabs .ry-tab").forEach((b) => b.addEventListener("click", () => {
+    if (!b.classList.contains("ry-tab-off")) ryShowTool(b.dataset.ry);       // greyed Epochs: its hover text says why
+  }));
   const setSingle = (p) => { $("rySingle").value = p; ryRemember(); };
   const up = uploadButton({kind: "path", key: "ROYALE_SINGLE"}, $("rySingle"), setSingle);
   $("rySingleBtns").replaceChildren(el("button", {class: "btn", text: "Choose…", onclick: () => pick($("rySingle").value || loraStart(), false, setSingle)}),
@@ -4522,7 +4642,7 @@ async function royaleRender() {
     const r = await api("/api/royale/render", {family: $("ryFamily").value, folder: $("ryFolder").value.trim(),
       prompt: $("ryPrompt").value.trim(), seed: seedOf("rySeed"), ref: $("ryRef").value.trim(),
       ref_strength: refStrength($("ryRefStr").value), width: Number($("ryW").value), height: Number($("ryH").value),
-      max: $("ryMax").value});
+      max: $("ryMax").value, from: $("ryFrom").value.trim(), to: $("ryTo").value.trim()});
     if (r.family !== $("ryFamily").value) {         // the checkpoints are another model's: follow them (as the desktop)
       await royaleFamily(r.family);
       $("ryStatus").textContent = `Switched to ${$("ryFamily").selectedOptions[0].text} to match the checkpoints.`;
@@ -4750,7 +4870,10 @@ async function profilerPoll() {
   const res = st.result;
   $("pfStatus").textContent = running ? st.text : st.state === "done" ? "Done." : st.state === "stopped" ? "Stopped." :
     st.state === "failed" ? "Error - see below." : "";
-  $("pfLog").textContent = [...st.log.filter((l) => !/^INFO:/.test(l)), ...(res ? ["", ...res.lines] : []), ...(st.state === "failed" ? ["", st.error] : [])].join("\n");
+  const log = $("pfLog");
+  const atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
+  log.textContent = [...st.log.filter((l) => !/^INFO:/.test(l)), ...(res ? ["", ...res.lines] : []), ...(st.state === "failed" ? ["", st.error] : [])].join("\n");
+  if (atEnd) log.scrollTop = log.scrollHeight;
   if (res && res.report) {
     $("pfReport").href = `/api/profile/report?path=${encodeURIComponent(res.report)}&t=${encodeURIComponent(TOKEN)}`;
     $("pfReport").style.display = "";
@@ -5326,6 +5449,9 @@ async function runLossTick(training) {
 // a form value as the tab shows it: the row's default while it's never been set
 function valueOrDefault(key) {
   if (S.values[key] !== undefined) return S.values[key];
+  return rowDefault(key);
+}
+function rowDefault(key) {
   for (const s of S.fam.form.sections) for (const r of s.rows) if (r && r.key === key) return r.default;
   return undefined;
 }
@@ -5339,12 +5465,22 @@ const sampleLiveSoon = debounce(async () => {
     if (!ctxIsLiveRun()) return;
     // form: the Samples values as they now are, kept with the run so every page (and a later look at it) shows them
     const keep = ["SAMPLE_PROMPT", "SAMPLE_SEED", "SAMPLE_WIDTH", "SAMPLE_HEIGHT", "SAMPLE_STEPS", "SAMPLE_CFG_SCALE",
-      "FAMILY_TURBO_STRENGTH", "FAMILY_TURBO_ON", "SAMPLE_EVERY_N_EPOCHS", "SAMPLE_LATER", "SAMPLE_UNTIL_EPOCH",
-      "SAMPLE_EVERY_AFTER", "FAMILY_PREVIEW_LOOK", "SAMPLE_CHECKPOINT", "__SAMPLE_LIVE"];
+      "FAMILY_TURBO_STRENGTH", "FAMILY_TURBO_ON", "FAMILY_TURBO_STEPS", "FAMILY_TURBO_PACE", "SAMPLE_EVERY_N_EPOCHS",
+      "SAMPLE_LATER", "SAMPLE_UNTIL_EPOCH", "SAMPLE_EVERY_AFTER", "FAMILY_PREVIEW_LOOK", "SAMPLE_CHECKPOINT",
+      "__SAMPLE_LIVE"];
+    let steps = v.SAMPLE_STEPS, turbo = v.FAMILY_TURBO_ON === false ? "0" : v.FAMILY_TURBO_STRENGTH;
+    const pace = valueOrDefault("FAMILY_TURBO_PACE");
+    if (pace !== undefined) {
+      // H3's row: Turbo preview steps at Turbo strength (%), as Start launches it; the Steps box is the count without
+      // the Turbo. Sending the Steps box ran the Turbo previews at 20 steps (artefacts) whatever the Turbo box said
+      const p = String(pace).trim() === "" ? Number(rowDefault("FAMILY_TURBO_PACE")) : Number(pace);
+      turbo = String((Number.isFinite(p) ? p : 0) / 100);
+      if (p > 0) steps = String(valueOrDefault("FAMILY_TURBO_STEPS") ?? "").trim() || rowDefault("FAMILY_TURBO_STEPS");
+    }
     const r = await api("/api/run/sample_override", {form: Object.fromEntries(keep.filter((k) => k in v).map((k) => [k, v[k]])),
       on: !!v.__SAMPLE_LIVE, prompts: v.SAMPLE_PROMPT || "",
-      seed: v.SAMPLE_SEED, width: v.SAMPLE_WIDTH, height: v.SAMPLE_HEIGHT, steps: v.SAMPLE_STEPS,
-      cfg: v.SAMPLE_CFG_SCALE, turbo: v.FAMILY_TURBO_ON === false ? "0" : v.FAMILY_TURBO_STRENGTH,
+      seed: v.SAMPLE_SEED, width: v.SAMPLE_WIDTH, height: v.SAMPLE_HEIGHT, steps,
+      cfg: v.SAMPLE_CFG_SCALE, turbo,
       every: v.SAMPLE_EVERY_N_EPOCHS,
       until: v.SAMPLE_LATER ? v.SAMPLE_UNTIL_EPOCH : 0, after: v.SAMPLE_LATER ? v.SAMPLE_EVERY_AFTER : 0,
       look: !!v.FAMILY_PREVIEW_LOOK, checkpoint: !!valueOrDefault("SAMPLE_CHECKPOINT")});
@@ -5410,7 +5546,8 @@ async function runFiles(run) {
   const [g, c] = await Promise.all([
     api(`/api/samples?dir=${encodeURIComponent(run.output_dir + sep + "sample")}&run=${encodeURIComponent(run.lora)}`)
       .catch(() => ({items: [], prompts: []})),
-    api("/api/checkpoints?dir=" + encodeURIComponent(run.output_dir)).catch(() => ({items: []}))]);
+    api(`/api/checkpoints?dir=${encodeURIComponent(run.output_dir)}&run=${encodeURIComponent(run.lora || "")}`)
+      .catch(() => ({items: []}))]);
   const shots = g.items.slice(0, 12);
   if (shots.length) out.push(el("div", {class: "gallery run-gallery"}, shots.map((it) => previewFigure(withLora(it, g.loras, run.family), g.prompts, null, g.epoch_prompts))));
   const size = (b) => b >= 2 ** 30 ? (b / 2 ** 30).toFixed(1) + " GB" : (b / 2 ** 20).toFixed(0) + " MB";
@@ -5874,6 +6011,58 @@ async function meSave() {
     return true;
   } catch (e) { $("meState").textContent = e.message; return false; }
 }
+
+// ---- the mask editor's kept settings: three numbered slots for the brush's own values, kept in this browser ----
+// A slot holds the tool and its Size, Softness and Strength together, so taking one back puts the editor in
+// exactly the mode you kept it in: slot 1 a wide soft brush, slot 2 a fine eraser, slot 3 SAM click. A number only
+// ever reads a slot; writing one means choosing it in the row that says what each holds first.
+const ME_KEY = "fizgig_maskedit";
+const ME_TOOLS = {brush: "Brush", erase: "Eraser", sam: "SAM click"};
+// The starting configuration, before anything is kept: the three slots are the three modes, each at the values the
+// sliders ship with - read off the markup's own value attributes (defaultValue, not what the slider currently
+// says), so nothing here can drift from the page and nothing is written to this browser until you keep something.
+const ME_MODES = ["brush", "erase", "sam"];
+const meStart = (n) => ({tool: ME_MODES[n - 1], size: Number($("meSize").defaultValue), soft: Number($("meSoft").defaultValue), strength: Number($("meStrength").defaultValue)});
+const meKept = () => { try { return JSON.parse(localStorage.getItem(ME_KEY) || "{}"); } catch (e) { return {}; } };
+// The one place a slot's tool is settled. localStorage is outside this code's control, and a slot whose tool this
+// page doesn't have must still leave the editor painting in some mode rather than in none.
+const meSlot = (n) => {
+  const v = (meKept().slots || {})["slot" + n];
+  return !v ? meStart(n) : (ME_TOOLS[v.tool] ? v : {...v, tool: "brush"});
+};
+const meGrab = () => ({tool: meState().tool, size: Number($("meSize").value), soft: Number($("meSoft").value), strength: Number($("meStrength").value)});
+const meSay = (v) => `${ME_TOOLS[v.tool]}, Size ${v.size}, Softness ${v.soft}, Strength ${v.strength}`;
+const meShort = (v) => `${ME_TOOLS[v.tool]} ${v.size}/${v.soft}/${v.strength}`;
+function meKeepTips() {
+  for (const b of $("meKeeps").querySelectorAll("button"))
+    b.title = `Slot ${b.dataset.keep}: ${meSay(meSlot(b.dataset.keep))} (${b.dataset.keep})`;
+}
+function meKeepFold() { $("meKeepRow").innerHTML = ""; }
+function meRecall(n) {
+  meKeepFold();          // a row left open would list targets against values that no longer match them
+  const v = meSlot(n);
+  meTool(v.tool);        // the mode first: it owns the cursor and its own button's highlight
+  $("meSize").value = v.size; $("meSoft").value = v.soft; $("meStrength").value = v.strength;
+  meDraw();              // the ring drawn under the cursor follows the new size
+  $("meState").textContent = `Slot ${n}: ${meSay(v)}.`;
+}
+function meKeepOpen() {
+  const host = $("meKeepRow");
+  if (host.childNodes.length) { meKeepFold(); return; }
+  const at = meGrab();
+  // Prompt and slots on separate lines: a field-label is fixed at 175 px and will not wrap, so a whole sentence
+  // of a prompt runs out from under the buttons beside it. Two me-bars break where they need to.
+  const picks = [1, 2, 3].map((n) => el("button", {class: "btn btn-sm", text: `Slot ${n} · ${meShort(meSlot(n))}`, onclick: () => {
+    const v = meGrab(), d = meKept();                 // what the sliders say now, not when the row opened
+    d.slots = {...(d.slots || {}), ["slot" + n]: v};
+    try { localStorage.setItem(ME_KEY, JSON.stringify(d)); } catch (e) { /* private window: not kept */ }
+    meKeepFold(); meKeepTips();
+    $("meState").textContent = `Kept as slot ${n}: ${meSay(v)}.`;
+  }}));
+  host.append(el("div", {class: "me-bar"}, el("span", {class: "field-hint", text: `Keep ${meSay(at)} as slot:`})),
+    el("div", {class: "me-bar"}, ...picks, el("button", {class: "btn btn-sm", text: "Cancel", onclick: () => meKeepFold()})));
+}
+
 function meWire() {
   const m = meState(), cv = $("meCanvas");
   let last = null, pan = null, space = false;
@@ -5892,6 +6081,9 @@ function meWire() {
     $("meView").querySelectorAll("button").forEach((x) => x.classList.toggle("active", x === b));
     meDraw();
   }));
+  $("meKeeps").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => meRecall(b.dataset.keep)));
+  $("meKeep").addEventListener("click", meKeepOpen);
+  meKeepTips();                     // the tooltips say what each slot holds, as soon as the page can tell
   $("meShow").addEventListener("input", meDraw);
   $("meFit").addEventListener("click", meFit);
   $("meUndo").addEventListener("click", () => meRestore(m.undo, m.redo));
@@ -5957,6 +6149,7 @@ function meWire() {
     else if (k === "b" || k === "B") meTool("brush");
     else if (k === "e" || k === "E") meTool("erase");
     else if (k === "s" || k === "S") meTool("sam");
+    else if (k === "1" || k === "2" || k === "3") meRecall(k);
     else if (k === "0") meFit();
   });
   document.addEventListener("keyup", (e) => { if (e.key === " ") space = false; });
@@ -6335,8 +6528,19 @@ S.st = {layout: null, blocks: {}, locks: new Set(), primaryBlocks: new Set(), do
   shown: 0, hist: [], redo: [], loadedKey: "", timer: null, poll: null, ready: false};
 const ST_KEY = "fizgig_studio";
 const stSaved = () => { try { return JSON.parse(localStorage.getItem(ST_KEY) || "{}"); } catch (e) { return {}; } };
+// the folder each picture picker last chose from (the Reference, each First / Last frame or reference slot, the
+// metrics reference): its Choose… opens there again, across restarts, even with the box cleared
+const stDir = (slot) => (stSaved().dirs || {})[slot] || "";
+function stDirKeep(slot, path) {
+  const folder = String(path || "").replace(/[\\/][^\\/]*$/, "");
+  if (!folder) return;
+  try { const d = stSaved(); d.dirs = {...(d.dirs || {}), [slot]: folder}; localStorage.setItem(ST_KEY, JSON.stringify(d)); }
+  catch (e) { /* private window */ }
+}
 const stRemember = debounce(() => {
-  const d = {family: $("stFamily").value, primary: $("stPrimary").value, donor: $("stDonor").value,
+  // on top of what's saved: H3's clip settings and photos (studioH3Remember's video), the folders and the metrics
+  // reference live in the same record, and a rebuild from scratch dropped them on every prompt change
+  const d = {...stSaved(), family: $("stFamily").value, primary: $("stPrimary").value, donor: $("stDonor").value,
     prompt: $("stPrompt").value, seed: $("stSeed").value, res: $("stRes").value,
     w: $("stW").value, h: $("stH").value, turbo: $("stTurbo").checked,
     ref: $("stRef").value, refMp: $("stRefMp").value, refStr: $("stRefStr").value, luckyLo: $("stLuckyLo").value,
@@ -6369,6 +6573,80 @@ async function studioOpen() {
   }
   if (S.st.openWith) await studioTake();
   studioPoll();
+  try {                                               // a paused Studio queue with jobs left: asks, never resumes
+    const q = await api("/api/studio/queue");
+    studioQueueDraw(q);
+    if (q.paused && q.left) {
+      $("stqText").replaceChildren(el("p", {text: `${q.left} job${q.left === 1 ? " is" : "s are"} waiting.` +
+        (q.reason ? ` ${q.reason}` : "")}));
+      $("stqModal").classList.add("active");
+    }
+  } catch (e) { /* an older server */ }
+}
+
+// ---- Studio's own queue (studio_queue.py): Add to queue, the card, pause / resume ----
+async function studioQueueAdd() {
+  const L = S.st.layout;
+  if (!L) return;
+  if (!$("stPrompt").value.trim()) { $("stStatus").textContent = "Enter a prompt first."; return; }
+  const state = studioState();
+  if (state.seed === 0) state.seed = 1 + Math.floor(Math.random() * (2 ** 31 - 2));    // each job its own
+  const extra = {...studioExtra(), ...studioMixExtra()};
+  if (extra.video) {                                  // a job is a new clip: not a Continue of the one on screen,
+    extra.video = {...extra.video, loop_back: null};  // and Upscale only as its Auto tick says, after the job's render
+    if (extra.video.upscale) extra.video.upscale = $("stUpAuto").checked ? {...extra.video.upscale, now: false, preview: 0} : null;
+  }
+  if (L.kind === "stills") extra._setup = studioSetupData();      // the saved picture carries the setup
+  const lora = $("stPrimary").value.trim().split(/[\\/]/).pop().replace(/\.safetensors$/i, "");
+  const model =($("stFamily").selectedOptions[0] || {}).textContent || L.key;
+  const label = `${state.prompt.slice(0, 70)}${state.prompt.length > 70 ? "…" : ""} · seed ${state.seed}`;
+  try {
+    const r = await api("/api/studio/queue/add", {load: studioLoadBody(), render: {state, extra}, label, lora, model});
+    studioQueueDraw(r.queue);
+    $("stStatus").textContent = `Added to the Studio queue (${r.queue.left} waiting).`;
+    studioPoll();
+  } catch (e) { $("stStatus").textContent = e.message; }
+}
+
+function studioQueueDraw(q) {
+  S.stq = q;
+  const card = $("stQueueCard");                      // always there: one slim line, opened from its head
+  if (!q.items.length) {
+    $("stQBadge").textContent = "Empty";
+    card.classList.remove("busy");
+    $("stQPause").textContent = "⏸ Pause"; $("stQPause").disabled = true; $("stQClear").disabled = true;
+    $("stQSay").textContent = "";
+    $("stQList").replaceChildren(el("div", {class: "field-hint", text: "Nothing queued. While a render is going, " +
+      "Add to queue (beside Render) lines the next one up; finished jobs stay listed here with their files."}));
+    return false;
+  }
+  $("stQClear").disabled = !q.items.some((i) => ["done", "failed"].includes(i.status));
+  const done = q.items.filter((i) => i.status === "done").length, bad = q.items.filter((i) => i.status === "failed").length;
+  $("stQBadge").textContent = [q.job ? "Rendering a job" : q.paused && q.left ? "Paused" : q.left ? "Waiting" : "",
+    q.left ? `${q.left} waiting` : "", done ? `${done} saved` : "", bad ? `${bad} failed` : ""].filter(Boolean).join(" · ");
+  card.classList.toggle("busy", !!q.job);
+  $("stQPause").textContent = q.paused ? "▶ Resume" : "⏸ Pause";
+  $("stQPause").disabled = !q.paused && !q.left;
+  $("stQSay").textContent = q.paused ? `Paused. ${q.reason || ""}` : q.waiting || (q.job ? "Rendering…" : q.left ? "" : "Done.");
+  const word = {waiting: "Waiting", loading: "Loading model", rendering: "Rendering", done: "Saved", failed: "Failed"};
+  const act = (path, body) => async () => {
+    try { studioQueueDraw(await api(path, body)); } catch (e) { $("stQSay").textContent = e.message; }
+  };
+  $("stQList").replaceChildren(...q.items.map((it) => el("div", {class: "stq-row " + it.status},
+    el("span", {class: "stq-state", text: word[it.status] || it.status}),
+    el("span", {class: "stq-label", text: `${it.model ? it.model + " · " : ""}${it.lora ? it.lora + " · " : ""}${it.label}`}),
+    it.status === "waiting" ? el("button", {class: "btn btn-sm", text: "↑", title: "Earlier",
+      onclick: act("/api/studio/queue/move", {id: it.id, delta: -1})}) : null,
+    it.status === "waiting" ? el("button", {class: "btn btn-sm", text: "↓", title: "Later",
+      onclick: act("/api/studio/queue/move", {id: it.id, delta: 1})}) : null,
+    ["loading", "rendering"].includes(it.status) ? null : el("button", {class: "btn btn-sm", text: "✕",
+      title: it.status === "waiting" ? "Remove this job" : "Take this line off the list (its saved files stay)",
+      onclick: act("/api/studio/queue/remove", {id: it.id})}),
+    it.paths && it.paths.length ? el("div", {class: "stq-files"}, ...it.paths.flatMap((p, k) => [k ? "  ·  " : null,
+      el("a", {href: `/api/studio/output?path=${encodeURIComponent(p)}&t=${encodeURIComponent(TOKEN)}`, target: "_blank",
+        rel: "noopener", title: p, text: p.split(/[\\/]/).pop()})])) :
+      it.error ? el("div", {class: "stq-files", text: it.error}) : null)));
+  return !!q.job || (!q.paused && q.left > 0);
 }
 
 // a LoRA row's Studio button: the LoRA as the primary, on the model its file is for (from its key names; the run's
@@ -6401,6 +6679,7 @@ async function studioTake() {
 
 async function studioFamily(res, w, h) {
   const key = $("stFamily").value;
+  studioAutosaveShow();                               // Save every render: this model's own tick
   const L = S.st.layout = await api("/api/studio/layout?family=" + encodeURIComponent(key));
   const sv = stSaved();
   studioKind(L, sv);
@@ -6424,7 +6703,7 @@ async function studioFamily(res, w, h) {
   // which model previews: the follows-the-Samples-tab families say so; others pick fast or full
   $("stDitRow").style.display = L.follows_samples || !L.dit_fast ? "none" : "";
   $("stDitFast").textContent = L.dit_fast; $("stDitFull").textContent = L.dit_full;
-  $("stDitNote").textContent = L.follows_samples && L.follow_ck ? L.follow_ck : L.follows_samples ? `Previews ${L.follow_turbo ? "on the " + L.follow_turbo + ", " : ""}` +
+  $("stDitNote").textContent = L.follows_samples && L.follow_ck ? L.follow_ck : L.follows_samples ? `Renders ${L.follow_turbo ? "on the " + L.follow_turbo + ", " : ""}` +
     `${L.follow_steps} steps, CFG ${L.follow_cfg}${L.follow_look ? ", " + L.follow_look : ""} - from this model's Samples tab.` :
     !L.dit_fast ? L.dit_full.replace(", slow", "") : "";
   renderChoiceDraw("stRender", L);
@@ -6479,7 +6758,9 @@ function studioKind(L, sv) {
   const fill = (id, opts, val) => { const s = $(id); s.innerHTML = ""; for (const o of opts) s.append(el("option", {value: o, text: o})); s.value = opts.includes(val) ? val : opts[0]; };
   fill("stH3Model", V.models, h3.model || V.models[0]);
   fill("stH3Base", V.bases, h3.base);
-  fill("stH3Len", V.lengths, h3.len || V.length);
+  fill("stH3Len", V.clip ? [...V.lengths, ST_LEN_OTHER] : V.lengths, h3.len || V.length);
+  $("stH3LenS").value = h3.lenS || "";
+  studioLenOther();
   fill("stH3W", V.dims, h3.w || V.size[0]);
   fill("stH3H", V.dims, h3.h || V.size[1]);
   $("stH3ModelRow").style.display = (V.models || []).length || (V.bases || []).length ? "" : "none";
@@ -6492,7 +6773,7 @@ function studioKind(L, sv) {
       V.speed_strength : 1, full = V.base_steps ? `about ${V.base_steps}` : "many more";
     $("stH3Steps").title = `Sampling steps for the clip. With ${sp} at ${at}, ${fast} steps is the fast loop; with ` +
       `${sp} at 0 (the base model alone) it needs ${full}.`;
-    $("stH3Turbo").title = `Strength of the built-in ${sp} LoRA: ${at} for the fast previews. 0 switches it off - the ` +
+    $("stH3Turbo").title = `Strength of the built-in ${sp} LoRA: ${at} for fast renders. 0 switches it off - the ` +
       `render is the base model plus your LoRAs at the steps set (raise Steps to ${full}). That is also how you edit a ` +
       `${sp} LoRA: load it as the primary and set this to 0.`;
   }
@@ -6504,6 +6785,35 @@ function studioKind(L, sv) {
   $("stH3Boost").checked = h3.boost !== false;           // on unless turned off
   $("stH3Boost").parentElement.style.display = V.speed_boost ? "" : "none";   // a family ability (H3 has it)
   $("stH3Early").checked = h3.early !== false;
+  $("stLoopRow").style.display = $("stLoopHint").style.display = V.pieces ? "" : "none";   // with the In pieces ability (H3)
+  $("stLoopPrompt").value = h3.loopPrompt || "";
+  $("stLoopS").value = h3.loopS || "";
+  const up = h3.up || {};                                                     // the Upscale fold (a family ability)
+  $("stUpBox").style.display = V.upscale ? "" : "none";
+  $("stUpW").value = up.w || ""; $("stUpH").value = up.h || "";
+  $("stUpDen").value = up.den || "0.4"; $("stUpSteps").value = up.steps || "3"; $("stUpSec").value = up.sec || "";
+  $("stUpAuto").checked = up.auto === true;
+  $("stUpFirst").checked = up.first !== false;
+  $("stUpGuide").value = ["full", "source"].includes(up.guide) ? up.guide : "light";
+  $("stUpGuideL").value = ["full", "source"].includes(up.guideL) ? up.guideL : "light";
+  $("stUpBias").value = up.bias || "0";
+  $("stUpAdv").checked = up.adv === true;
+  studioUpPresets("");
+  S.st.upLow = Math.max(0, Math.min(0.95, Number(up.low) || 0));
+  $("stUpRangeRow").hidden = !$("stUpAdv").checked;
+  $("stUpOwnPrompt").checked = up.ownPrompt === true;
+  $("stUpPrompt").value = up.prompt || "";
+  $("stUpPromptRow").hidden = $("stUpPromptCopy").hidden = !$("stUpOwnPrompt").checked;
+  $("stUpLast").checked = up.last !== false;
+  $("stUpWhich").value = ["baseline", "both"].includes(up.which) ? up.which : "tweaked";
+  S.st.upVideo = null; studioUpVideoDraw();                                   // the fold's own video, as remembered
+  if ($("stUpVideoPath")) $("stUpVideoPath").value = "";
+  if (V.upscale && up.video && up.video.path) studioUpVideoSet(up.video.path, Object.assign({which: up.which}, up.video));
+  $("stUpBox").open = up.open === true;
+  $("stH3Pieces").checked = h3.pieces === true;          // off unless turned on
+  $("stH3PiecesBox").style.display = V.pieces ? "" : "none";                  // a family ability (H3 has it)
+  $("stH3PieceS").value = h3.pieceS || "";
+  studioLenOther();
   S.st.kf = h3.kf || {};
   S.st.kfRect = h3.kfRect || {};
   studioClipNote();
@@ -6546,7 +6856,8 @@ function studioSlots() {
     const up = uploadButton({kind: "path", key: "STUDIO_" + slot}, input, set);
     host.append(el("div", {class: "st-slot"}, el("span", {class: "field-label", text: label + ":"}), thumb,
       el("div", {}, el("div", {class: "field-row"}, input,
-        el("button", {class: "btn", text: "Choose…", onclick: () => pick(input.value || S.imageFolder, false, set)}), up.btn,
+        el("button", {class: "btn", text: "Choose…", onclick: () => pick(input.value || stDir(slot) || S.imageFolder, false,
+          (p) => { stDirKeep(slot, p); set(p); })}), up.btn,
         el("button", {class: "btn", text: "Re-crop", onclick: () => S.st.kf[slot] && set(S.st.kf[slot])}),
         el("button", {class: "btn", text: "Clear", onclick: () => set("")}), info), up.status)));
     show();
@@ -6569,15 +6880,18 @@ function studioSlotThumb(cv, path, rect) {
   img.src = mediaUrl(path);
 }
 
-function studioCrop(path, initial, ok, cancel) {
+function studioCrop(path, initial, ok, cancel, opt) {
   // the desktop's crop window: the photo fitted, a box locked to the clip's shape (W x H) - drag to move, drag a
   // corner to resize. ok([x0, y0, x1, y1] in the photo's pixels); cancel() leaves things as they were.
-  const W = Number($("stH3W").value) || 640, H = Number($("stH3H").value) || 768, aspect = W / H;
+  // opt (Upscale's own video): {url: the picture shown, W, H: the shape, sw, sh: the size the box is measured in,
+  // fit(w, h): the size a box that large is made at - given, a corner changes the box's shape as well as its size}
+  const o = opt || {};
+  const W = o.W || Number($("stH3W").value) || 640, H = o.H || Number($("stH3H").value) || 768, aspect = W / H;
   const cv = $("cropCanvas"), ctx = cv.getContext("2d"), img = new Image();
-  $("cropTitle").textContent = `Crop to the clip's shape (${W}×${H})`;
+  $("cropTitle").textContent = o.title || `Crop to the clip's shape (${W}×${H})`;
   img.onerror = () => { $("stStatus").textContent = "Couldn't open that photo."; if (cancel) cancel(); };
   img.onload = () => {
-    const sw = img.naturalWidth, sh = img.naturalHeight;
+    const sw = o.sw || img.naturalWidth, sh = o.sh || img.naturalHeight;
     const scale = Math.min((window.innerWidth * 0.9 - 40) / sw, (window.innerHeight * 0.85 - 200) / sh, 1);
     const dw = Math.max(1, Math.round(sw * scale)), dh = Math.max(1, Math.round(sh * scale));
     cv.width = dw; cv.height = dh;
@@ -6598,7 +6912,8 @@ function studioCrop(path, initial, ok, cancel) {
       for (const [hx, hy] of [[box.x0, box.y0], [box.x1, box.y0], [box.x0, box.y1], [box.x1, box.y1]])
         ctx.fillRect(hx - HANDLE, hy - HANDLE, HANDLE * 2, HANDLE * 2);
       const r = src();
-      $("cropSize").textContent = `crop ${r[2] - r[0]}×${r[3] - r[1]} of ${sw}×${sh} → ${W}×${H}`;
+      const to = o.fit ? o.fit(r[2] - r[0], r[3] - r[1]) : [W, H];
+      $("cropSize").textContent = `crop ${r[2] - r[0]}×${r[3] - r[1]} of ${sw}×${sh} → ${to[0]}×${to[1]}`;
     };
     const at = (e) => { const b = cv.getBoundingClientRect(); return [(e.clientX - b.left) * dw / b.width, (e.clientY - b.top) * dh / b.height]; };
     let drag = null;
@@ -6623,10 +6938,13 @@ function studioCrop(path, initial, ok, cancel) {
         const c = drag.c, east = c === "ne" || c === "se", south = c === "sw" || c === "se";
         const ax = east ? box.x0 : box.x1, ay = south ? box.y0 : box.y1;
         let w = Math.abs(Math.min(Math.max(x, 0), dw) - ax), h = Math.abs(Math.min(Math.max(y, 0), dh) - ay);
-        w = Math.max(MIN_W, w, h * aspect); h = w / aspect;
         const maxW = east ? dw - ax : ax, maxH = south ? dh - ay : ay;
-        if (w > maxW) { w = maxW; h = w / aspect; }
-        if (h > maxH) { h = maxH; w = h * aspect; }
+        if (o.fit) { w = Math.min(maxW, Math.max(MIN_W, w)); h = Math.min(maxH, Math.max(MIN_W, h)); }   // any shape
+        else {
+          w = Math.max(MIN_W, w, h * aspect); h = w / aspect;
+          if (w > maxW) { w = maxW; h = w / aspect; }
+          if (h > maxH) { h = maxH; w = h * aspect; }
+        }
         box = {x0: east ? ax : ax - w, x1: east ? ax + w : ax, y0: south ? ay : ay - h, y1: south ? ay + h : ay};
       }
       draw();
@@ -6639,22 +6957,32 @@ function studioCrop(path, initial, ok, cancel) {
     draw();
     $("cropModal").classList.add("active");
   };
-  img.src = mediaUrl(path);
+  img.src = o.url || mediaUrl(path);
 }
 
 function studioH3Remember() {
   try {
     const d = stSaved();
     d.video = d.video || {};
-    d.video[(S.st.layout || {}).key || "minimax"] = {model: $("stH3Model").value, base: $("stH3Base").value, len: $("stH3Len").value, w: $("stH3W").value,
+    d.video[(S.st.layout || {}).key || "minimax"] = {model: $("stH3Model").value, base: $("stH3Base").value, len: $("stH3Len").value,
+      lenS: $("stH3LenS").value, w: $("stH3W").value,
       h: $("stH3H").value, steps: $("stH3Steps").value, turbo: $("stH3Turbo").value,
-      sound: $("stH3Sound").checked, boost: $("stH3Boost").checked, early: $("stH3Early").checked, kf: S.st.kf,
+      sound: $("stH3Sound").checked, boost: $("stH3Boost").checked, early: $("stH3Early").checked, pieces: $("stH3Pieces").checked, pieceS: $("stH3PieceS").value, loopPrompt: $("stLoopPrompt").value, loopS: $("stLoopS").value,
+      up: {w: $("stUpW").value, h: $("stUpH").value, den: $("stUpDen").value, steps: $("stUpSteps").value, sec: $("stUpSec").value, auto: $("stUpAuto").checked, first: $("stUpFirst").checked, last: $("stUpLast").checked, guide: $("stUpGuide").value, guideL: $("stUpGuideL").value, bias: $("stUpBias").value, adv: $("stUpAdv").checked, low: S.st.upLow || 0, ownPrompt: $("stUpOwnPrompt").checked, prompt: $("stUpPrompt").value, which: $("stUpWhich").value, open: $("stUpBox").open, video: S.st.upVideo ? {path: S.st.upVideo.path, rect: S.st.upVideo.rect, a: S.st.upVideo.a, b: S.st.upVideo.b} : null}, kf: S.st.kf,
       kfRect: S.st.kfRect};
     localStorage.setItem(ST_KEY, JSON.stringify(d));
   } catch (e) { /* private window */ }
 }
 
-function studioExtra() {
+// which panes render: the ones on screen (the arrows between them hide one)
+function studioPanes() {
+  if (S.st.noLora) return "both";                     // no LoRA: one render serves both (nothing moved)
+  return S.st.split === "tweak" ? "tweaked" : S.st.split === "base" ? "baseline" : "both";
+}
+
+function studioExtra() { return {...studioExtraKind(), panes: studioPanes()}; }
+
+function studioExtraKind() {
   // what a clip or a song needs beyond the sliders
   const L = S.st.layout;
   if (L.kind === "audio") return {audio: studioAceExtra()};
@@ -6663,10 +6991,13 @@ function studioExtra() {
   const w = Number($("stH3W").value) || 640, h = Number($("stH3H").value) || 768;     // the clip at its Width x Height
   const ref = !!V.references[$("stH3Model").value];
   const slots = ref ? ["ref1", "ref2"] : (V.frame_slots || ["first", "last"]);
-  return {video: {frames: V.length_frames[$("stH3Len").value] || 22, width: w, height: h,
+  return {video: {frames: studioClipFrames(V), width: w, height: h,
     steps: Math.max(1, Math.min(40, parseInt($("stH3Steps").value, 10) || 4)),
     turbo: Math.max(0, Math.min(1.5, Number($("stH3Turbo").value) || 0)), sound: $("stH3Sound").checked,
     speed_boost: !!V.speed_boost && $("stH3Boost").checked, early: $("stH3Early").checked,
+    pieces: !!V.pieces && $("stH3Pieces").checked, piece: studioPieceFrames(V),
+    loop_back: S.st.loopBack || null,
+    upscale: V.upscale && (S.st.upNow || S.st.upPrev || $("stUpAuto").checked) ? Object.assign(studioUpscale(V), {now: !!S.st.upNow, preview: S.st.upPrev || 0}) : null,
     negative: $("stNeg").value.trim()},
     keyframes: slots.filter((s) => S.st.kf[s]).map((s) => ({slot: s, path: S.st.kf[s], rect: S.st.kfRect[s] || null})),
     ref_mode: ref};
@@ -6790,8 +7121,17 @@ function songLoad(side, url, gen, actUrl) {
   }
   songMark();
 }
+function songDrop(side) {                           // a side not rendered this time: nothing of it left to play
+  const p = songPlayer(side);
+  try { p.pause(); } catch (e) { /* not playing */ }
+  if (S.song.side === side) S.song.side = null;
+  delete S.song.src[side]; delete S.song.peaks[side]; delete S.song.act[side];
+  p.removeAttribute("src");
+  try { p.load(); } catch (e) { /* nothing loaded */ }
+  songMark(); songDraw();
+}
 function songPlay(side, at) {
-  if (!songHas(side)) { $("stStatus").textContent = side === "nolora" ? "The No LoRA song renders after the first preview." :
+  if (!songHas(side)) { $("stStatus").textContent = side === "nolora" ? "The No LoRA song renders after the first render." :
     "That song is not rendered yet."; return; }
   let pos = at ?? songNow();
   const [a, b] = songSpan(), d = songDur(side) || Infinity;
@@ -6830,11 +7170,10 @@ function songMark() {
   $("stSongSave").style.pointerEvents = t ? "" : "none";
   $("stSongSave").style.opacity = t ? "" : "0.5";
   if (t) {
-    const lora = ($("stPrimary").value.trim().split(/[\\/]/).pop() || "song").replace(/\.safetensors$/i, "");
+    const lora = ($("stPrimary").value.trim().split(/[\\/]/).pop() || "base").replace(/\.safetensors$/i, "");
     const seed = ($("stSeed") && $("stSeed").value.trim()) || "";
     const name = `${lora}_tweaked${seed ? "_seed" + seed : ""}.wav`;
-    $("stSongSave").href = t + "&dl=" + encodeURIComponent(name);
-    $("stSongSave").setAttribute("download", name);
+    $("stSongSave").href = t + "&dl=" + encodeURIComponent(name);     // another device's copy
   }
 }
 function songRegion(r) {
@@ -6842,7 +7181,7 @@ function songRegion(r) {
   S.st.region = r;
   if (r) $("stSongLoop").checked = true;
   studioAceRemember();
-  if ($("stSrcOn").checked && $("stSrcMode").value === "repaint") studioPending();    // Repaint remakes it at Update
+  if ($("stSrcOn").checked && $("stSrcMode").value === "repaint") studioPending();    // Repaint remakes it at Render
   if (songPlaying()) songPlay(S.song.side, r ? r[0] : undefined);
   else if (r) S.song.pos = r[0];
   for (const s of Object.keys(SONG_SIDES)) songPlayer(s).loop = $("stSongLoop").checked && !r;
@@ -7026,8 +7365,8 @@ function wireStudioAce() {
   for (const id of ["stPbOn", "stSrcOn", "stSndOn", "stSrcMode", "stPbKeep", "stPbBlend", "stSrcFollow", "stSrcDenoise", "stSrcStrength"])
     $(id).addEventListener("change", change);
   for (const id of ["stPbBlend"]) $(id).addEventListener("input", studioAceLayout);
-  // typed text and new files render on Update, as the prompt does
-  const typed = () => { studioAceRemember(); if (S.st.ready) $("stStart").textContent = "Update"; };
+  // typed text and new files render on Render, as the prompt does
+  const typed = () => { studioAceRemember(); if (S.st.ready) $("stStart").textContent = "Render"; };
   for (const id of ["stPromptB", "stSrcPath", "stSndPath"]) $(id).addEventListener("input", typed);
   for (const [id, host] of [["stSrcPath", "stSrcBtns"], ["stSndPath", "stSndBtns"]]) {
     const input = $(id), set = (p) => { input.value = p; studioAceRemember(); studioPending(); };
@@ -7083,8 +7422,8 @@ function studioEq(role, on, restore = true) {
   for (const id of [pathId, pickId, scaleId]) $(id).disabled = on;
   $(btnId).classList.toggle("btn-primary", on);
   if (on) {
-    if (role === "primary") { $("stStatus").textContent = "Model EQ as the primary: press Start / Update to load it (1.0 = the stock model).";
-      if (S.st.ready) $("stStart").textContent = "Update"; }
+    if (role === "primary") { $("stStatus").textContent = "Model EQ as the primary: press Start / Render to load it (1.0 = the stock model).";
+      if (S.st.ready) $("stStart").textContent = "Render"; }
     else if (S.st.ready) api("/api/studio/donor", {path: L.model_eq}).then(studioPoll).catch((e) => { $("stStatus").textContent = e.message; });
     stRemember();
     return;
@@ -7095,8 +7434,8 @@ function studioEq(role, on, restore = true) {
   $(scaleId).value = prevScale || "1";
   if (role === "primary") {
     $(pathId).value = prev;
-    $("stStatus").textContent = "Model EQ Mode off: the primary is your own LoRA again - press Update to load it.";
-    if (S.st.ready) $("stStart").textContent = "Update";
+    $("stStatus").textContent = "Model EQ Mode off: the primary is your own LoRA again - press Render to load it.";
+    if (S.st.ready) $("stStart").textContent = "Render";
   } else {
     $(pathId).value = prev;
     if (S.st.ready) api("/api/studio/donor", {path: prev}).then(() => { studioPoll(); studioPending(); });
@@ -7254,7 +7593,7 @@ function studioMixNotes(n) {
 
 // ---- the metrics strip (the desktop's pop-out strip): paired numbers for the renders on screen ----
 function studioMetricsShow() {
-  const L = S.st.layout, on = !!L && L.kind !== "audio";
+  const L = S.st.layout, on = !!L && L.kind !== "audio" && studioPanes() === "both" && !S.st.noBase && !S.st.noTweak;
   $("stMetrics").style.display = on ? "" : "none";
   const ref = (stSaved().metricsRef) || "";
   $("stMetRefName").textContent = ref ? ref.split(/[\\/]/).pop() : "(none)";
@@ -7371,6 +7710,7 @@ function studioMapsAfterRender(same) {
   if (!m) return;
   m.data = null;
   $("stMapCanvas").style.display = "none";
+  if (S.st.noTweak) { if (m.kind) stMapNote("Maps are drawn over the Tweaked picture: show it and press Render."); return; }
   // nothing moved (Reset All): What your tweaks change has nothing to show - the overlay goes, nothing is calculated
   if (m.kind === "tweak" && same) {
     stMapNote("Nothing to show yet: move a slider, and when the Tweaked picture has rendered, the map appears here.");
@@ -7453,7 +7793,8 @@ function stMapDrawNow() {
 
 async function studioMetrics() {
   const L = S.st.layout;
-  if (!L || L.kind === "audio" || !S.st.shown) return;
+  studioMetricsShow();
+  if (!L || L.kind === "audio" || !S.st.shown || $("stMetrics").style.display === "none") return;
   const gen = (S.st.metGen = (S.st.metGen || 0) + 1), ref = stSaved().metricsRef || "";
   const chips = {like: "stMetLike", grid: "stMetGrid", tex: "stMetTex", clip: "stMetClip", sat: "stMetSat"};
   const put = (k, text, cls) => { const c = $(chips[k]); c.textContent = text; c.className = "st-chip" + (cls ? " " + cls : ""); };
@@ -7482,7 +7823,8 @@ function wireStudioMetrics() {
     try { const d = stSaved(); d.metricsRef = p || ""; localStorage.setItem(ST_KEY, JSON.stringify(d)); } catch (e) { /* private window */ }
     studioMetricsShow(); studioMetrics(); studioMapsShow();
   };
-  $("stMetRefPick").addEventListener("click", () => pick(stSaved().metricsRef || refStart(), false, setRef));
+  $("stMetRefPick").addEventListener("click", () => pick(stSaved().metricsRef || stDir("metrics") || refStart(), false,
+    (p) => { stDirKeep("metrics", p); setRef(p); }));
   $("stMetRefClear").addEventListener("click", () => setRef(""));
 }
 
@@ -7559,7 +7901,7 @@ async function studioSetupLoad(name) {
   await studioSetupApply(d, name);
 }
 
-async function studioSetupApply(d, name) {        // a saved setup, or one read from a picture Download tweaked saved
+async function studioSetupApply(d, name) {        // a saved setup, or one read from a picture Save tweaked saved
   const fam = d.family && [...$("stFamily").options].some((o) => o.value === d.family) ? d.family : $("stFamily").value;
   if (fam !== $("stFamily").value) { $("stFamily").value = fam; await studioFamily(); stRemember(); }
   const v = d.values || {};
@@ -7620,7 +7962,7 @@ async function studioSetupMix() {
   studioSchedule();
 }
 
-// a PNG's fizgig_studio_setup text (Download tweaked writes it), or null
+// a PNG's fizgig_studio_setup text (Save tweaked writes it), or null
 function studioSetupFromPng(buf) {
   const u = new Uint8Array(buf), dv = new DataView(buf);
   if (u.length < 8 || u[0] !== 0x89 || u[1] !== 0x50) return null;
@@ -7644,14 +7986,37 @@ function wireStudioSetups() {
   $("stSetupSave").addEventListener("click", () => studioSetupSave(false));
   $("stSetupList").addEventListener("change", () => { const n = $("stSetupList").value; $("stSetupList").value = ""; if (n) studioSetupLoad(n); });
   studioSetupList();
-  // Download tweaked (a still): the setup goes up first, so the server writes it into the PNG
-  $("stDlTweak").addEventListener("click", async (e) => {
-    if ($("stDlTweak").dataset.go || (S.st.layout && S.st.layout.kind !== "stills")) return;
-    e.preventDefault();
-    try { await api("/api/studio/download_setup", {data: studioSetupData()}); } catch (err) { /* the picture alone */ }
-    $("stDlTweak").dataset.go = "1"; $("stDlTweak").click(); delete $("stDlTweak").dataset.go;
+  // Save original / tweaked (and the song's Save): straight into Preferences' Studio outputs folder (images,
+  // videos or songs), no Save window. A tweaked still sends the setup first, so the picture carries it. Viewed from
+  // another device (a pod, a phone), the file is also downloaded to that device.
+  for (const id of ["stDlBase", "stDlTweak", "stSongSave"]) {
+    $(id).addEventListener("click", async (e) => {
+      const b = $(id);
+      if (b.dataset.go) return;                       // the browser's download (another device)
+      e.preventDefault();
+      const tweak = id !== "stDlBase";
+      if (tweak && S.st.layout && S.st.layout.kind === "stills") {
+        try { await api("/api/studio/download_setup", {data: studioSetupData()}); } catch (err) { /* the picture alone */ }
+      }
+      try {
+        const r = await api("/api/studio/save_output", {which: tweak ? "tweaked" : "baseline"});
+        const line = r.error || (r.already ? "Already saved: " : "Saved: ") + r.path;
+        $("stDlMsg").textContent = line;
+        if (!r.error && pageIsElsewhere()) {          // a copy on this device too
+          b.setAttribute("download", r.name);
+          b.dataset.go = "1"; b.click(); delete b.dataset.go;
+        }
+      } catch (err) { $("stDlMsg").textContent = err.message; }
+    });
+  }
+  // Save every render: per model, off unless ticked (Preferences keeps it)
+  $("stAutoSave").addEventListener("change", async () => {
+    const fam = $("stFamily").value, on = $("stAutoSave").checked;
+    S.studioAutosave = {...(S.studioAutosave || {}), [fam]: on};
+    try { await api("/api/prefs", {changes: {[`studio_autosave_${fam}`]: on ? "1" : "0"}}); }
+    catch (err) { $("stDlMsg").textContent = err.message; }
   });
-  // a picture Download tweaked saved, dropped anywhere on Studio: its LoRAs, sliders and settings back
+  // a picture Save tweaked saved, dropped anywhere on Studio: its LoRAs, sliders and settings back
   const tab = $("tab-studio");
   tab.addEventListener("dragover", (e) => { if ([...e.dataTransfer.types].includes("Files")) e.preventDefault(); });
   tab.addEventListener("drop", async (e) => {
@@ -7659,7 +8024,7 @@ function wireStudioSetups() {
     if (!f || e.defaultPrevented) return;
     e.preventDefault();
     const d = studioSetupFromPng(await f.arrayBuffer());
-    if (!d || !d.fizgig_repair_setup) { $("stSetupMsg").textContent = `${f.name} has no Studio settings in it (Download tweaked saves them).`; return; }
+    if (!d || !d.fizgig_repair_setup) { $("stSetupMsg").textContent = `${f.name} has no Studio settings in it (Save tweaked saves them).`; return; }
     await studioSetupApply(d, f.name.replace(/\.png$/i, ""));
   });
 }
@@ -7667,8 +8032,218 @@ function wireStudioSetups() {
 function studioCanvas() {
   // H3: [width, height, frames, keyframes, references] of the first clip, so Auto loads the base with room for it
   if (S.st.layout.kind !== "video") return null;
-  const x = studioExtra(), n = x.keyframes.length;
-  return [x.video.width, x.video.height, x.video.frames, x.ref_mode ? 0 : n, x.ref_mode ? n : 0];
+  const x = studioExtra(), n = x.keyframes.length, P = x.video.piece;
+  // a clip in pieces: the room one piece needs (with the 12 frames of the piece before it is shown), not the whole clip
+  const long = x.video.pieces && x.video.frames > P, kf = (x.ref_mode ? 0 : n) + (long ? 12 : 0);
+  return [x.video.width, x.video.height, long ? P : x.video.frames, kf, x.ref_mode ? n : 0];
+}
+
+// The Clip row's length. "Other…" takes seconds and moves them to the nearest length on the model's frame grid
+// (H3: 17n + 5 frames at 24 fps). Past the model's own longest clip is allowed, with no upper limit: a clip too
+// long for the card fails for memory (Peter, 12 Nov 2026: longer than 20 s works in ComfyUI).
+const ST_LEN_OTHER = "Other…";
+function studioSnapFrames(V, sec) {
+  const c = V.clip, want = Math.max(0, Number(sec) || 0) * c.fps;
+  return c.offset + Math.max(0, Math.round((want - c.offset) / c.step)) * c.step;
+}
+function studioClipFrames(V) {
+  if ($("stH3Len").value !== ST_LEN_OTHER || !V.clip) return V.length_frames[$("stH3Len").value] || 22;
+  return $("stH3LenS").value.trim() ? studioSnapFrames(V, $("stH3LenS").value) : V.clip.offset + V.clip.step;
+}
+// a piece's length in frames for a clip In pieces: the box's seconds on the frame grid (no shorter than the 39 frames
+// a piece is shown plus 17 new ones), the model's own when the box is empty
+// Upscale (the fold under the Then row). Its size: the two boxes on the 32-px grid, an empty one the clip's side x 1.5
+function studioUpSize(k) {
+  const snap = (n) => Math.max(256, Math.round(n / 32) * 32);
+  const vb = $("stUpWhich").value === "video" ? studioUpVideoBase() : null;      // the loaded video's own size
+  const w = vb ? vb[0] : Number($("stH3W").value) || 768, h = vb ? vb[1] : Number($("stH3H").value) || 448;
+  return k ? [snap(w * k), snap(h * k)] : [snap(Number($("stUpW").value) || w * 1.5), snap(Number($("stUpH").value) || h * 1.5)];
+}
+function studioUpscale(V) {
+  const [width, height] = studioUpSize(), sec = Number($("stUpSec").value) || 0, den = Number($("stUpDen").value);
+  return {width, height, denoise: Math.max(0.05, Math.min(1, den > 0 ? den : 0.4)),
+    steps: Math.max(1, Math.min(20, parseInt($("stUpSteps").value, 10) || 3)),
+    section: sec > 0 && V.clip ? Math.max(22, studioSnapFrames(V, sec)) : 0, auto: $("stUpAuto").checked,
+    which: $("stUpWhich").value, first_guide: $("stUpFirst").checked, last_guide: $("stUpLast").checked,
+    guide: [$("stUpGuide").value, $("stUpGuideL").value],
+    prompt: $("stUpOwnPrompt").checked ? $("stUpPrompt").value.trim() : "",
+    bias: Math.max(-1, Math.min(1, Number($("stUpBias").value) || 0)),
+    low: $("stUpAdv").checked ? Math.max(0, Math.min(S.st.upLow || 0, (den > 0 ? den : 0.4) - 0.02)) : 0,
+    video: $("stUpWhich").value === "video" && S.st.upVideo
+      ? {path: S.st.upVideo.path, rect: S.st.upVideo.rect, start: S.st.upVideo.a, end: S.st.upVideo.b} : null};
+}
+// Upscale's own video (the fold's Video row): a file upscaled in place of a rendered clip. S.st.upVideo = {path, info
+// (its size, seconds, sound), rect (the crop placed, in its pixels; none = the middle), a, b (From and to, seconds)}
+const upVideoUrl = (p, at, side) =>
+  `/api/studio/video_frame?path=${encodeURIComponent(p)}&at=${at}&side=${side}&t=${encodeURIComponent(TOKEN)}`;
+function studioUpVideoBase() {
+  const v = S.st.upVideo;
+  if (!v || !v.info) return null;
+  return v.rect ? [v.rect[2] - v.rect[0], v.rect[3] - v.rect[1]] : [v.info.width, v.info.height];
+}
+function studioUpVideoFit(cw, ch) {
+  const [w0, h0] = studioUpSize(), k = Math.sqrt(w0 * h0 / Math.max(1, cw * ch));
+  const snap = (n) => Math.max(256, Math.round(n / 32) * 32);
+  return [snap(cw * k), snap(ch * k)];
+}
+// the Size list: the video's shape at the model's sizes (sides on the 32-px grid, one side at 768 or more)
+function studioUpVideoSizes() {
+  const sel = $("stUpVideoSize"), b = studioUpVideoBase();
+  sel.innerHTML = "";
+  if (!b) return;
+  const snap = (n) => Math.max(256, Math.round(n / 32) * 32), seen = new Set();
+  sel.append(el("option", {value: "", text: "Pick a size…"}));
+  for (const k of [2, 1.5, 1, 0.75, 2 / 3, 0.5, 0.375, 1 / 3, 0.25]) {
+    const w = snap(b[0] * k), h = snap(b[1] * k), key = w + "x" + h;
+    if (seen.has(key) || (Math.max(w, h) < 768 && k !== 1)) continue;
+    seen.add(key);
+    const o = el("option", {value: key, text: `${w} × ${h}` + (k === 1 ? " (the video's size)" : k > 1 ? ` (×${k})` : ` (${Math.round(k * 100)}%)`)});
+    o.dataset.k = k;
+    sel.append(o);
+  }
+  const now = (k) => studioUpSize(k).join("x");
+  sel.value = [...sel.options].some((o) => o.value === now()) ? now() : "";
+}
+function studioUpVideoDraw(thumbs) {
+  const v = S.st.upVideo, on = !!(v && v.info), sel = $("stUpWhich");
+  $("stUpVideoBox").hidden = !on;
+  const opt = [...sel.options].find((o) => o.value === "video");
+  if (on && !opt) sel.append(el("option", {value: "video", text: "The loaded video"}));
+  if (!on && opt) { if (sel.value === "video") sel.value = "tweaked"; opt.remove(); }
+  if (!on) return;
+  const i = v.info, fps = S.st.layout.video.clip.fps, r2 = (n) => Math.round(n * 100) / 100;
+  $("stUpVideoInfo").textContent = `${i.width} × ${i.height}, ${r2(i.seconds)} s` + (i.has_audio ? "" : ", no sound");
+  $("stUpVideoCropSay").textContent = v.rect ? `crop ${v.rect[2] - v.rect[0]} × ${v.rect[3] - v.rect[1]}` : "the whole frame";
+  studioUpVideoSizes();
+  $("stUpVideoA").value = r2(v.a); $("stUpVideoB").value = r2(v.b);
+  // the strip: frames across the whole video (made once per file), the part to upscale bright over it
+  const len = Math.max(0.01, i.seconds), sel2 = $("stUpVideoSel"), pics = $("stUpVideoPics");
+  sel2.style.left = (v.a / len * 100) + "%"; sel2.style.width = (Math.max(0, v.b - v.a) / len * 100) + "%";
+  if (pics.dataset.path !== v.path) {
+    pics.dataset.path = v.path;
+    pics.innerHTML = "";
+    for (let j = 0; j < 12; j++) pics.append(el("img", {alt: "", loading: "lazy", src: upVideoUrl(v.path, r2((j + 0.5) / 12 * len), 200)}));
+  }
+  const want = Math.floor((v.b - v.a) * fps + 1e-3), n = want >= 22 ? 17 * Math.floor((want - 5) / 17) + 5 : 0;
+  $("stUpVideoLen").textContent = n
+    ? `${r2(n / fps)} seconds from ${r2(v.a)} s are upscaled (${n} frames, the nearest length the model makes)`
+    : `Too short: it needs at least ${r2(22 / fps)} seconds between From and to`;
+  if (thumbs) { $("stUpVideoAImg").src = upVideoUrl(v.path, v.a, 440); $("stUpVideoBImg").src = upVideoUrl(v.path, v.b, 440); }
+}
+// a video picked (saved: the one remembered, with its crop and its From and to), or "" to take it away
+async function studioUpVideoSet(path, saved) {
+  const box = $("stUpVideoPath");
+  if (!path) {
+    S.st.upVideo = null;
+    if (box) box.value = "";
+    studioUpVideoDraw(); studioUpSummary(); studioH3Remember();
+    return;
+  }
+  let info;
+  try { info = await api("/api/studio/video_info?path=" + encodeURIComponent(path)); }
+  catch (e) { if (!saved) $("stStatus").textContent = e.message; return; }
+  const keep = saved && saved.path === path ? saved : {};
+  const b = Number(keep.b) > 0 ? Math.min(Number(keep.b), info.seconds) : info.seconds;
+  S.st.upVideo = {path, info, rect: Array.isArray(keep.rect) ? keep.rect : null, a: Math.max(0, Math.min(Number(keep.a) || 0, b)), b};
+  if (box) box.value = path;
+  studioUpVideoDraw(true);
+  if (!saved) {
+    // a new video is what Upscale works on, at its own shape and near a megapixel (or its own size when smaller)
+    $("stUpWhich").value = "video";
+    const fits = [...$("stUpVideoSize").options].filter((o) => o.value && Number(o.dataset.k) <= 1)
+      .map((o) => o.value.split("x").map(Number)).sort((p, q) => q[0] * q[1] - p[0] * p[1]);
+    const pickd = fits.find(([w, h]) => w * h <= 1100000) || fits[fits.length - 1];
+    if (pickd) [$("stUpW").value, $("stUpH").value] = pickd;
+  } else if (saved.which === "video") $("stUpWhich").value = "video";
+  studioUpVideoSizes(); studioUpSummary(); studioH3Remember();
+  // a new video: choose what of the frame is used straight away, as a photo's crop is placed when it is picked. The
+  // box starts as the whole frame in the nearest shape the model's sizes allow; Cancel keeps that
+  if (!saved) $("stUpVideoCrop").click();
+}
+// The fold's presets: the built-in ones, then your own (kept on the server beside Studio's block presets, under the
+// model's key + "_upscale"). A preset holds the look, never the size, the prompt or which clip
+const UP_PRESETS = {
+  standard: {den: 0.4, steps: 3, sec: "", bias: 0, adv: false, low: 0, first: true, last: true},
+  creative: {den: 0.97, steps: 2, sec: "2.33", bias: 0.8, adv: true, low: 0, first: false, last: false},
+  creative2: {den: 0.99, steps: 2, sec: "2.33", bias: 0, adv: true, low: 0, first: false, last: false},
+  creative3: {den: 0.98, steps: 4, sec: "2.33", bias: -0.4, adv: true, low: 0, first: false, last: false},
+};
+function studioUpPresetKey() { return ((S.st.layout || {}).key || "minimax") + "_upscale"; }
+async function studioUpPresets(pick) {
+  const sel = $("stUpPreset");
+  const user = (await api("/api/studio/presets?family=" + encodeURIComponent(studioUpPresetKey())).catch(() => ({user: []}))).user;
+  sel.innerHTML = "";
+  sel.append(el("option", {value: "", text: "Pick a preset…"}), el("option", {value: "standard", text: "✨ Standard"}),
+    el("option", {value: "creative", text: "✨ Creative: light"}),
+    el("option", {value: "creative2", text: "✨ Creative: strong"}),
+    el("option", {value: "creative3", text: "✨ Creative: maximum"}));
+  if (user.length) sel.append(el("optgroup", {label: "Your presets"}, ...user.map((n) => el("option", {value: "u:" + n, text: n}))));
+  sel.value = pick && [...sel.options].some((o) => o.value === pick) ? pick : "";
+  $("stUpPresetDel").hidden = !sel.value.startsWith("u:");
+}
+// the noise levels an upscale's steps run through (minimax/upscale.py low_sigmas: the model's shift-12 spacing)
+function studioUpLevels(u) {
+  const p = Math.pow(3, u.bias), tOf = (s) => s / (12 - 11 * s), t0 = tOf(u.denoise), tl = tOf(u.low || 0), out = [];
+  const add = (t) => out.push(Math.round(12 * t / (1 + 11 * t) * 100) / 100);
+  if (!(u.low > 0)) { for (let i = 0; i <= u.steps; i++) add(t0 * Math.pow(1 - i / u.steps, p)); return out; }
+  for (let i = 0; i < u.steps; i++) add(i === 0 ? t0 : tl + (t0 - tl) * Math.pow(1 - i / (u.steps - 1), p));
+  out.push(0);
+  return out;
+}
+// Advanced: the noise range bar. Left is all noise, right is none; the section runs from Denoise to the low end
+function studioUpRangeDraw(u) {
+  const sel = $("stUpRangeSel"), lv = studioUpLevels(u);
+  sel.style.left = ((1 - u.denoise) * 100) + "%";
+  sel.style.width = ((u.denoise - u.low) * 100) + "%";
+  $("stUpRangeDots").innerHTML = lv.slice(0, u.steps).map((s) => `<i style="left:${(1 - s) * 100}%"></i>`).join("");
+  $("stUpRangeSay").textContent = u.low > 0
+    ? `${u.steps} step${u.steps === 1 ? "" : "s"} between ${u.denoise} and ${u.low}, then straight to clean`
+    : `${u.steps} step${u.steps === 1 ? "" : "s"} from ${u.denoise} all the way down to clean`;
+}
+// the longest section that fits this card at the fold's size (minimax/upscale.py room_positions), beside the Sections box
+function studioUpRoom(V, u) {
+  const [k, kf] = Array.isArray(S.st.upRoom) ? S.st.upRoom : [0, 0], el = $("stUpRoom");   // the card's room in latent positions, guide frames
+  if (!k || !V.clip) { el.textContent = ""; return; }
+  const n = Math.floor((Math.floor(k / ((u.width >> 4) * (u.height >> 4))) - kf - 2) / 5), frames = n >= 1 ? 17 * n + 5 : 0;
+  const secs = (f) => Math.round(f / V.clip.fps * 10) / 10, want = u.section || 124;
+  el.textContent = !frames ? `${u.width} × ${u.height} is too large for this card`
+    : want > frames ? `too long for this card at ${u.width} × ${u.height}: up to about ${secs(frames)} s fits`
+    : `up to about ${secs(frames)} s fits this card at ${u.width} × ${u.height}`;
+  el.style.color = !frames || want > frames ? "var(--warning, var(--accent-text))" : "";
+}
+// the fold's heading says what is set, so it reads without being opened
+function studioUpSummary() {
+  const L = S.st.layout, V = L && L.kind === "video" ? L.video : null;
+  if (!V || !V.upscale) return;
+  const u = studioUpscale(V);
+  $("stUpLevels").textContent = "noise levels " + studioUpLevels(u).join(" → ");
+  studioUpRangeDraw(u); studioUpRoom(V, u);
+  $("stUpSum").textContent = `to ${u.width} × ${u.height}, denoise ${u.denoise}, ${u.steps} step${u.steps === 1 ? "" : "s"}`
+    + (u.first_guide ? (u.last_guide ? "" : ", no last guide frame") : (u.last_guide ? ", no first guide frame" : ", no guide frames"))
+    + (u.first_guide && u.guide[0] !== "light" ? (u.guide[0] === "source" ? ", first frame as the source" : ", first frame at the Denoise") : "")
+    + (u.last_guide && u.guide[1] !== "light" ? (u.guide[1] === "source" ? ", last frame as the source" : ", last frame at the Denoise") : "")
+    + (u.low > 0 ? `, noise range ${u.low} to ${u.denoise}` : "")
+    + (u.bias > 0 ? ", steps weighted low" : u.bias < 0 ? ", steps weighted high" : "") + (u.prompt ? ", its own prompt" : "")
+    + ({baseline: ", the Baseline clip", both: ", both clips", video: ", the loaded video"}[u.which] || "") + (u.auto ? ", after every render" : "");
+  if (S.st.upVideo) studioUpVideoSizes();
+}
+function studioPieceFrames(V) {
+  const s = $("stH3PieceS").value.trim();
+  return V.pieces && V.clip && s ? Math.max(56, studioSnapFrames(V, s)) : (V.pieces || 0);
+}
+function studioLenOther(snap) {
+  const L = S.st.layout, V = L && L.kind === "video" ? L.video : null, box = $("stH3LenS"), note = $("stH3LenNote");
+  $("stH3PieceRow").style.display = V && V.pieces && $("stH3Pieces").checked ? "" : "none";
+  if (snap && V && V.pieces && V.clip && $("stH3PieceS").value.trim())
+    $("stH3PieceS").value = String(Math.round(studioPieceFrames(V) / V.clip.fps * 100) / 100);
+  const other = !!V && !!V.clip && $("stH3Len").value === ST_LEN_OTHER;
+  box.style.display = other ? "" : "none";
+  note.textContent = "";
+  if (!other) return;
+  const f = studioClipFrames(V), c = V.clip, secs = (n) => String(Math.round(n / c.fps * 100) / 100);
+  if (snap && box.value.trim()) box.value = secs(f);
+  const pf = studioPieceFrames(V), P = V.pieces && $("stH3Pieces").checked && f > pf ? 1 + Math.ceil((f - pf) / (pf - 39)) : 0;
+  note.textContent = `${f} frames (${secs(f)} s)` + (P ? `, in ${P} pieces of up to ${secs(pf)} s` : f > c.max ? `, past the model's ${secs(c.max)} s range` : "");
 }
 
 // the clip row's line under the boxes: what the Steps and speed-LoRA boxes give (a model with a speed LoRA)
@@ -8061,7 +8636,7 @@ function studioState() {
 }
 
 // a setting changed (size, length, steps, seed, a LoRA's strength, the negative, a reference...): nothing renders until
-// Update, so several can change first - only the block sliders render as they move
+// Render, so several can change first - only the block sliders render as they move
 // Studio's own pick of the Samples-tab choices a model also offers here (FamilyOption.studio, e.g. H3 Image's
 // sampler): independent of the Samples tab, kept in prefs studio_opt_<KEY>, and used from the next render
 function studioOptionsDraw(L) {
@@ -8092,34 +8667,67 @@ function studioOptionsDraw(L) {
 
 function studioPending() {
   if (!S.st.ready) return;
-  $("stStart").textContent = "Update";
-  $("stStatus").textContent = "Changed - press Update to render.";
+  $("stStart").textContent = "Render";
+  $("stStatus").textContent = "Changed - press Render.";
 }
 
 function studioSchedule(live) {
   if (!S.st.ready) return;
+  if (S.st.split === "base") {                        // sliders change Tweaked only, and it's hidden
+    $("stStatus").textContent = "Tweaked is hidden: slider changes render when you show it again and press Render.";
+    return;
+  }
   clearTimeout(S.st.timer);
   S.st.timer = setTimeout(studioRender, live ? ($("stTurbo").checked ? 150 : 400) : 100);
 }
 
 async function studioRender() {
-  if (!$("stPrompt").value.trim()) { $("stStatus").textContent = "Enter a prompt (include the LoRA's trigger word) to see previews."; return; }
-  // seed 0: random, rolled by Update / Start (studioStart) and kept while sliders and the other controls render, so
+  if (!$("stPrompt").value.trim()) { $("stStatus").textContent = "Enter a prompt (include the LoRA's trigger word), then press Render."; return; }
+  if (S.st.foreign && !(S.stq && S.stq.job)) {       // a Studio queue job loaded another model or LoRA: yours again
+    S.st.foreign = false; S.st.loadedKey = "";
+    return studioStart();
+  }
+  // seed 0: random, rolled by Render / Start (studioStart) and kept while sliders and the other controls render, so
   // a tweak is judged on the same picture; Baseline and Tweaked share it
   const state = studioState();
   if (state.seed === 0) {
     if (!S.st.seedUsed) studioRollSeed();
     state.seed = S.st.seedUsed;
   }
-  try { await api("/api/studio/render", {state, ...studioExtra(), ...studioMixExtra()}); studioPoll(); }
+  // Save every render saves a tweaked still with the setup inside, as Save does
+  const setup = $("stAutoSave").checked && S.st.layout && S.st.layout.kind === "stills" ? {setup: studioSetupData()} : {};
+  try {
+    const r = await api("/api/studio/render", {state, ...studioExtra(), ...studioMixExtra(), ...setup});
+    if (r.after_job) $("stStatus").textContent = "Renders when the Studio queue's job finishes…";
+    if (r.reload) { S.st.foreign = false; S.st.loadedKey = ""; return studioStart(); }   // a job's LoRA is loaded
+    studioPoll();
+  }
   catch (e) { $("stStatus").textContent = e.message; }
+  finally { if (S.st.upHold) S.st.upHold = S.st.upNow = S.st.upPrev = 0; }     // the held Upscale request has gone
 }
 
 function studioRollSeed() { S.st.seedUsed = 1 + Math.floor(Math.random() * (2 ** 31 - 2)); }
 
+// what Start loads: the model, the LoRAs and the preview settings (Start, and each Studio queue job)
+function studioLoadBody() {
+  const L = S.st.layout;
+  const fast = (document.querySelector('input[name="stDit"]:checked') || {}).value !== "full";
+  return {family: L.key, primary: $("stPrimary").value.trim(), donor: $("stDonor").value.trim(),
+    fast, turbo: $("stTurbo").checked, negative: $("stNeg").value.trim(),
+    h3_model: L.kind === "video" ? $("stH3Model").value : "", base: L.kind === "video" ? $("stH3Base").value : "",
+    canvas: studioCanvas()};
+}
+
+// what a loaded model is: the model, the primary and the preview settings - a change of any is a reload at Render
+function studioLoadKey(L, fast) {
+  return [L.key, $("stPrimary").value.trim(), fast, L.kind === "video" ? $("stH3Model").value + $("stH3Base").value : "",
+    (L.render_choice || {}).value || "", L.follow_ck || "", L.follow_look || "", L.follow_turbo || ""].join("|");
+}
+
 async function studioStart() {
   stRemember();
-  if (seedOf("stSeed") === 0) studioRollSeed();      // Update with seed 0: a new random picture
+  // Render with seed 0: a new random picture (not for an Upscale: it works on the clip already rendered)
+  if (seedOf("stSeed") === 0 && !S.st.upHold) studioRollSeed();
   const L = S.st.layout;
   try {
     const st = await api("/api/studio/status");
@@ -8128,8 +8736,7 @@ async function studioStart() {
     const rc = await api("/api/studio/render_choice?family=" + encodeURIComponent(L.key)).catch(() => null);
     if (rc && rc.key === L.key) Object.assign(L, rc);
     const fast = (document.querySelector('input[name="stDit"]:checked') || {}).value !== "full";
-    const key = [L.key, $("stPrimary").value.trim(), fast, L.kind === "video" ? $("stH3Model").value + $("stH3Base").value : "",
-      (L.render_choice || {}).value || "", L.follow_ck || "", L.follow_look || "", L.follow_turbo || ""].join("|");
+    const key = studioLoadKey(L, fast);
     if (st.state === "ready" && S.st.loadedKey === key) {     // the same LoRA: the donor may change, then a render
       if ($("stDonor").value.trim() !== (st.donor || "")) await api("/api/studio/donor", {path: $("stDonor").value.trim()});
       // the Samples tab's steps and CFG (a model that follows it) apply without a reload: sent before each render
@@ -8137,33 +8744,69 @@ async function studioStart() {
       studioRender();
       return;
     }
+    if (st.state === "loading" || st.rendering || st.worker_busy) {   // never a new model under a render going
+      $("stStatus").textContent = "A model is loading or a render is going: Add to queue lines this one up behind " +
+        "it (or Cancel the one going, then Render).";
+      return;
+    }
     S.st.ready = false;
-    await api("/api/studio/load", {family: L.key, primary: $("stPrimary").value.trim(), donor: $("stDonor").value.trim(),
-      fast, turbo: $("stTurbo").checked, negative: $("stNeg").value.trim(),
-      h3_model: L.kind === "video" ? $("stH3Model").value : "", base: L.kind === "video" ? $("stH3Base").value : "",
-      canvas: studioCanvas()});
+    const lr = await api("/api/studio/load", studioLoadBody());
+    S.st.myLoad = lr.load_id || 0;                  // a later load the page didn't ask for (a queue job's) is seen
+    S.st.foreign = false;
     if (S.st.mix && S.st.mix.mode !== "off" || (S.st.dmix && S.st.dmix.on)) studioMixReset();
     S.st.loadedKey = key;
     S.st.pendingFirst = true;
     studioPoll();
-  } catch (e) { $("stStatus").textContent = e.message; }
+  } catch (e) { $("stStatus").textContent = e.message; S.st.upHold = S.st.upNow = S.st.upPrev = 0; }
 }
 
+// Studio's status poll. It always comes round again while the tab is open: a status request that failed, or an error
+// while drawing one, used to end it, and then a finished render never showed until something else polled (Cancel did)
 async function studioPoll() {
   clearTimeout(S.st.poll);
-  let st;
-  try { st = await api("/api/studio/status"); } catch (e) { return; }
+  let active = false;
+  try { active = await studioPollOnce(); }
+  catch (e) { console.error("[studio] status poll", e); }
+  if ($("tab-studio").classList.contains("active")) S.st.poll = setTimeout(studioPoll, active ? 400 : 2000);
+}
+async function studioPollOnce() {
+  const st = await api("/api/studio/status");
+  if (st.load_id && S.st.myLoad && st.load_id !== S.st.myLoad) S.st.foreign = true;
+  // your render waited for a queue job that had another LoRA loaded: load yours again and render it (once)
+  if (st.page_waiting && !S.st.reloading && st.state === "ready" && !st.rendering) {
+    S.st.reloading = true; S.st.foreign = false; S.st.loadedKey = "";
+    studioStart().finally(() => { S.st.reloading = false; });
+  }
+  let qActive = false;
+  try { qActive = studioQueueDraw(await api("/api/studio/queue")); } catch (e) { /* an older server */ }
+  // Add to queue lines a render up behind something: with nothing rendering and no jobs waiting, Render is the button
+  const going = st.rendering || st.state === "loading" || st.worker_busy || !!(S.stq && S.stq.job);
+  $("stQAdd").disabled = !(going || (S.stq && S.stq.left));
+  $("stStart").disabled = going;                      // one at a time: Add to queue lines the next one up
+  // Continue, Loop back and Upscale work on the clip in the Tweaked pane: they wait for the render going now (a
+  // queued copy could find another clip there by its turn); a queued job upscales only by its Auto tick
+  for (const id of ["stContinue", "stLoopBack", "stUpGo", "stUpPrev", "stKeepBtn"]) {
+    $(id).disabled = going || S.st.split === "base" || !!S.st.noTweak;
+  }
+  $("stStart").title = going ? "A model is loading or a render is going: Add to queue lines this one up behind it " +
+    "(or Cancel the one going)." : "";
   const wasReady = S.st.ready;
   S.st.ready = st.state === "ready";
   S.st.donor = !!st.donor;
   S.st.primaryBlocks = new Set(st.primary_blocks || []); S.st.donorBlocks = new Set(st.donor_blocks || []);
+  // no LoRA loaded: Studio renders the base model on its own (a zero adapter stands in for the primary)
+  S.st.noPrimary = S.st.ready && !st.primary;
+  S.st.noLora = S.st.noPrimary && !st.donor;
+  $("tab-studio").classList.toggle("no-primary", S.st.noPrimary);
+  $("tab-studio").classList.toggle("no-lora", S.st.noLora);
   // a donor loaded (or unloaded) after the model: its rows and buttons show (or go) now, not at the next load
   const actKey = [S.st.ready, st.donor || "", (st.primary_blocks || []).length, (st.donor_blocks || []).length].join("|");
   if (wasReady && S.st.ready && actKey !== S.st.actKey) studioActivity();
   S.st.actKey = actKey;
+  if (String(st.up_room) !== String(S.st.upRoom)) { S.st.upRoom = st.up_room; studioUpSummary(); }
   // loaded with nothing to render yet: say what it waits for (a prompt), not that a preview is coming
   const waiting = st.state === "ready" && !st.rendering && !st.shown && !$("stPrompt").value.trim();
-  $("stStatus").textContent = (waiting ? "Loaded. Enter a prompt (include the LoRA's trigger word), then press Update." :
+  $("stStatus").textContent = (waiting ? "Loaded. Enter a prompt (include the LoRA's trigger word), then press Render." :
     st.status || $("stStatus").textContent) +
     (st.status && /^(Loaded|Ready|Donor loaded)/.test(st.status) && studioEqNote(st) ? " " + studioEqNote(st) : "");
   $("stBadge").textContent = {loading: "Loading", ready: st.rendering ? "Rendering" : "Loaded", idle: ""}[st.state] || "";
@@ -8171,7 +8814,8 @@ async function studioPoll() {
   const p = st.progress;
   $("stBar").style.width = p && p[1] ? `${Math.round(100 * p[0] / p[1])}%` : st.rendering || st.state === "loading" ? "100%" : "0";
   $("stBar").parentElement.classList.toggle("indeterminate", !(p && p[1]) && (st.rendering || st.state === "loading"));
-  $("stStart").textContent = S.st.ready ? "Update" : "Start";
+  $("stStart").textContent = S.st.ready ? "Render" : "Start";
+  $("stCancel").disabled = !(st.rendering || st.pending);
   if (S.st.ready && !wasReady) {
     studioActivity();
     if (!$("stOut").value) S.st.autoOut = "";
@@ -8193,7 +8837,7 @@ async function studioPoll() {
     $("stBase").src = q("baseline");
     $("stBaseVid").style.display = kind === "video" && has ? "" : "none";
     $("stBase").style.display = kind === "video" && has ? "none" : "";
-    if (kind === "video" && has) { $("stBaseVid").poster = q("baseline"); $("stBaseVid").src = q("baseline_media"); }
+    if (kind === "video" && has) { $("stBaseVid").poster = q("baseline"); $("stBaseVid").src = clipLoopSrc(q("baseline_media")); }
   }
   if (st.early && st.early !== S.st.earlyShown) {        // H3 Show early: the unfinished look, until the clip lands
     S.st.earlyShown = st.early;
@@ -8204,8 +8848,11 @@ async function studioPoll() {
     S.st.shown = st.shown;
     const q = (w) => `/api/studio/image?which=${w}&gen=${st.shown}&t=${encodeURIComponent(TOKEN)}`;
     const keepBase = S.st.baseEarlyShown === st.shown;      // the Baseline already showed (and plays): left alone
-    if (!keepBase) $("stBase").src = q("baseline");
-    $("stTweak").src = q("tweaked");
+    const noBase = !!st.baseline_skipped;                   // its pane was hidden: no Baseline was rendered
+    const noTweak = !!st.tweaked_skipped;                   // its pane was hidden: no Tweaked render
+    S.st.noBase = noBase; S.st.noTweak = noTweak;
+    if (!keepBase && !noBase) $("stBase").src = q("baseline");
+    if (!noTweak) $("stTweak").src = q("tweaked");
     // a clip plays in its pane (the picture its poster); a song gets its player under the waveform
     const kind = S.st.layout && S.st.layout.kind;
     for (const [w, img, vid, aud] of [["baseline", "stBase", "stBaseVid", "stBaseAud"], ["tweaked", "stTweak", "stTweakVid", "stTweakAud"]]) {
@@ -8214,17 +8861,27 @@ async function studioPoll() {
       $(vid).style.display = kind === "video" && has ? "" : "none";
       $(aud).style.display = "none";
       $(img).style.display = kind === "video" && has ? "none" : "";
-      if (kind === "video" && has) { $(vid).poster = q(w); $(vid).src = q(w + "_media"); }
+      if (kind === "video" && has) { $(vid).poster = q(w); $(vid).src = clipLoopSrc(q(w + "_media")); }
       if (kind === "audio" && has) songLoad(w, q(w + "_media"), st.shown, st.act && st.act[w] ? q(w + "_act") : "");
     }
+    for (const [gone, side, img, vid] of [[noBase, "baseline", "stBase", "stBaseVid"], [noTweak, "tweaked", "stTweak", "stTweakVid"]])
+      if (gone) {
+        $(img).style.display = $(vid).style.display = "none";
+        $(img).removeAttribute("src"); $(vid).removeAttribute("src"); $(vid).load();
+        if (kind === "audio") songDrop(side);        // the player never plays the song before this one there
+      }
     studioMetrics();
     S.st.same = !!st.same;
     studioMapsAfterRender(S.st.same);
     studioDownloads(st, q);
     const ps = Number($("stPScale").value) || 1;
-    $("stBaseCap").textContent = (ps === 1 ? "Baseline (LoRA at default 1.0)" : `Baseline (LoRA at ${ps})`) +
+    $("stBaseCap").textContent = noBase ? "Baseline (not rendered: it was hidden - press Render to fill it)" :
+      (ps === 1 ? "Baseline (LoRA at default 1.0)" : `Baseline (LoRA at ${ps})`) +
       (st.donor ? " - the donor is not in the baseline" : "");
-    $("stTweakCap").textContent = "Tweaked (current sliders)" + (st.donor ? " - includes the donor" : "");
+    $("stTweakCap").textContent = noTweak ? "Tweaked (not rendered: it was hidden - press Render to fill it)" :
+      !st.primary && !st.donor ? "The base model (no LoRA)" :
+      "Tweaked (current sliders)" + (st.donor ? " - includes the donor" : "");
+    if (!st.primary && st.donor) $("stBaseCap").textContent = "Baseline: the base model (no primary LoRA)";
   }
   studioNoLoraPane(st);
   studioAceNotes(st.notes);
@@ -8243,24 +8900,32 @@ async function studioPoll() {
     $("stReport").href = `/api/studio/report?t=${encodeURIComponent(TOKEN)}`;
   }
   if (st.saved && st.saved.out !== S.st.savedShown) { S.st.savedShown = st.saved.out; studioSavedSay(st.saved); }
-  const active = st.state === "loading" || st.rendering || st.pending;
-  if ($("tab-studio").classList.contains("active")) S.st.poll = setTimeout(studioPoll, active ? 400 : 2000);
+  const said = st.out_said ? JSON.stringify(st.out_said) : "";      // Save every render's latest files
+  if (said && said !== S.st.outSaid) {
+    S.st.outSaid = said;
+    $("stDlMsg").textContent = st.out_said.error || `Saved: ${st.out_said.paths.join(" and ")}`;
+  }
+  return st.state === "loading" || st.rendering || !!st.pending || qActive;
 }
 
-// Download original / Download tweaked: the pair as rendered (a still's picture, a clip's mp4); songs have their
+// Save original / Save tweaked: the pair as rendered (a still's picture, a clip's mp4); songs have their
 // own Save in the song player
+function studioAutosaveShow() {          // Save every render: this model's own tick
+  $("stAutoSave").checked = !!(S.studioAutosave || {})[$("stFamily").value];
+}
+
 function studioDownloads(st, q) {
   const kind = S.st.layout && S.st.layout.kind, row = $("stDownloads");
   const on = kind !== "audio" && !!st.shown;
   row.style.display = on ? "" : "none";
   if (!on) return;
-  const lora = ($("stPrimary").value.trim().split(/[\\/]/).pop() || "render").replace(/\.safetensors$/i, "");
+  const lora = ($("stPrimary").value.trim().split(/[\\/]/).pop() || "base").replace(/\.safetensors$/i, "");
   const seed = String(seedOf("stSeed") === 0 && S.st.seedUsed ? S.st.seedUsed : ($("stSeed").value || "").trim());
   for (const [w, id, word] of [["baseline", "stDlBase", "original"], ["tweaked", "stDlTweak", "tweaked"]]) {
     const video = kind === "video" && st.media && st.media[w];
     const name = `${lora}_${word}${seed ? "_seed" + seed : ""}${video ? ".mp4" : ".png"}`;
-    $(id).href = q(video ? w + "_media" : w) + "&dl=" + encodeURIComponent(name);
-    $(id).setAttribute("download", name);
+    $(id).style.display = (w === "baseline" ? st.baseline_skipped : st.tweaked_skipped) ? "none" : "";
+    $(id).href = q(video ? w + "_media" : w) + "&dl=" + encodeURIComponent(name);     // another device's copy
   }
 }
 
@@ -8281,7 +8946,7 @@ function studioNoLoraPane(st) {
     $("stNolVid").style.display = kind === "video" && media ? "" : "none";
     $("stNolAud").style.display = "none";
     $("stNol").style.display = kind === "video" && media ? "none" : "";
-    if (kind === "video" && media) { $("stNolVid").poster = q("nolora"); $("stNolVid").src = q("nolora_media"); }
+    if (kind === "video" && media) { $("stNolVid").poster = q("nolora"); $("stNolVid").src = clipLoopSrc(q("nolora_media")); }
     if (kind === "audio" && media) songLoad("nolora", q("nolora_media"), st.nolora_gen);
   }
 }
@@ -8363,10 +9028,10 @@ function studioDock(open, remember = true) {
   if (!dock) {
     const btn = (id, text, title) => el("button", {class: "btn btn-sm", id, text, title});
     dock = el("div", {class: "st-dock", id: "stDock"},
-      el("div", {class: "st-dock-bar", id: "stDockBar"}, el("span", {class: "st-dock-title", text: "Preview"}),
+      el("div", {class: "st-dock-bar", id: "stDockBar"}, el("span", {class: "st-dock-title", text: "Output"}),
         btn("stDockPlay", "▶ Play together", "Play the clips or songs together"),
         btn("stDockPin", "", ""), btn("stDockFold", "▁", "Collapse to the title bar / open it again"),
-        btn("stDockClose", "✕", "Close - the preview goes back to its card")),
+        btn("stDockClose", "✕", "Close - the output goes back to its card")),
       el("div", {class: "st-dock-body", id: "stDockBody"}),
       el("div", {class: "st-dock-grip", id: "stDockGrip", title: "Drag to set how much room the panel takes"}));
     $("tab-studio").append(dock);                  // in the page first: its buttons are found by id below
@@ -8436,18 +9101,294 @@ function wireStudio() {
   new MutationObserver(studioDockPlay).observe($("stPlayBoth"), {attributes: true, attributeFilter: ["style"]});
   window.addEventListener("resize", debounce(() => { const d = $("stDock"); if (d && d.classList.contains("floating")) studioDockClamp(d); }, 150));
   $("stFamily").addEventListener("change", () => { studioFamily(); stRemember(); });
-  // the clip row: length / size / steps / speed LoRA / sound wait for Update, as Model and Base do
-  for (const id of ["stH3Len", "stH3W", "stH3H", "stH3Steps", "stH3Turbo", "stH3Sound", "stH3Boost"])
-    $(id).addEventListener("change", () => { studioH3Remember(); studioPending(); });
+  // the clip row: length / size / steps / speed LoRA / sound wait for Render, as Model and Base do
+  for (const id of ["stH3Len", "stH3LenS", "stH3W", "stH3H", "stH3Steps", "stH3Turbo", "stH3Sound", "stH3Boost", "stH3Pieces", "stH3PieceS"])
+    $(id).addEventListener("change", () => { if (id.startsWith("stH3Len") || id === "stH3PieceS") studioLenOther(true); if (id === "stH3Pieces") studioLenOther(); studioH3Remember(); studioPending(); });
   $("stH3Early").addEventListener("change", studioH3Remember);
-  $("stH3Model").addEventListener("change", () => { studioH3Remember(); studioSlots(); $("stStart").textContent = "Update"; });
-  $("stH3Base").addEventListener("change", () => { studioH3Remember(); $("stStart").textContent = "Update"; });
+  // the swap buttons between a width and a height (pictures and clips): the two values change places, and each
+  // picker reports its change as if picked by hand
+  // Continue and Loop back: a new clip after the one in the Tweaked pane, on its own prompt, starting on its last
+  // frame (Loop back: and ending on its first). Its length is the seconds box on the frame grid (empty: the rendered clip's own length,
+  // sent as 0), sent with an ordinary render request
+  for (const id of ["stLoopPrompt", "stLoopS"]) $(id).addEventListener("change", studioH3Remember);
+  // Upscale: the fold's boxes are remembered and its heading follows them; they wait for Render only while After
+  // every render is on. Upscale this clip sends them with an ordinary render request, for the clip in the Tweaked pane
+  for (const id of ["stUpW", "stUpH", "stUpDen", "stUpSteps", "stUpSec", "stUpAuto", "stUpWhich", "stUpFirst", "stUpLast", "stUpGuide", "stUpGuideL", "stUpBias"])
+    $(id).addEventListener("change", () => {
+      const V = S.st.layout.video, u = studioUpscale(V);
+      if (id === "stUpW" && $(id).value.trim()) $(id).value = u.width;
+      if (id === "stUpH" && $(id).value.trim()) $(id).value = u.height;
+      if (id === "stUpDen") $(id).value = u.denoise;
+      if (id === "stUpSteps") $(id).value = u.steps;
+      if (id === "stUpBias") $(id).value = u.bias;
+      if (id === "stUpSec" && u.section) $(id).value = String(Math.round(u.section / V.clip.fps * 100) / 100);
+      if (id !== "stUpAuto" && id !== "stUpWhich") { $("stUpPreset").value = ""; $("stUpPresetDel").hidden = true; }   // no longer the preset's values
+      studioUpSummary(); studioH3Remember();
+      if (id === "stUpAuto" || $("stUpAuto").checked) studioPending();
+    });
+  for (const id of ["stH3W", "stH3H"]) $(id).addEventListener("change", studioUpSummary);
+  // Upscale's own video: its row (a path, Choose, Upload, Clear), its Size, Crop, and the From / to boxes and sliders
+  {
+    const input = el("input", {type: "text", class: "w-path", id: "stUpVideoPath", placeholder: "a video file (optional)"});
+    const set = (p) => studioUpVideoSet(String(p || "").trim());
+    input.addEventListener("change", () => set(input.value));
+    const up = uploadButton({kind: "path", key: "STUDIO_upvideo", accept: "video/*,.mp4,.mov,.m4v,.mkv,.webm,.avi"}, input, set);
+    $("stUpVideoSlot").append(el("div", {class: "field-row"}, input,
+      el("button", {class: "btn", type: "button", text: "Choose…", onclick: () => pick(input.value || S.imageFolder, false, set)}), up.btn,
+      el("button", {class: "btn", type: "button", text: "Clear", onclick: () => set("")})), up.status);
+    const changed = (thumbs) => { studioUpVideoDraw(thumbs); studioUpSummary(); studioH3Remember(); };
+    $("stUpVideoSize").addEventListener("change", () => {
+      const v = $("stUpVideoSize").value;
+      if (!v) return;
+      [$("stUpW").value, $("stUpH").value] = v.split("x");
+      changed();
+    });
+    $("stUpVideoCrop").addEventListener("click", () => {
+      const v = S.st.upVideo;
+      if (!v) return;
+      // the box starts in the To size's shape (the video's own, as near as the sizes allow); a corner changes its
+      // shape, and the To size follows it at the area it has now
+      const [W, H] = studioUpSize();
+      studioCrop(v.path, v.rect, (rect) => {
+        v.rect = rect;
+        [$("stUpW").value, $("stUpH").value] = studioUpVideoFit(rect[2] - rect[0], rect[3] - rect[1]);
+        changed();
+      }, null, {url: upVideoUrl(v.path, v.a, 1600), W, H, sw: v.info.width, sh: v.info.height, fit: studioUpVideoFit,
+                title: "Crop the video: drag the box to move it, a corner to change its size and shape"});
+    });
+    // From and to: the slider moves the number as it is dragged; the frame shown follows when it is let go
+    const ends = (k, val) => {
+      const v = S.st.upVideo;
+      if (!v) return;
+      const t = Math.max(0, Math.min(v.info.seconds, Number(val) || 0));
+      if (k === "a") v.a = Math.min(t, v.b); else v.b = Math.max(t, v.a);
+    };
+    for (const [k, box] of [["a", "stUpVideoA"], ["b", "stUpVideoB"]])
+      $(box).addEventListener("change", () => { ends(k, $(box).value); changed(true); });
+    // the strip: drag an end, drag the section, or click outside it to bring the nearer end there. The two pictures
+    // follow a moment behind the drag
+    const shots = debounce((k) => {
+      const v = S.st.upVideo;
+      if (!v) return;
+      if (k !== "b") $("stUpVideoAImg").src = upVideoUrl(v.path, v.a, 440);
+      if (k !== "a") $("stUpVideoBImg").src = upVideoUrl(v.path, v.b, 440);
+    }, 180);
+    $("stUpVideoFilm").addEventListener("pointerdown", (e) => {
+      const v = S.st.upVideo;
+      if (!v) return;
+      const film = $("stUpVideoFilm"), box = film.getBoundingClientRect(), len = v.info.seconds;
+      const tAt = (ev) => Math.max(0, Math.min(len, (ev.clientX - box.left) / box.width * len));
+      let end = e.target.dataset && e.target.dataset.end;
+      const inSel = e.target === $("stUpVideoSel");
+      if (!end && !inSel) end = Math.abs(tAt(e) - v.a) <= Math.abs(tAt(e) - v.b) ? "a" : "b";
+      e.preventDefault();
+      film.setPointerCapture(e.pointerId);
+      const t0 = tAt(e), a0 = v.a, b0 = v.b;
+      const move = (ev) => {
+        const t = tAt(ev);
+        if (end === "a") v.a = Math.min(t, v.b);
+        else if (end === "b") v.b = Math.max(t, v.a);
+        else { const w = b0 - a0, a = Math.max(0, Math.min(len - w, a0 + t - t0)); v.a = a; v.b = a + w; }
+        studioUpVideoDraw(); shots(end);
+      };
+      const up = () => { film.removeEventListener("pointermove", move); film.removeEventListener("pointerup", up);
+        film.removeEventListener("pointercancel", up); changed(true); };
+      film.addEventListener("pointermove", move); film.addEventListener("pointerup", up); film.addEventListener("pointercancel", up);
+      move(e);
+    });
+  }
+  $("stUpBox").addEventListener("toggle", studioH3Remember);
+  for (const [id, k] of [["stUp1", 1], ["stUp15", 1.5], ["stUp2", 2]])
+    $(id).addEventListener("click", () => {
+      [$("stUpW").value, $("stUpH").value] = studioUpSize(k);
+      studioUpSummary(); studioH3Remember();
+      if ($("stUpAuto").checked) studioPending();
+    });
+  // Presets: tested sets of the fold's values. The prompt, which clip and After every render are left alone
+  $("stUpPreset").addEventListener("change", async () => {
+    const v = $("stUpPreset").value;
+    $("stUpPresetDel").hidden = !v.startsWith("u:");
+    let p = UP_PRESETS[v];
+    if (v.startsWith("u:")) {
+      try { p = (await api("/api/studio/preset_load", {family: studioUpPresetKey(), name: v.slice(2)})).blocks; }
+      catch (e) { $("stStatus").textContent = e.message; return; }
+    }
+    if (!p) return;
+    $("stUpDen").value = p.den;                                // the size is yours: no preset sets it $("stUpSteps").value = p.steps; $("stUpSec").value = p.sec || ""; $("stUpBias").value = p.bias || 0;
+    $("stUpAdv").checked = !!p.adv; S.st.upLow = Number(p.low) || 0; $("stUpRangeRow").hidden = !p.adv;
+    $("stUpFirst").checked = p.first !== false; $("stUpLast").checked = p.last !== false;
+    for (const [id, g] of [["stUpGuide", p.guide], ["stUpGuideL", p.guideL]])                       // a preset of yours
+      if (g) $(id).value = ["full", "source"].includes(g) ? g : "light";
+    studioUpSummary(); studioH3Remember();
+    if ($("stUpAuto").checked) studioPending();
+  });
+  // Save preset…: the fold's values under a name of your own (a name box opens under the row, as Studio's block
+  // presets do). The size is not part of a preset
+  $("stUpPresetSave").addEventListener("click", () => {
+    const host = $("stUpPresetSaveRow");
+    if (host.childNodes.length) { host.innerHTML = ""; return; }
+    const name = el("input", {type: "text", class: "w-path", placeholder: "A name for these upscale settings"});
+    const msg = el("span", {class: "field-hint"});
+    const save = async (overwrite) => {
+      const u = studioUpscale(S.st.layout.video);
+      const data = {den: u.denoise, steps: u.steps, sec: $("stUpSec").value.trim(), bias: u.bias, adv: $("stUpAdv").checked,
+        low: u.low, first: u.first_guide, last: u.last_guide, guide: u.guide[0], guideL: u.guide[1]};
+      try {
+        const r = await api("/api/studio/preset_save", {family: studioUpPresetKey(), name: name.value, blocks: data, overwrite: !!overwrite});
+        if (r.exists) { msg.replaceChildren(document.createTextNode("That name is taken. "), el("button", {class: "btn btn-sm btn-danger", text: "Replace it", onclick: () => save(true)})); return; }
+        const kept = name.value.trim();
+        host.innerHTML = "";
+        await studioUpPresets("u:" + kept);
+        $("stStatus").textContent = "Upscale preset saved.";
+      } catch (e) { msg.textContent = e.message; }
+    };
+    host.append(el("div", {class: "field-row"}, el("span", {class: "field-label"}), name,
+      el("button", {class: "btn btn-primary", text: "Save", onclick: () => save(false)}),
+      el("button", {class: "btn", text: "Cancel", onclick: () => { host.innerHTML = ""; }}), msg));
+    name.focus();
+  });
+  $("stUpPresetDel").addEventListener("click", async () => {
+    const v = $("stUpPreset").value;
+    if (!v.startsWith("u:")) return;
+    try { await api("/api/studio/preset_delete", {family: studioUpPresetKey(), name: v.slice(2)}); }
+    catch (e) { $("stStatus").textContent = e.message; return; }
+    await studioUpPresets("");
+    $("stStatus").textContent = "Upscale preset deleted.";
+  });
+  // Advanced: the noise range bar. Dragging the section moves both ends, a handle moves one; the high end is Denoise
+  const upRange = () => { $("stUpPreset").value = ""; $("stUpPresetDel").hidden = true; studioUpSummary(); studioH3Remember(); if ($("stUpAuto").checked) studioPending(); };
+  $("stUpAdv").addEventListener("change", () => { $("stUpRangeRow").hidden = !$("stUpAdv").checked; upRange(); });
+  $("stUpRange").addEventListener("pointerdown", (e) => {
+    const bar = $("stUpRange"), box = bar.getBoundingClientRect(), u0 = studioUpscale(S.st.layout.video);
+    const end = e.target.dataset && e.target.dataset.end, inSel = e.target === $("stUpRangeSel");
+    if (!end && !inSel) return;
+    e.preventDefault();
+    bar.setPointerCapture(e.pointerId);
+    const x0 = e.clientX, r2 = (v) => Math.round(v * 100) / 100;
+    const move = (ev) => {
+      const d = (x0 - ev.clientX) / box.width;            // rightward is less noise
+      let lo = u0.low, hi = u0.denoise;
+      if (end === "lo") lo = Math.max(0, Math.min(hi - 0.02, lo + d));
+      else if (end === "hi") hi = Math.max(Math.max(0.05, lo + 0.02), Math.min(1, hi + d));
+      else { const w = hi - lo, a = Math.max(0, Math.min(1 - w, lo + d)); lo = a; hi = a + w; }
+      S.st.upLow = r2(lo);
+      $("stUpDen").value = r2(Math.max(0.05, hi));
+      studioUpSummary();
+    };
+    const up = () => { bar.removeEventListener("pointermove", move); bar.removeEventListener("pointerup", up);
+      bar.removeEventListener("pointercancel", up); upRange(); };
+    bar.addEventListener("pointermove", move); bar.addEventListener("pointerup", up); bar.addEventListener("pointercancel", up);
+  });
+  // Edit prompt: the upscale's own prompt. Ticking it opens the box, filled with the main Prompt when it is empty
+  const upPrompt = () => { studioUpSummary(); studioH3Remember(); if ($("stUpAuto").checked) studioPending(); };
+  $("stUpOwnPrompt").addEventListener("change", () => {
+    const on = $("stUpOwnPrompt").checked;
+    if (on && !$("stUpPrompt").value.trim()) $("stUpPrompt").value = $("stPrompt").value;
+    $("stUpPromptRow").hidden = $("stUpPromptCopy").hidden = !on;
+    upPrompt();
+  });
+  $("stUpPrompt").addEventListener("change", upPrompt);
+  $("stUpPromptCopy").addEventListener("click", () => { $("stUpPrompt").value = $("stPrompt").value; upPrompt(); });
+  // Preview: the middle of the clip (1 frame, or the shortest clip) with the fold's settings, sent like Upscale now
+  // Both go by way of Render's check (studioStart): a primary or donor LoRA changed since the clip was rendered is
+  // loaded first, then the clip already rendered is upscaled on it. The request is held until it has been sent
+  $("stUpPrev").addEventListener("click", () => {
+    S.st.upPrev = Number($("stUpPrevN").value) || 22; S.st.upNow = 0; S.st.upHold = 1;   // 22 or 39 frames
+    studioStart();
+  });
+  $("stUpGo").addEventListener("click", () => {
+    S.st.upNow = 1; S.st.upPrev = 0; S.st.upHold = 1;
+    studioStart();
+  });
+  for (const [id, loop] of [["stContinue", false], ["stLoopBack", true]])
+    $(id).addEventListener("click", async () => {
+      const V = S.st.layout.video, sec = Number($("stLoopS").value) || 0;
+      S.st.loopBack = {prompt: $("stLoopPrompt").value.trim(), frames: sec > 0 ? studioSnapFrames(V, sec) : 0, loop};
+      try { await studioRender(); } finally { S.st.loopBack = null; }
+    });
+  // the Aspect lists: the longer side stays, the other goes to the nearest size on offer for that shape; a portrait
+  // size stays portrait
+  for (const [a, w, h] of [["stAspect", "stW", "stH"], ["stH3Aspect", "stH3W", "stH3H"]])
+    $(a).addEventListener("change", () => {
+      const [x, y] = $(a).value.split(":").map(Number);
+      $(a).value = "";
+      if (!x || !y) return;
+      const W = Number($(w).value), H = Number($(h).value), long = Math.max(W, H), want = long * y / x;
+      const sizes = [...$(w).options].map((o) => Number(o.value)).filter((n) => n > 0);
+      const short = sizes.reduce((best, n) => (Math.abs(n - want) < Math.abs(best - want) ? n : best), sizes[0]);
+      $(w).value = String(H > W ? short : long); $(h).value = String(H > W ? long : short);
+      for (const id of [w, h]) $(id).dispatchEvent(new Event("change", {bubbles: true}));
+    });
+  for (const [b, w, h] of [["stSwap", "stW", "stH"], ["stH3Swap", "stH3W", "stH3H"]])
+    $(b).addEventListener("click", () => {
+      const a = $(w).value;
+      $(w).value = $(h).value; $(h).value = a;
+      for (const id of [w, h]) $(id).dispatchEvent(new Event("change", {bubbles: true}));
+    });
+  // the note beside the length follows the two seconds boxes as they are typed in (the box itself moves to the
+  // nearest length when it is left)
+  for (const id of ["stH3LenS", "stH3PieceS"]) $(id).addEventListener("input", () => studioLenOther());
+  $("stH3Model").addEventListener("change", () => { studioH3Remember(); studioSlots(); $("stStart").textContent = "Render"; });
+  $("stH3Base").addEventListener("change", () => { studioH3Remember(); $("stStart").textContent = "Render"; });
   playTogether($("stPlayBothBtn"), () => {
-    const v = S.st.layout?.kind === "video", ids = v ? ["stBaseVid", "stTweakVid"] : ["stBaseAud", "stTweakAud"];
+    const v = S.st.layout?.kind === "video";
+    const ids = (v ? ["stBaseVid", "stTweakVid"] : ["stBaseAud", "stTweakAud"])     // only the panes on screen
+      .filter((id) => !(S.st.split === "tweak" && id.startsWith("stBase")) && !(S.st.split === "base" && id.startsWith("stTweak")));
     if ($("stNolPane").style.display !== "none") ids.unshift(v ? "stNolVid" : "stNolAud");
     return ids;
   });
-  $("stStart").addEventListener("click", studioStart);
+  $("stStart").addEventListener("click", () => {
+    $("stStart").disabled = true;                     // one press is one render (the poll gives it back when it's done)
+    S.st.upHold = S.st.upNow = S.st.upPrev = 0; studioStart();
+  });
+  $("stQAdd").addEventListener("click", studioQueueAdd);
+  // the arrows between Baseline and Tweaked: ◀ hides the Baseline (Tweaked takes the width), ▶ hides Tweaked; the
+  // arrow left at the edge brings the other back. Remembered in this browser
+  const split = (mode) => {
+    S.st.split = mode;
+    // a pane stepping aside stops playing (an unmuted clip would go on being heard unseen)
+    for (const id of mode === "tweak" ? ["stBaseVid", "stBaseAud"] : mode === "base" ? ["stTweakVid", "stTweakAud"] : [])
+      try { $(id).pause(); } catch (e) { /* nothing playing */ }
+    $("stPreview").classList.toggle("only-tweak", mode === "tweak");
+    $("stPreview").classList.toggle("only-base", mode === "base");
+    $("stSplitL").title = mode === "base" ? "Show Tweaked again, beside the Baseline" : "Hide the Baseline: Tweaked takes the whole width";
+    $("stSplitR").title = mode === "tweak" ? "Show the Baseline again, beside Tweaked" : "Hide Tweaked: the Baseline takes the whole width";
+    try { localStorage.setItem("fizgig_st_split", mode); } catch (e) { /* this browser keeps nothing */ }
+    if (S.st.layout) studioMetrics();
+    if (mode !== "tweak" && S.st.noBase || mode !== "base" && S.st.noTweak)
+      $("stStatus").textContent = "Press Render to fill the pane that was hidden.";
+  };
+  let splitWas = "both";
+  try { splitWas = localStorage.getItem("fizgig_st_split") || "both"; } catch (e) { /* both */ }
+  split(["tweak", "base"].includes(splitWas) ? splitWas : "both");
+  $("stSplitL").addEventListener("click", () => split(S.st.split === "base" ? "both" : "tweak"));
+  $("stSplitR").addEventListener("click", () => split(S.st.split === "tweak" ? "both" : "base"));
+  const stqOpen = (open) => {                         // the queue bar's list: open or closed, remembered here
+    $("stQBody").style.display = open ? "" : "none";
+    $("stQArrow").textContent = open ? "▾" : "▸";
+    $("stQHead").setAttribute("aria-expanded", open ? "true" : "false");
+    try { localStorage.setItem("fizgig_stq_open", open ? "1" : ""); } catch (e) { /* this browser keeps nothing */ }
+  };
+  let stqWas = false;
+  try { stqWas = localStorage.getItem("fizgig_stq_open") === "1"; } catch (e) { /* closed */ }
+  stqOpen(stqWas);
+  $("stQHead").addEventListener("click", () => stqOpen($("stQBody").style.display === "none"));
+  $("stQHead").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); stqOpen($("stQBody").style.display === "none"); }
+  });
+  $("stQPause").addEventListener("click", async () => {
+    const q = S.stq || {};
+    try { studioQueueDraw(await api(q.paused ? "/api/studio/queue/resume" : "/api/studio/queue/pause", {reason: "You paused it."})); studioPoll(); }
+    catch (e) { $("stQSay").textContent = e.message; }
+  });
+  $("stQClear").addEventListener("click", async () => { try { studioQueueDraw(await api("/api/studio/queue/clear", {})); } catch (e) { /* */ } });
+  const stqClose = () => $("stqModal").classList.remove("active");
+  $("stqResume").addEventListener("click", async () => {
+    stqClose();
+    try { studioQueueDraw(await api("/api/studio/queue/resume", {})); studioPoll(); } catch (e) { $("stQSay").textContent = e.message; }
+  });
+  $("stqKeep").addEventListener("click", stqClose);
+  $("stqLater").addEventListener("click", stqClose);
   wireStudioAce();
   S.st.eq = {primary: false, donor: false}; S.st.eqSaved = {};
   $("stEqP").addEventListener("click", () => studioEq("primary", !S.st.eq.primary));
@@ -8455,18 +9396,37 @@ function wireStudio() {
   wireStudioMetrics();
   wireStudioSetups();
   $("stEqD").addEventListener("click", () => studioEq("donor", !S.st.eq.donor));
+  $("stCancel").addEventListener("click", () => api("/api/studio/cancel", {}).then(studioPoll).catch(() => {}));
   $("stUnload").addEventListener("click", async () => { await api("/api/studio/reset", {}); S.st.ready = false; S.st.loadedKey = ""; studioPoll(); });
   $("stPrimaryPick").addEventListener("click", () => pick($("stPrimary").value || loraStart(), false, (p) => { $("stPrimary").value = p; stRemember(); }));
   $("stDonorPick").addEventListener("click", () => pick($("stDonor").value || $("stPrimary").value, false, (p) => { $("stDonor").value = p; stRemember();
     studioDmixOff();
     if (S.st.ready) api("/api/studio/donor", {path: p}).then(studioPoll).catch((e) => { $("stStatus").textContent = e.message; }); }));
+  // Unload primary: the zero adapter in its place, live (no model reload), as Unload donor does for the donor
+  $("stPrimaryUnload").addEventListener("click", async () => {
+    if (S.st.eq && S.st.eq.primary) studioEq("primary", false);
+    $("stPrimary").value = ""; stRemember();
+    // the primary's epochs / LoRA mix went with it; the donor's epoch blend stays
+    S.st.mix = {mode: "off", epochs: [], rows: []};
+    document.querySelector('input[name="stMixMode"][value="off"]').checked = true;
+    $("stMixInfo").textContent = ""; studioMixLayout();
+    if (!S.st.ready) return;
+    try {
+      await api("/api/studio/primary", {path: ""});
+      const fast = (document.querySelector('input[name="stDit"]:checked') || {}).value !== "full";
+      S.st.loadedKey = studioLoadKey(S.st.layout, fast);       // what's loaded now: Render needn't reload it
+      studioPoll(); studioPending();
+    } catch (e) { $("stStatus").textContent = e.message; }
+  });
   $("stDonorUnload").addEventListener("click", () => { $("stDonor").value = ""; stRemember(); studioDmixOff();
     if (S.st.ready) api("/api/studio/donor", {path: ""}).then(() => { studioPoll(); studioPending(); }); });
-  $("stRefPick").addEventListener("click", () => pick($("stRef").value || refStart(), false, (p) => { $("stRef").value = p; stRemember(); studioPending(); }));
+  $("stRefPick").addEventListener("click", () => pick($("stRef").value || stDir("ref") || refStart(), false,
+    (p) => { stDirKeep("ref", p); $("stRef").value = p; stRemember(); studioPending(); }));
   $("stRefClear").addEventListener("click", () => { $("stRef").value = ""; stRemember(); studioPending(); });
-  // ↻ New seed renders at once, as Update would (with any other change still waiting); typing a seed still waits
+  // ↻ New seed renders at once, as Render would (with any other change still waiting); typing a seed still waits
   $("stSeedNew").addEventListener("click", () => {
     $("stSeed").value = 1 + Math.floor(Math.random() * 99999); stRemember();
+    if (!$("stQAdd").disabled && $("stStart").disabled) return studioQueueAdd();   // a render going: queued behind it
     if (S.st.ready) studioStart();
   });
   for (const id of ["stSeed", "stRes", "stW", "stH", "stRefMp", "stRefStr", "stPScale", "stDScale"])
@@ -8528,7 +9488,52 @@ function capSettings() {
     threshold: $("capThreshold").value, leaveOut: $("capLeaveOut").value, underscores: $("capUnderscores").checked,
     extras: (S.capSaved || {}).extras || {}};
 }
-const saveCapSoon = debounce(() => { S.capSaved = capSettings(); api("/api/state", {captions: S.capSaved}).catch(() => {}); }, 600);
+// a queued caption job on show (the pill): its settings change here, in memory only, until Save to queue
+const saveCapSoon = debounce(() => { S.capSaved = capSettings(); if (!S.capViewing) api("/api/state", {captions: S.capSaved}).catch(() => {}); }, 600);
+// the Captions tab as it stands, for a queued caption job (shown again when the pill switches to it)
+const capUi = () => ({...capSettings(), addLine: $("capAddLine").checked});
+
+// the pill on a queued caption job: its folder and its Captions tab settings on show (your own are kept aside)
+async function capJobShow(item) {
+  const b = item.body || {};
+  const ui = b.ui || {model: b.model, task: b.task, tokens: b.max_tokens, threshold: b.threshold,
+    leaveOut: b.leave_out, underscores: b.underscores, overwrite: b.overwrite, addLine: b.add_line};
+  S.capViewing = true;
+  if ((item.image_folder || "") !== S.imageFolder) {
+    $("imageFolder").value = item.image_folder || ""; S.imageFolder = item.image_folder || "";
+    await loadTrigger(); lookForget();
+  }
+  S.capSaved = {...((S.draft || {}).cap || {}), ...ui};
+  await loadCaptionOptions();
+  $("capTrigger").value = b.trigger !== undefined ? b.trigger : (ui.trigger || "");
+  capAddLineSet(!!(ui.addLine !== undefined ? ui.addLine : b.add_line));
+  capSentShow();
+}
+
+// leaving a caption job: your own Captions tab settings back (the folder came back with your setup)
+async function capMineBack(mine) {
+  S.capViewing = false;
+  if (mine && mine.cap) S.capSaved = mine.cap;
+  await loadCaptionOptions();
+  if (mine && mine.addLine !== undefined) capAddLineSet(mine.addLine);
+}
+
+function capAddLineSet(on) {
+  if ($("capAddLine").checked === on) return;
+  $("capAddLine").checked = on;
+  $("capAddLine").dispatchEvent(new Event("change"));
+}
+
+// the Captions tab's buttons for the job on show: a queued caption job saves back to the queue, and captioning now
+// is for your own setup
+function capJobButtons() {
+  const c = S.ctx || {};
+  const job = c.kind === "capjob";
+  $("capQueue").textContent = job ? `Save to queue (job ${c.n || ""})`.replace(" )", ")") : "Add to queue";
+  $("capQueue").title = job ? "Keep these settings for the queued caption job; it keeps its place in the queue" :
+    "Caption this folder with these settings when the queue gets to it: before the run you queue after it, or after the run training now";
+  if (S._capJobShown !== (job ? c.id : "")) { S._capJobShown = job ? c.id : ""; pollCaptions(); }   // Caption All's state
+}
 // the chosen captioner's description (fizgig/captioners/registry.py), and whether it follows an instruction
 const capDesc = () => ((S.cap.opts && S.cap.opts.captioners) || []).find((c) => c.label === $("capModel").value);
 const qwenOn = () => !!(capDesc() || {}).instruction;
@@ -8610,6 +9615,13 @@ async function loadCaptionOptions() {
   $("capTaskHint").style.display = pictures && qwenOn() ? "" : "none";       // fillTasks ran while the row was hidden
   capKindRows();
   if (o.song_words) { $("capSongWords").placeholder = "e.g. " + o.song_words; $("capSongWords").value = saved.songWords || ""; }
+  // Add as another line: only for a model that can train several captions a picture (its Training tab's tick)
+  const lines = !!(S.fam && S.fam.multi_caption);
+  $("capAddLine").closest("label").style.display = lines ? "" : "none";
+  if (!lines && $("capAddLine").checked) {
+    $("capAddLine").checked = false;
+    $("capAddLine").dispatchEvent(new Event("change"));
+  }
 }
 
 // the rows the chosen captioner uses: a task menu when it has one (or follows an instruction), Max tokens for
@@ -8710,9 +9722,17 @@ function openInstr() {
   if (!t) return;
   $("capInstrBox").style.display = "";
   $("capInstr").value = t.instruction;
-  $("capInstrHint").textContent = `What Qwen3-VL is told for "${t.label}"` + (t.edited ? " (edited)" : " (as shipped)") +
-    ". Saved here. Auto-recaption uses it too when the Training tab's First try / Second try picks this task " +
-    "(by default Training caption first, then Exhaustive detail).";
+  // every captioner that follows instructions (Qwen3-VL, JoyCaption) is told the same text for a task: name the one
+  // picked. With extra options (JoyCaption) this is only the first part of what it's told - say so, and where the rest is
+  const d = capDesc() || {}, who = d.label || "The captioner";
+  const parts = (d.prompt_extras || []).length ?
+    `The main instruction for "${t.label}"` + (t.edited ? " (edited)" : " (as shipped)") + `: the start of what ${who} ` +
+    "is told. Your own sentences and the ticked options below are added after it; the \"It's told\" line under them " +
+    "shows the whole text." :
+    `What ${who} is told for "${t.label}"` + (t.edited ? " (edited)" : " (as shipped)") + ".";
+  $("capInstrHint").textContent = parts + " Saved here, for every captioner that follows instructions. Auto-recaption " +
+    "(always Qwen3-VL) uses it too when the Training tab's First try / Second try picks this task (by default " +
+    "Training caption first, then Exhaustive detail).";
   $("capInstrStatus").textContent = "";
 }
 
@@ -8723,6 +9743,7 @@ async function saveInstr(text) {
   await loadCaptionOptions();
   $("capTask").value = keep;
   openInstr();
+  capSentShow();                                   // the "It's told" line follows the saved text
   $("capInstrStatus").textContent = "Saved.";
 }
 
@@ -8738,7 +9759,10 @@ function capJobBody(extra = {}) {
     max_tokens: Number($("capTokens").value) || 120,
     threshold: Number($("capThreshold").value) || 0.35, leave_out: $("capLeaveOut").value,
     underscores: $("capUnderscores").checked,
-    trigger: $("capTrigger").value, overwrite: $("capOverwrite").checked, ...extra};
+    // Add as another line greys Overwrite out: a static or song caption then writes only the files without one
+    trigger: $("capTrigger").value, overwrite: $("capOverwrite").checked && !$("capAddLine").checked,
+    add_line: $("capAddLine").checked,
+    ...extra};
 }
 
 async function capRun(path, body) {
@@ -8750,27 +9774,34 @@ async function capRun(path, body) {
   } catch (e) { $("capStatus").textContent = e.message; }
 }
 
+// a caption file as the caption boxes give it back: \n line breaks (a file written on Windows has \r\n) and no empty
+// lines. Otherwise a card never matched its own file, and the live fill-in took the caption for one you had edited
+const capNormalise = (items) => {
+  for (const i of items) if (typeof i.caption === "string")
+    i.caption = i.caption.split(/\r?\n|\r/).filter((t) => t.trim()).join("\n");
+};
+
 // while captioning runs: the captions written so far fill in every few seconds - never over one you're editing
 async function captionsLive() {
   if (!S.imageFolder || !document.querySelector("#tab-captions.active")) return;
   const r = await api(`/api/captions?folder=${encodeURIComponent(capFolder())}&ext=${encodeURIComponent(capExt())}&family=${encodeURIComponent(S.family || "")}`)
     .catch(() => null);
   if (!r || !r.items) return;
+  capNormalise(r.items);
   const now = new Map(r.items.map((i) => [i.path, i]));
   for (const it of S.cap.items) {
     const n = now.get(it.path);
     if (!n || (n.caption ?? "") === (it.caption ?? "")) continue;
-    const ta = it._ta, untouched = !ta || (document.activeElement !== ta && ta.value === (it.caption ?? ""));
+    const ta = it._ta, untouched = !ta || (!ta.contains(document.activeElement) && ta.value === (it.caption ?? ""));
     if (!untouched) continue;
     const pic = S.lb.list[S.lb.at], big = $("lightboxCapText");
     if (pic && pic.cap && pic.cap.ta === ta && $("lightbox").style.display !== "none" &&
-        document.activeElement !== big && big.value === (it.caption ?? "")) {
-      big.value = n.caption ?? "";
+        !big.contains(document.activeElement) && big.value === (it.caption ?? "")) {
+      big.value = n.caption ?? "";                 // the line editor fits its lines itself
       $("lightboxCapNote").textContent = "Re-captioned";
     }
     it.caption = n.caption;
-    if (ta) { ta.value = n.caption ?? ""; fitText(ta); }
-    if (big.value === (n.caption ?? "")) fitText(big);
+    if (ta) { ta.value = n.caption ?? ""; if (ta.tagName === "TEXTAREA") fitText(ta); }
   }
 }
 
@@ -8779,16 +9810,20 @@ async function pollCaptions() {
   let st;
   try { st = await api("/api/captions/status"); } catch (e) { return; }
   const busy = ["loading", "running", "translating"].includes(st.state);
+  if (busy) S.cap.queuedNote = "";           // the queued job (or another) has started: its own progress shows
   const pct = st.total ? (100 * st.done) / st.total : 0;
   $("capBar").style.width = (busy ? pct : 0).toFixed(1) + "%";
   $("capStatus").textContent = {
-    idle: "No model loaded.", loaded: `${st.model} is loaded, ready.`,
-    loading: `Loading ${st.model}… (the first time it downloads)`,
+    idle: S.cap.queuedNote || "No model loaded.", loaded: `${st.model} is loaded, ready.`,
+    loading: st.phase === "downloading" ? `Downloading ${st.model}… (the first time only). Stop cancels it.`
+      : `Loading ${st.model} into memory… Stop cancels it.`,
     running: `Captioning ${st.done} of ${st.total}` + (st.fail ? ` · ${st.fail} failed` : ""),
     translating: st.total ? `Translating ${st.done} of ${st.total}` : "Loading the translator…",
   }[st.state] || st.state;
-  $("capAll").disabled = busy; $("capStatic").disabled = busy; $("capTranslate").disabled = busy;
-  $("capStop").disabled = !busy; $("capUnload").disabled = busy || !st.loaded;
+  const job = ctxKind() === "capjob";             // a queued caption job on show: Save to queue, not caption now
+  $("capAll").disabled = busy || job; $("capStatic").disabled = busy || job; $("capTranslate").disabled = busy;
+  // Unload while it is still loading too: it ends the load and frees what it took (#366)
+  $("capStop").disabled = !busy; $("capUnload").disabled = (busy && st.state !== "loading") || !st.loaded;
   const log = $("capLog");
   const atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
   log.textContent = st.log.join("\n");
@@ -8824,6 +9859,7 @@ async function loadCaptions() {
   const ext = $("captionExt").value.trim() || ".txt";
   const r = await api(`/api/captions?folder=${encodeURIComponent(capFolder())}` +
     `&ext=${encodeURIComponent(ext)}&family=${encodeURIComponent(S.family || "")}`);
+  capNormalise(r.items);
   S.cap.items = r.items;                      // the pictures, then the largest detail crops (it.crop: their folder)
   renderCaptions();
 }
@@ -8848,6 +9884,11 @@ function renderCaptions() {
   const pages = Math.max(1, Math.ceil(items.length / CAP_PAGE));
   S.cap.page = Math.min(S.cap.page, pages - 1);
   const missing = all.filter((i) => i.caption === null).length;
+  // Add text's Every line choice: only where some caption has several lines
+  const multi = all.filter((i) => capLines(i.caption) > 1).length;
+  $("frEachLineRow").hidden = !multi;
+  if (!multi) $("frEachLine").checked = false;
+  capLinesWarn();
   $("captionsSummary").textContent = `${all.length} files${missing ? `, ${missing} without a caption` : ""}` +
     (q ? ` · ${items.length} match` : "") + (pages > 1 ? ` · page ${S.cap.page + 1} of ${pages}` : "");
   $("capPrev").disabled = S.cap.page === 0; $("capNext").disabled = S.cap.page >= pages - 1;
@@ -8859,8 +9900,7 @@ function renderCaptions() {
   }
   for (const it of items.slice(S.cap.page * CAP_PAGE, (S.cap.page + 1) * CAP_PAGE)) {
     const src = `/api/media?path=${encodeURIComponent(it.path)}&t=${encodeURIComponent(TOKEN)}`;
-    const ta = el("textarea", {rows: 4, class: "fit-text"});
-    ta.value = it.caption ?? "";
+    const ta = captionLines(it.caption ?? "");
     it._ta = ta;                                 // for the live refresh while captioning runs
     const status = el("span", {class: "field-hint"});
     const saveCap = async () => {
@@ -8874,11 +9914,16 @@ function renderCaptions() {
     const trainsPictures = !S.fam || !S.fam.media || S.fam.media.includes("photo") || kind === "mp4";
     const recapRun = async (say = (t) => { status.textContent = t; }) => {
       say("Re-captioning…");
-      const r = await capRun("/api/captions/ai", capJobBody({only: [it.path], overwrite: true}));
+      // a file of several captions, with the Training tab's Several captions per picture ticked: Re-caption writes
+      // line 1 and keeps the others (or adds a line, when ticked). Not ticked, the file is one caption: replaced whole
+      const r = await capRun("/api/captions/ai", capJobBody({only: [it.path], overwrite: true,
+        add_line: $("capAddLine").checked, first_line: capMulti() && capLines(ta.value) > 1}));
       if (r && r.error) say(r.error);
     };
     const recap = isAudio || !trainsPictures ? null : el("button", {class: "btn btn-sm", text: "Re-caption",
-      title: "Write this file's caption again with the model and task above", onclick: () => recapRun()});
+      title: capMulti() && capLines(it.caption) > 1 ? "Write this file's first caption again with the model and " +
+        "task above (its other lines stay; with Add as another line ticked, it adds one more line instead)" :
+        "Write this file's caption again with the model and task above", onclick: () => recapRun()});
     // a clip with its sound (not Gizmo's _mute): Whisper its speech onto the caption, "... saying "words""
     const speechRun = kind === "mp4" && !/_mute$/i.test(it.name.replace(/\.[^.]+$/, "")) ? async (say = (t) => { status.textContent = t; }) => {
       say("Transcribing… (the first time downloads Whisper, ~300 MB)");
@@ -8924,6 +9969,86 @@ function renderCaptions() {
   fitTexts(host);
 }
 
+// a caption file a line at a time, every other line shaded and numbered once there are two (the Samples tab's prompt
+// box): several captions per picture read at a glance. Enter starts a new line, Backspace at a line's start joins it to
+// the one above. .value is the whole file, so Save, Re-caption, the big view and the live refresh use it as they did
+// the plain box; a "change" on any line (or a new / joined line) reaches listeners on the editor itself.
+// Empty lines aren't shown or kept (training skips them). Join lines, shown with two or more, makes the caption one line,
+// its lines joined with spaces: for a caption that was only wrapped, not several captions.
+function captionLines(text, extra = "") {
+  const list = el("div", {class: "prompt-lines caption-lines" + (extra ? " " + extra : "")});
+  const boxes = () => [...list.querySelectorAll("textarea")];
+  const join = el("button", {type: "button", class: "cap-join", text: "Join lines",
+    title: "Make this one caption: its lines joined with spaces (for a caption that was only wrapped over several " +
+      "lines, not several captions). Save keeps it."});
+  const renumber = () => {
+    list.querySelectorAll(".prompt-num").forEach((n, i) => { n.textContent = i + 1; });
+    list.classList.toggle("several", boxes().length > 1);
+    list.append(join);                         // always last, after the lines
+  };
+  const changed = () => list.dispatchEvent(new Event("change"));
+  join.addEventListener("click", () => {
+    list.value = boxes().map((b) => b.value.trim()).filter(Boolean).join(" ");
+    changed();
+  });
+  function line(t, after) {
+    const box = el("textarea", {rows: 1, class: "fit-text", spellcheck: "false", "aria-label": "Caption line"});
+    box.value = t;
+    const item = el("div", {class: "prompt-line"}, el("span", {class: "prompt-num"}), box);
+    box.addEventListener("input", () => fitText(box));
+    box.addEventListener("keydown", (e) => {
+      const at = box.selectionStart, flat = at === box.selectionEnd;
+      if (e.key === "Enter" && !e.isComposing && !e.ctrlKey && !e.metaKey) {   // the rest of the line: the next line
+        // (Ctrl+Enter is the big view's Save)
+        e.preventDefault();
+        const rest = box.value.slice(box.selectionEnd);
+        box.value = box.value.slice(0, at); fitText(box);
+        const next = line(rest, item);
+        renumber(); fitText(next); next.setSelectionRange(0, 0); next.focus(); changed();
+      } else if (e.key === "Backspace" && flat && at === 0 && item.previousElementSibling) {
+        e.preventDefault();                                 // joined to the line above, the caret at the join
+        const up = item.previousElementSibling.querySelector("textarea"), join = up.value.length;
+        up.value += box.value; item.remove();
+        renumber(); fitText(up); up.focus(); up.setSelectionRange(join, join); changed();
+      }
+    });
+    if (after) after.after(item); else list.append(item);
+    return box;
+  }
+  Object.defineProperty(list, "value", {
+    get: () => boxes().map((b) => b.value).filter((t) => t.trim()).join("\n"),     // empty lines dropped
+    set: (v) => {
+      list.replaceChildren();
+      const lines = String(v ?? "").split(/\r?\n/).filter((t) => t.trim());
+      for (const t of lines.length ? lines : [""]) line(t);
+      renumber();
+      requestAnimationFrame(() => boxes().forEach((b) => fitText(b)));
+    }});
+  list.value = text;
+  return list;
+}
+
+// a caption file's non-blank lines: more than one = several captions (the Training tab's Several captions per picture)
+const capLines = (text) => String(text || "").split(/\r?\n/).filter((l) => l.trim()).length;
+// the Training tab's Several captions per picture, ticked for this model: a file's lines are captions of their own
+const capMulti = () => !!(S.fam && S.fam.multi_caption && S.values && S.values.MULTI_CAPTION);
+
+// what Caption All is about to do to files that already hold several lines: Overwrite replaces each whole file; Add as
+// another line adds one to files that already have a caption (a second run of the same model adds a near-duplicate)
+function capLinesWarn() {
+  const items = (S.cap && S.cap.items) || [];
+  const multi = items.filter((i) => capLines(i.caption) > 1).length;
+  const had = items.filter((i) => capLines(i.caption) >= 1).length;
+  const add = $("capAddLine").checked, over = $("capOverwrite").checked;
+  const w = $("capLinesWarn");
+  w.textContent = add && had ? `${had} file${had === 1 ? " already has" : "s already have"} a caption: each gets ` +
+      "one more line (captioning again with the same model adds a near-copy)." :
+    !add && over && multi && S.fam && S.fam.multi_caption ? `${multi} file${multi === 1 ? " has" : "s have"} more ` +
+      "than one line: Overwrite replaces all of a file's lines with one caption. Tick Add as another line to keep " +
+      "them." : "";
+  w.hidden = !w.textContent;
+}
+
 // the table view: one row a file, sorted by a click on a column's head (again: the other way)
 const capWords = (i) => (i.caption || "").trim() ? (i.caption || "").trim().split(/\s+/).length : 0;
 const CAP_COLS = [
@@ -8939,8 +10064,7 @@ function captionsTable(items, ext) {
     text: c.label + (ts.key === c.key ? (ts.dir > 0 ? " ▲" : " ▼") : ""), title: "Sort by this column",
     onclick: () => { S.cap.tsort = {key: c.key, dir: ts.key === c.key ? -ts.dir : 1}; S.cap.page = 0; renderCaptions(); }})));
   const rows = items.map((it) => {
-    const ta = el("textarea", {rows: 2, class: "cap-cell-text fit-text"});
-    ta.value = it.caption ?? "";
+    const ta = captionLines(it.caption ?? "", "cap-cell-text");
     it._ta = ta;                                 // the live refresh while captioning runs fills it too
     const words = el("td", {class: "cap-num", text: String(capWords(it))});
     ta.addEventListener("change", async () => {  // saved when you leave the box, as typed
@@ -8964,7 +10088,8 @@ async function addText(apply) {
   const host = $("frChanges");
   try {
     const r = await api("/api/captions/add", {family: S.family, folder: capFolder(), start: $("frStart").value,
-      end: $("frEnd").value, trigger: $("capTrigger").value, apply, ext: capExt()});
+      end: $("frEnd").value, trigger: $("capTrigger").value, apply, ext: capExt(),
+      each_line: $("frEachLine").checked});
     host.innerHTML = "";
     $("frStatus").textContent = r.changes.length ? (apply ? `Added to ${r.changes.length} captions.` :
       `${r.changes.length} captions would change:`) : "Every caption already has that.";
@@ -9021,11 +10146,22 @@ function wireCaptions() {
     CAP_PAGE = Number($("capPerPage").value) || 12; S.cap.page = 0; renderCaptions(); saveCapSoon(); });
   $("capTask").addEventListener("change", onCapTask);
   $("capConcept").addEventListener("input", saveCapSoon);
+  // Add as another line: not remembered (left on, a later Caption All would add lines nobody asked for); while it's
+  // on, Overwrite has no say
+  $("capAddLine").addEventListener("change", () => {
+    const on = $("capAddLine").checked;
+    $("capOverwrite").disabled = on;
+    $("capOverwrite").closest("label").style.opacity = on ? "0.5" : "";
+    $("capAddLineNote").hidden = !on;
+    capLinesWarn();
+  });
+  $("capOverwrite").addEventListener("change", capLinesWarn);
   for (const id of ["capTrigger", "capTokens", "capOverwrite", "capSongWords", "capSkipCjk", "capThreshold", "capLeaveOut",
                     "capUnderscores"])
     $(id).addEventListener("change", saveCapSoon);
   // a trigger word typed here fills auto-recaption's on the Training tab (an empty one leaves it alone)
   $("capTrigger").addEventListener("input", () => {
+    if (S.capViewing) return;            // a queued caption job's word: kept with it (Save to queue), not the folder's
     S.trigger = $("capTrigger").value.trim().replace(/,+$/, "").trim();
     S.values.CAPTION_TRIGGER_WORD = S.trigger;
     syncInputs(["CAPTION_TRIGGER_WORD"]);
@@ -9051,6 +10187,17 @@ function wireCaptions() {
   $("capInstrSave").addEventListener("click", () => saveInstr($("capInstr").value));
   $("capInstrReset").addEventListener("click", () => saveInstr(""));
   $("capAll").addEventListener("click", () => capRun("/api/captions/ai", capJobBody()));
+  $("capQueue").addEventListener("click", async () => {      // this caption job, in the queue (to-do #14)
+    const c = S.ctx || {}, job = c.kind === "capjob";       // a queued caption job on show: saved back in its place
+    const r = await capRun("/api/queue/captions", capJobBody({ui: capUi(), ...(job ? {id: c.id} : {})}));
+    if (r && r.ok) {      // kept as the idle line (the status check would wipe it) until the next caption job or check
+      if (job) c.lora = r.item.lora;
+      S.cap.queuedNote = job ? `Saved to queue: ${r.item.lora}. It keeps its place.` :
+        `Queued: ${r.item.lora}. It runs when the queue gets to it; queue the run after it.`;
+      $("capStatus").textContent = S.cap.queuedNote;
+      pollRun();
+    }
+  });
   $("capStatic").addEventListener("click", async () => {
     const r = await capRun("/api/captions/static", capJobBody());
     if (r && !r.error) { $("capStatus").textContent = `${r.written} written, ${r.skipped} kept.`; loadCaptions(); }
@@ -9334,7 +10481,7 @@ function rmShow(img, vid, it) {
   $(vid).style.display = clip ? "" : "none";
   $(img).style.display = clip ? "none" : "";
   if (!it) { $(img).removeAttribute("src"); $(vid).removeAttribute("src"); return; }
-  if (clip) { $(vid).poster = rmMedia(it); if ($(vid).dataset.src !== rmMedia(it, true)) { $(vid).dataset.src = rmMedia(it, true); $(vid).src = rmMedia(it, true); } }
+  if (clip) { $(vid).poster = rmMedia(it); if ($(vid).dataset.src !== rmMedia(it, true)) { $(vid).dataset.src = rmMedia(it, true); $(vid).src = clipLoopSrc(rmMedia(it, true)); } }
   else $(img).src = rmMedia(it);
 }
 function rmShowLeft(it, caption) {
@@ -9579,6 +10726,34 @@ function rmWire() {
 // Play together / Pause together: one button for the panes' players (ids() names the ones in use). Play starts
 // them from the top unless they were paused together (then they carry on, still in step); the label follows the
 // players, so pausing one by its own controls turns the button back to Play.
+// Repeat / Ping-pong for the Studio and RefMod Toolkit clip panes (one choice, kept in this browser). Ping-pong
+// plays a file the server makes from the clip (forward then backward: &pp=1), looped like any other.
+const CLIP_LOOP_KEY = "fizgig_clip_loop", CLIP_LOOP_VIDS = ["stBaseVid", "stTweakVid", "stNolVid", "rmTweakVid", "rmBaseVid"];
+function clipLoopMode() {
+  try { return localStorage.getItem(CLIP_LOOP_KEY) === "pingpong" ? "pingpong" : "repeat"; } catch (e) { return "repeat"; }
+}
+function clipLoopSrc(url) {
+  const bare = url.replace(/&pp=1/g, "");
+  return clipLoopMode() === "pingpong" ? bare + "&pp=1" : bare;
+}
+function clipLoopInit() {
+  const sels = [...document.querySelectorAll(".clip-loop-mode")];
+  for (const s of sels) {
+    s.value = clipLoopMode();
+    s.addEventListener("change", () => {
+      try { localStorage.setItem(CLIP_LOOP_KEY, s.value); } catch (e) { /* the choice lasts for this page only */ }
+      for (const o of sels) o.value = clipLoopMode();
+      for (const id of CLIP_LOOP_VIDS) {              // the clips on show swap to the other file, playing on if they were
+        const v = $(id), src = v && v.getAttribute("src");
+        if (!src || clipLoopSrc(src) === src) continue;
+        const playing = !v.paused;
+        v.src = clipLoopSrc(src);
+        if (playing) v.play().catch(() => {});
+      }
+    });
+  }
+}
+
 function playTogether(btn, ids) {
   const media = () => ids().map((id) => $(id)).filter((m) => m && m.getAttribute("src"));
   const label = () => { btn.textContent = media().some((m) => !m.paused) ? "⏸ Pause together" : "▶ Play together"; };
@@ -9595,8 +10770,18 @@ function playTogether(btn, ids) {
 }
 
 // ---- file picker -------------------------------------------------------------------------------------------
-let pickDone = null, pickDir = false;
+let pickDone = null, pickDir = false, nativePickOff = false;
+// On the machine running Fizgig: the computer's own Open / folder window. Cancel there = nothing; no window to be
+// had (no tkinter, no screen, another computer, an error) = Fizgig's own picker below.
 async function pick(start, dirOnly, done) {
+  if (!nativePickOff && !pageIsElsewhere()) {
+    try {
+      const r = await api(`/api/native_pick?dir=${dirOnly ? 1 : 0}&path=${encodeURIComponent(start || "")}`);
+      if (r && r.path) { done(r.path); return; }
+      if (r && r.cancelled) return;
+      nativePickOff = true;                                         // unavailable: don't ask again this session
+    } catch (e) { /* fall back */ }
+  }
   pickDone = done; pickDir = dirOnly;
   $("pickerTitle").textContent = dirOnly ? "Choose a folder" : "Choose a file";
   $("pickerChoose").style.display = dirOnly ? "" : "none";
@@ -10466,6 +11651,8 @@ function showTab(name) {
   const pane = document.querySelector(".notebook-pane"), was = document.querySelector(".tab-panel.active");
   S.tabScroll = S.tabScroll || {};
   if (was && was.id !== "tab-" + name) S.tabScroll[was.id] = [pane ? pane.scrollTop : 0, window.scrollY];
+  if (was && was.id === "tab-studio" && name !== "studio" && S.stq && S.stq.left && !S.stq.paused)
+    api("/api/studio/queue/pause", {reason: "You left Studio."}).catch(() => {});   // the job rendering now finishes
   const tb = document.querySelector(`.tab-item[data-tab="${name}"] span`);
   if (tb) $("tabsToggleName").textContent = tb.textContent;
   tabsMenu(false);
@@ -10596,6 +11783,45 @@ const PODLOCAL_SORT = {
   za: (a, b) => b.name.localeCompare(a.name, undefined, {numeric: true, sensitivity: "base"}),
   big: (a, b) => (b.bytes || 0) - (a.bytes || 0),
   many: (a, b) => (b.pictures + b.clips + b.songs) - (a.pictures + a.clips + a.songs)};
+
+// ---- Start tab, on a pod: download a training folder from a link (web/pod_dataset.py, to-do #13, #308) ----------
+const podFetchGB = (b) => b >= 1e9 ? (b / 1e9).toFixed(1) + " GB" : (b / 1e6).toFixed(0) + " MB";
+function podFetchShow(s) {
+  const run = s.state === "running";
+  $("podFetchGo").style.display = run ? "none" : "";
+  $("podFetchStop").style.display = run ? "" : "none";
+  $("podFetchUse").style.display = s.state === "done" ? "" : "none";
+  const left = s.seconds_left ? `, about ${Math.max(1, Math.round(s.seconds_left / 60))} min left` : "";
+  $("podFetchStatus").textContent =
+    run ? `Downloading into ${s.folder}: ${podFetchGB(s.bytes)}` + (s.total ? ` of ${podFetchGB(s.total)}` : "") +
+          (s.speed ? `, ${podFetchGB(s.speed)}/s` : "") + left + "." :
+    s.state === "done" ? `Downloaded: ${s.folder} (${podFetchGB(s.bytes)}).` :
+    s.state === "failed" || s.state === "stopped" ? s.message : "";
+}
+async function podFetchPoll() {
+  let s;
+  try { s = await api("/api/pod/dataset"); } catch (e) { return; }
+  podFetchShow(s);
+  if (s.state === "running") setTimeout(podFetchPoll, 2000);
+}
+function podFetchInit() {
+  if (!S.onPod || S._podFetchOn) return;
+  S._podFetchOn = true;
+  $("podFetchCard").style.display = "";
+  $("podFetchGo").onclick = async () => {
+    $("podFetchStatus").textContent = "Checking the link and the disk…";
+    const r = await api("/api/pod/dataset/fetch", {link: $("podFetchLink").value, name: $("podFetchName").value})
+      .catch((e) => ({error: e.message}));
+    if (r.error) { $("podFetchStatus").textContent = r.error; return; }
+    podFetchShow(r); podFetchPoll();
+  };
+  $("podFetchStop").onclick = async () => podFetchShow(await api("/api/pod/dataset/stop", {}));
+  $("podFetchUse").onclick = async () => {
+    const s = await api("/api/pod/dataset");
+    $("imageFolder").value = s.folder; $("imageFolder").dispatchEvent(new Event("change"));
+  };
+  podFetchPoll();                          // a download already going (the page reloaded)
+}
 
 async function podLocalInit() {
   const api_ = appBridge();
@@ -10849,20 +12075,48 @@ let wired = false;
 const LB_SIDE = "(min-width: 1100px) and (min-aspect-ratio: 5/4)";
 function fitText(ta, grow) {
   if (!ta || !ta.isConnected || !ta.offsetParent) return;
-  if (ta.id === "lightboxCapText" && matchMedia(LB_SIDE).matches) { ta.style.height = ""; return; }
   if (grow && ta.scrollHeight <= ta.clientHeight) return;
-  const max = Math.round(innerHeight * (ta.id === "lightboxCapText" ? 0.5 : 0.4));
+  // a caption line grows to all its text: the caption around it scrolls instead (.caption-lines, the big view's too)
+  const max = ta.closest(".caption-lines") ? Infinity : Math.round(innerHeight * 0.4);
   const border = ta.offsetHeight - ta.clientHeight;
   ta.style.height = "";
   ta.style.height = Math.min(Math.max(ta.scrollHeight + border, ta.offsetHeight), max) + "px";
 }
 const fitTexts = (host) => requestAnimationFrame(() => host.querySelectorAll("textarea.fit-text").forEach((t) => fitText(t)));
 document.addEventListener("input", (e) => { if (e.target.matches && e.target.matches("textarea.fit-text")) fitText(e.target, true); });
-matchMedia(LB_SIDE).addEventListener("change", () => fitText($("lightboxCapText")));
+matchMedia(LB_SIDE).addEventListener("change", () => fitTexts($("lightboxCapText")));
 
 // ---- the picture viewer: any preview or Captions picture, big, with the others in its list a step away --------
 const LIGHTBOX_PICS = ".gallery-item > img, .caption-card > img";      // (Repair Studio's panes are gallery items)
-S.lb = {list: [], at: 0};
+S.lb = {list: [], at: 0, z: {s: 1, x: 0, y: 0}};
+// zoom: scroll zooms about the cursor (fit .. 4x the picture's own pixels), drag pans, double-click goes fit <-> 1:1.
+// The zoom stays as ← → steps, so Studio's Baseline and Tweaked compare on the same spot; a new open starts at fit
+function lbFit() {                                    // screen px per picture px at fit (object-fit: contain)
+  const img = $("lightboxImg");
+  if (!img.naturalWidth || !img.clientWidth) return 1;
+  return Math.min(img.clientWidth / img.naturalWidth, img.clientHeight / img.naturalHeight);
+}
+function lbApply() {
+  const img = $("lightboxImg"), z = S.lb.z;
+  const w = img.clientWidth, h = img.clientHeight;   // the picture's area stays covered: no drifting off into black
+  z.x = Math.min(0, Math.max(w - w * z.s, z.x));
+  z.y = Math.min(0, Math.max(h - h * z.s, z.y));
+  img.style.transform = z.s === 1 ? "" : `translate(${z.x}px, ${z.y}px) scale(${z.s})`;
+  $("lightbox").classList.toggle("zoomed", z.s > 1);
+  const pct = Math.round(z.s * lbFit() * 100);
+  $("lightboxZoom").style.display = z.s > 1 ? "" : "none";
+  $("lightboxZoom").textContent = `${pct}% of the picture's pixels`;
+}
+function lbZoomTo(s, cx, cy) {                        // cx, cy: the screen point that stays put
+  const img = $("lightboxImg"), z = S.lb.z, r = img.getBoundingClientRect();
+  const fit = lbFit(), max = Math.max(4 / fit, 2);
+  s = Math.min(max, Math.max(1, s));
+  const bx = r.left - z.x, by = r.top - z.y;          // the untransformed corner
+  const ux = (cx - bx - z.x) / z.s, uy = (cy - by - z.y) / z.s;
+  z.x = cx - bx - ux * s; z.y = cy - by - uy * s; z.s = s;
+  lbApply();
+}
+function lbReset() { S.lb.z = {s: 1, x: 0, y: 0}; lbApply(); }
 // the caption shown under a Captions picture: an edit goes back to its card and is saved before the view moves on
 async function lightboxCapFlush() {
   const pic = S.lb.list[S.lb.at], cap = pic && pic.cap;
@@ -10878,6 +12132,7 @@ async function lightboxStep(i) {
 function lightboxShow(i) {
   const pic = S.lb.list[i];
   if (!pic) return;
+  if ($("lightbox").style.display === "none") lbReset();   // a fresh open starts at fit; a step keeps the zoom
   S.lb.at = i;
   $("lightboxCap").style.display = pic.cap ? "" : "none";
   $("lightbox").classList.toggle("with-cap", !!pic.cap);
@@ -10894,10 +12149,11 @@ function lightboxShow(i) {
   $("lightboxPrev").style.visibility = i > 0 ? "" : "hidden";
   $("lightboxNext").style.visibility = i < S.lb.list.length - 1 ? "" : "hidden";
   $("lightbox").style.display = "";
-  if (pic.cap) fitText($("lightboxCapText"));
+  if (pic.cap) fitTexts($("lightboxCapText"));     // its lines, now the view is on screen
 }
 async function lightboxClose() {
   if (!(await lightboxCapFlush())) return;
+  lbReset();
   $("lightbox").style.display = "none"; $("lightboxImg").src = "";
 }
 // a tile's thumbnail (/api/thumb, small and squashed) opens big as the picture itself (/api/media), as the Start tab's
@@ -10934,6 +12190,10 @@ document.addEventListener("load", (e) => {
 }, true);
 
 function wireLightbox() {
+  // the big view's caption: the cards' line editor (a line at a time, empty lines dropped, Join lines)
+  const lines = captionLines("", "lightbox-lines");
+  lines.id = "lightboxCapText";
+  $("lightboxCapText").replaceWith(lines);
   document.addEventListener("click", (e) => {
     const img = e.target.closest && e.target.closest(LIGHTBOX_PICS);
     if (!img) return;
@@ -10950,7 +12210,39 @@ function wireLightbox() {
     });
     lightboxShow(imgs.indexOf(img));
   });
-  $("lightbox").addEventListener("click", (e) => { if (e.target.id === "lightbox" || e.target.id === "lightboxImg") lightboxClose(); });
+  // a click on the picture closes it at fit; zoomed, the picture is for moving around (a drag never closes it)
+  $("lightbox").addEventListener("click", (e) => {
+    if (e.target.id === "lightboxImg" && (S.lb.z.s > 1 || S.lb.dragged)) { S.lb.dragged = false; return; }
+    if (e.target.id === "lightbox" || e.target.id === "lightboxImg") lightboxClose();
+  });
+  const lbImg = $("lightboxImg");
+  lbImg.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    lbZoomTo(S.lb.z.s * Math.pow(1.0015, -e.deltaY), e.clientX, e.clientY);
+  }, {passive: false});
+  lbImg.addEventListener("dblclick", (e) => {
+    e.preventDefault();
+    const one = 1 / lbFit();                         // 1:1 pixels (or 2x when the picture is smaller than the screen)
+    lbZoomTo(S.lb.z.s > 1.01 ? 1 : Math.max(one, 2), e.clientX, e.clientY);
+  });
+  lbImg.addEventListener("pointerdown", (e) => {
+    if (S.lb.z.s <= 1 || e.button !== 0) return;
+    e.preventDefault();
+    const z = S.lb.z, x0 = e.clientX, y0 = e.clientY, sx = z.x, sy = z.y;
+    S.lb.dragged = false;
+    lbImg.setPointerCapture(e.pointerId);
+    $("lightbox").classList.add("panning");
+    const move = (m) => {
+      if (Math.abs(m.clientX - x0) + Math.abs(m.clientY - y0) > 3) S.lb.dragged = true;
+      z.x = sx + m.clientX - x0; z.y = sy + m.clientY - y0; lbApply();
+    };
+    const up = () => {
+      lbImg.removeEventListener("pointermove", move); lbImg.removeEventListener("pointerup", up);
+      lbImg.removeEventListener("pointercancel", up); $("lightbox").classList.remove("panning");
+    };
+    lbImg.addEventListener("pointermove", move); lbImg.addEventListener("pointerup", up); lbImg.addEventListener("pointercancel", up);
+  });
+  lbImg.addEventListener("load", () => { if ($("lightbox").style.display !== "none") lbApply(); });  // a step: re-clamp
   $("lightboxClose").addEventListener("click", lightboxClose);
   $("lightboxPrev").addEventListener("click", () => lightboxStep(S.lb.at - 1));
   $("lightboxNext").addEventListener("click", () => lightboxStep(S.lb.at + 1));
@@ -10970,7 +12262,7 @@ function wireLightbox() {
     const pic = S.lb.list[S.lb.at];
     if (!pic || !pic.cap || !pic.cap.speech || !(await lightboxCapFlush())) return;
     const text = await pic.cap.speech((t) => { $("lightboxCapNote").textContent = t; });
-    if (text && S.lb.list[S.lb.at] === pic) { $("lightboxCapText").value = text; fitText($("lightboxCapText")); }
+    if (text && S.lb.list[S.lb.at] === pic) $("lightboxCapText").value = text;     // the editor fits its lines
   });
   $("lightboxCapRemove").addEventListener("click", async () => {
     const pic = S.lb.list[S.lb.at];
@@ -10982,7 +12274,7 @@ function wireLightbox() {
   });
   document.addEventListener("keydown", (e) => {
     if ($("lightbox").style.display === "none") return;
-    const typing = e.target === $("lightboxCapText");
+    const typing = $("lightboxCapText").contains(e.target);
     if (typing && e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); $("lightboxCapSave").click(); }
     else if (e.key === "Escape") lightboxClose();
     else if (typing) return;                     // the arrows move the cursor in the caption
@@ -11028,6 +12320,7 @@ function wire() {
   window.addEventListener("focus", catchUp);
   wireLightbox();
   wireStudio();
+  clipLoopInit();                      // the clip panes' Repeat / Ping-pong (Studio and RefMod Toolkit)
   wirePrep();
   $("presetSave").addEventListener("click", presetSaveOpen);
   $("btnTrainMaps").addEventListener("click", async () => {      // the same view as Runs & outputs, for the run going now
@@ -11352,7 +12645,11 @@ function wire() {
       return;
     }
     stopConfirmReset();
-    start("/api/stop");
+    // its own request, never start()'s: start() ignores a press while another of its requests is still out, and a
+    // Start, Pause or Resume that hadn't answered left Stop doing nothing
+    $("btnStop").textContent = "Stopping…";
+    api("/api/stop", {}).then((r) => { if (!r.ok) showProblems(["Nothing was stopped: the server has no run going."]); })
+      .catch((e) => showProblems([`Stop didn't reach the server: ${e.message}`])).finally(pollRun);
   });
   $("btnResume").addEventListener("click", resumeClick);
   $("btnMove").addEventListener("click", () => { if (S.moveOpen) { S.moveOpen = false; pollRun(); } else moveOpen(); });

@@ -108,6 +108,9 @@ def _blend(a, b, t, mode):
     return (d * target).to(a.dtype)
 
 
+SWAP_PARK_FREE_GB = 8.0    # a block-swapped DiT parks for the text encoder / decode under this much free VRAM (#377)
+
+
 def _free_vram_gb():
     try:
         from fizgig.families.quant import free_vram_gb
@@ -221,6 +224,7 @@ class WorkbenchEngine:
             precision = "bf16"
         self.dit, self.swapped = quant.load_base(self.driver, dit_path, device, precision, blocks_to_swap,
                                                  supports_backward=False)
+        self._swap_parked = False                       # loaded in its streaming layout (_park_dit)
         if self.swapped:
             self.driver.block_swap_mode(self.dit, inference=True)
         self.precision = precision
@@ -271,12 +275,18 @@ class WorkbenchEngine:
             raise RuntimeError("Pipeline not loaded; call ensure_pipeline() first.")
         if self.primary_network is not None:
             raise RuntimeError("Primary already loaded — call reset() to swap.")
-        n = self._attach(path, PRIMARY)
+        if not path:                                   # no LoRA: the base model, through a zero adapter
+            n = self.net.add_zero(PRIMARY)
+            self.net.move_adapter(PRIMARY, self.device)
+            self.__dict__.setdefault("_eq", {}).pop(PRIMARY, None)
+        else:
+            n = self._attach(path, PRIMARY)
         self.primary_network = self.net
-        self._clear_blend_state()
-        self.primary_path = path
-        self.primary_block_ids = self.net.adapter_blocks(PRIMARY)
-        self.primary_hash = self._hash(path)
+        # a primary swapped in with a donor still loaded (Unload primary) keeps the donor's blend
+        self._clear_blend_state(PRIMARY if self.donor_network is not None else None)
+        self.primary_path = path or ""
+        self.primary_block_ids = self.net.adapter_blocks(PRIMARY) if path else []
+        self.primary_hash = self._hash(path) if path else ""
         self._invalidate_baseline_cache()
         self._invalidate_activation_cache()
         logger.info("%s primary: %s (%d Linears, %d blocks)", self.desc.display_name, path, n,
@@ -325,6 +335,21 @@ class WorkbenchEngine:
         self.donor_path = path
         self.donor_block_ids = self.net.adapter_blocks(DONOR)
         self._invalidate_activation_cache()
+
+    def unload_primary(self):
+        """Take the primary out without a full reset (Studio's Unload primary, which puts the zero adapter in its
+        place; RefMod changing its LoRA), as unload_donor does for the donor."""
+        if self.primary_network is not None:
+            self.unload_epochs(PRIMARY)
+            self.net.remove(PRIMARY)
+            self.__dict__.setdefault("_eq", {}).pop(PRIMARY, None)
+            self.primary_network = None
+            self.primary_path = None
+            self.primary_hash = None
+            self.primary_block_ids = set()
+            self._clear_blend_state(PRIMARY)
+            self._invalidate_baseline_cache()
+            self._invalidate_activation_cache()
 
     def unload_donor(self):
         if self.donor_network is not None:
@@ -519,13 +544,41 @@ class WorkbenchEngine:
         self._cancel_event.clear()
 
     # ---- rendering ----------------------------------------------------------------------------------
+    def _sample_with_memory(self, sample):
+        return sample()
+
     def _park_dit(self, where):
-        if self.dit is not None and not getattr(self, "swapped", 0):   # a swapped DiT keeps its streaming layout
-            from fizgig.families import quant
-            quant.move(self.dit, where)
-            if where == "cpu":
-                gc.collect()
-                torch.cuda.empty_cache()
+        if self.dit is None:
+            return
+        from fizgig.families import quant
+        if getattr(self, "swapped", 0):
+            # A swapped DiT's resident part parks too: a 12 GB card can't hold it beside the text encoder or the VAE
+            # (#377, diagnosed and fixed by @UNfukashigi). It comes back in its streaming layout - the swapped blocks
+            # on the CPU, the rest on the card - and only when it was parked (this also runs after every decode).
+            if not hasattr(self.dit, "move_to_device_except_swap_blocks"):
+                return                                  # a model without that layout keeps it as it is
+            if torch.device(where).type == "cpu":
+                # only on a card with too little room beside it: moving ~6 GB out and back costs a render 8-16 s
+                # (Krea 2, 1024 x 1024, 5090), and a 16 GB card held the encoder (+5.3 GB) and decode (+2.3 GB) anyway
+                if not getattr(self, "_swap_parked", False) and _free_vram_gb() < SWAP_PARK_FREE_GB:
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()        # block transfers in flight finish before their weights move
+                    quant.move(self.dit, "cpu")
+                    self._swap_parked = True
+                    gc.collect()
+                    torch.cuda.empty_cache()
+            elif getattr(self, "_swap_parked", False):
+                self.dit.move_to_device_except_swap_blocks(torch.device(where))
+                self.driver.block_swap_mode(self.dit, inference=True)
+                self._swap_parked = False
+            return
+        quant.move(self.dit, where)
+        if where == "cpu":
+            gc.collect()
+            torch.cuda.empty_cache()
+
+    def _finish_decode(self):
+        self._park_dit(self.device)
 
     @property
     def reference_kind(self):
@@ -557,8 +610,9 @@ class WorkbenchEngine:
         if key not in self._prompt_cache:
             if self.lowmem:
                 self._park_dit("cpu")
-                self.vae.to(self.device)
             try:
+                if self.lowmem:
+                    self.vae.to(self.device)
                 z = self.driver.encode_images(self.vae, [self._fit_reference(path, width, height)])[0]
             finally:
                 if self.lowmem:
@@ -796,27 +850,30 @@ class WorkbenchEngine:
                                                if source is not None and self.source_repaint is not None else {}),
                                             **({"refer": refer} if refer is not None else {}),
                                             **({"refs": [r.to(self.device) for r in refs]} if refs else {}))
-        try:
-            if act is None:
-                lat = _generate()
-            else:
+        def _sample():
+            nonlocal act
+            if act is not None:
                 try:
                     with act.render(self.dit, self._act_modules, key, sig):
-                        lat = _generate()
+                        return _generate()
                 except torch.OutOfMemoryError:
                     # the cache's share of the card was the difference: give it back and render plainly
                     logger.warning("Reuse unchanged blocks: out of memory with the cache - rendering without it")
                     self._invalidate_activation_cache()
                     act = None
-                    lat = _generate()
+            return _generate()
+
+        try:
+            lat = self._sample_with_memory(_sample)
         finally:
             activity = self._stop_meter(meter)
         if getattr(self.desc, "reference_strength", False):
             self._last_frame_latent = lat[0].detach().to("cpu")     # the next travel frame may edit this one
         if self.lowmem:
             self._park_dit("cpu")
-            self.vae.to(self.device)
         try:
+            if self.lowmem:
+                self.vae.to(self.device)
             try:
                 out = self.driver.decode(self.vae, lat, width, height)
             except torch.OutOfMemoryError:
@@ -838,7 +895,7 @@ class WorkbenchEngine:
         finally:
             if self.lowmem:
                 self.vae.to("cpu")
-                self._park_dit(self.device)
+                self._finish_decode()
 
     def _start_meter(self):
         """Block activity (description block_activity): tag each wrapped Linear with its block - only those along

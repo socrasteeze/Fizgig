@@ -39,6 +39,7 @@ from fizgig.web import queue as webqueue
 from fizgig.web import prep_jobs
 from fizgig.families import refmod
 from fizgig.web import studio
+from fizgig.web import studio_queue
 from fizgig.web.port import PORT_DEFAULT, PORT_WALK, listening, on_pod, on_runpod, on_vast, saved_port
 from fizgig.web.schema import get_schema
 from fizgig.krea2.generation_attention import preference_available as sageattention_option
@@ -278,7 +279,10 @@ def _side_extras() -> dict:
     try:
         c = captions.status()
         if c["state"] in ("loading", "running", "translating"):
-            jobs.append({"what": "Translating captions" if c["state"] == "translating" else "Captioning",
+            jobs.append({"what": "Translating captions" if c["state"] == "translating" else
+                         f"Downloading {c.get('model') or 'the caption model'}" if c["state"] == "loading"
+                         and c.get("phase") == "downloading" else
+                         f"Loading {c.get('model') or 'the caption model'}" if c["state"] == "loading" else "Captioning",
                          "done": c.get("done") or 0, "total": c.get("total") or 0, "tab": "captions"})
         if c.get("loaded"):
             loaded.append({"what": "Caption model", "name": c.get("model") or "", "tab": "captions"})
@@ -391,9 +395,14 @@ def _write_json(path, data):
 
 
 # the desktop's DEFAULT_PREFS that aren't empty: a web-only install starts where the desktop app would
+# An AMD launch (FIZGIG_GPU_BACKEND=rocm, set by both AMD launchers): INT8 fast inference off by default - the stored
+# fp8 file rendered Krea 2 previews about twice as fast with a quarter of the RAM on an RX 9070 XT (#380, @xGnome)
+ROCM_LAUNCH = os.environ.get("FIZGIG_GPU_BACKEND", "").lower() == "rocm"
 PREF_DEFAULTS = {"lora_output_dir": "output_loras", "profiles_dir": "user_data/profiles", "cache_dir": "user_data/cache",
+                 "studio_outputs_dir": "Studio_Outputs",
                  "runpod_stop_when_done": "0", "inference_blocks_to_swap": "Auto (detect from GPU)",
-                 "inference_int8": "1", "inference_sageattention": "0", "lan_discovery": "1", "update_check": "1"}
+                 "inference_int8": "0" if ROCM_LAUNCH else "1", "inference_sageattention": "0", "lan_discovery": "1",
+                 "update_check": "1"}
 
 
 LAST_USED_FILE = user_data.LAST_USED_FILE           # the training folder, each folder's trigger word
@@ -454,7 +463,7 @@ def set_folder_trigger(folder, word):
 
 
 # the Preferences settings Reset to defaults puts back (the model files are never reset)
-SETTING_PREFS = ("lora_output_dir", "profiles_dir", "cache_dir", "input_lora_dir", "input_ref_dir",
+SETTING_PREFS = ("lora_output_dir", "profiles_dir", "cache_dir", "studio_outputs_dir", "input_lora_dir", "input_ref_dir",
                  "inference_blocks_to_swap", "inference_int8", "inference_sageattention", "lan_discovery", "update_check")
 
 
@@ -682,6 +691,26 @@ def _studio_samples(desc):
             "look": look, "render": "samples" if render == "samples" else "checkpoint"}
 
 
+def _studio_queue_busy():
+    """Why the Studio queue waits ("" when the GPU is free for it): a training run, a caption job, the Profiler."""
+    with _lock:
+        if _run["proc"] is not None and _run["proc"].poll() is None or _run["state"] in ("starting", "running"):
+            return "Waiting for the training run to finish."
+    if captions.status()["state"] in ("loading", "running", "translating"):
+        return "Waiting for the caption job to finish."
+    from fizgig.web import tools
+    if tools.holding_gpu():
+        return "Waiting for the Profiler to finish."
+    with webqueue._lock:
+        if webqueue._q["waiting"]:               # a training run waiting for the GPU goes first
+            return "A training run is waiting for the GPU: it goes first."
+    if _training_waits():
+        return "A training run is waiting for the GPU: it goes first."
+    if studio.page_waiting():                    # your render (on your own LoRA) goes before the next job
+        return "Your render goes first: Studio is loading your LoRA again."
+    return ""
+
+
 def _gpu_training():
     """A training run is using the GPU: Repair Studio waits for it."""
     with _lock:
@@ -766,7 +795,7 @@ def _pods_post(what, b):
 _STUDIO_DL_SETUP = []      # the setup Download tweaked writes into the picture (the page sends it first)
 
 
-def _studio_post(what, b):
+def _studio_post(what, b, from_queue=False):
     """Repair Studio's actions (fizgig/web/studio.py runs them in its worker)."""
     if what == "download_setup":
         data = b.get("data") or {}
@@ -788,6 +817,9 @@ def _studio_post(what, b):
         os.replace(tmp, p)
         return {"ok": True, "name": os.path.basename(p)[:-5]}
     if what == "load":
+        if not from_queue and studio_queue.running():
+            raise ValueError("The Studio queue is rendering a job. Pause the queue and let the job finish (or "
+                             "Cancel it), then press Start.")
         if _gpu_training():
             raise ValueError("A training run is using the GPU. Repair Studio can load when it finishes.")
         from fizgig.web import tools
@@ -807,19 +839,50 @@ def _studio_post(what, b):
         captions.unload()                       # the caption model leaves the GPU too
         studio.load(desc, str(b.get("primary") or "").strip(), str(b.get("donor") or "").strip(), kw, settings,
                     status, b.get("turbo", True), canvas=b.get("canvas") if desc.video_workbench else None)
-        return {"ok": True}
+        if not from_queue:                       # the page's own load: its renders run on this and nothing else
+            studio.set_load_key(json.dumps(b, sort_keys=True), page=True)
+        return {"ok": True, "load_id": studio.status()["load_id"]}   # the page sees a later load it didn't ask for
     if what == "keep":
         return {"path": studio.keep_tweaked()}
+    if what.startswith("queue/"):            # Studio's own queue (studio_queue.py)
+        act = what[len("queue/"):]
+        if act == "add":
+            item = studio_queue.add(b.get("load"), b.get("render"), b.get("label"), b.get("lora"), b.get("model"))
+            return {"ok": True, "id": item["id"], "queue": studio_queue.status()}
+        if act == "remove":
+            studio_queue.remove(str(b.get("id") or ""))
+        elif act == "move":
+            studio_queue.move(str(b.get("id") or ""), int(b.get("delta") or 0))
+        elif act == "pause":
+            studio_queue.pause(b.get("reason") or "Paused.")
+        elif act == "resume":
+            studio_queue.resume()
+        elif act == "clear":
+            studio_queue.clear_done()
+        else:
+            raise ValueError("Unknown request.")
+        return studio_queue.status()
     if what == "map":                        # maps over the Tweaked render (where the LoRA acts, the tweaks, the trigger)
         return studio.map_request(b.get("state") or {}, b.get("trigger") or "", bool(b.get("blocks")))
+    if what in ("render", "load") and _training_waits():
+        raise ValueError("A training run is waiting for the GPU: it starts as soon as the render going now is done. "
+                         "Studio can render again after it.")
     if what == "render":
-        return studio.render(b.get("state") or {}, extra={k: b.get(k) for k in ("video", "audio", "keyframes", "ref_mode", "mix")
-                                                          if b.get(k) is not None})
+        extra = {k: b.get(k) for k in ("video", "audio", "keyframes", "ref_mode", "mix", "panes")
+                 if b.get(k) is not None}
+        if isinstance(b.get("setup"), dict):     # Save every render: the setup a saved tweaked still carries
+            extra["_setup"] = b["setup"]
+        return studio.render(b.get("state") or {}, extra=extra)
     if what == "cancel":
         studio._send({"cmd": "cancel"})
         return {"ok": True}
     if what == "donor":
         studio.donor(str(b.get("path") or "").strip())
+        return {"ok": True}
+    if what == "primary":                    # Unload primary: the zero adapter in its place, no model reload
+        if studio_queue.running():
+            raise ValueError("The Studio queue is rendering a job. Pause the queue and let the job finish first.")
+        studio.primary(str(b.get("path") or "").strip())
         return {"ok": True}
     if what == "settings":
         desc = _studio_desc(b.get("family", ""))
@@ -842,7 +905,9 @@ def _studio_post(what, b):
     if what == "reset":
         studio.reset()
         return {"ok": True}
-    if what in ("preset_save", "preset_load"):
+    if what == "cancel":
+        return {"ok": studio.cancel()}
+    if what in ("preset_save", "preset_load", "preset_delete"):
         key = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(b.get("family") or ""))
         name = str(b.get("name") or "").strip()        # any name a file can have, as the desktop's
         if not name or name.startswith("✨") or any(c in name for c in '<>:"/\\|?*') or name in (".", ".."):
@@ -851,6 +916,10 @@ def _studio_post(what, b):
         if what == "preset_load":
             with open(path_, encoding="utf-8") as f:
                 return {"blocks": (json.load(f) or {}).get("blocks") or {}}
+        if what == "preset_delete":                      # one of your own presets (the Upscale fold's Delete)
+            if os.path.isfile(path_):
+                os.remove(path_)
+            return {"ok": True}
         if os.path.exists(path_) and not b.get("overwrite"):
             return {"exists": True}
         os.makedirs(os.path.dirname(path_), exist_ok=True)
@@ -1011,16 +1080,17 @@ def _multi_person_notes(vals, image_folder, multi_person=True):
         auto_trig = subject_trigger(folder, ext)
         if auto_trig:
             found[tkey] = auto_trig
-            got, _w = mp.subject(folder, auto_trig, "", ext)
-            if got:
+            got, _w = mp.subject(folder, auto_trig, "", ext) if multi_person else (None, "")
+            if got:              # Isolation reads it from the captions; DOP alone uses only what's typed (#365)
                 found[ckey] = got["phrase"].split()[-1]
-        cap = mp.sample_caption(folder, trig.split(",")[0].strip() if trig else "", ext)
+        cap = mp.sample_caption(folder, trig.split(",")[0].strip() if trig else "", ext,
+                                multi=bool(vals.get("MULTI_CAPTION")))
         lines = [f"Trigger word: {trig}" if trig else "Trigger word: none found in this folder's captions",
                  f"One of its captions: {cap}" if cap else "One of its captions: none found - caption the folder first"]
         if not multi_person:
             if dop and cap and trig:
                 pairs = list(zip([t.strip() for t in trig.split(",") if t.strip()],
-                                 [c.strip() for c in cls.split(",")] * 8))
+                                 [mp.class_phrase(c) for c in cls.split(",")] * 8))
                 kept = mp.dop_caption(cap, pairs)
                 lines += [f"Trains on: {cap}", f"And keeps as the model made it: {kept}" if kept else
                           "And keeps as the model made it: nothing - this caption has no trigger word"]
@@ -1123,7 +1193,7 @@ def _plan(family_key, values, image_folder, resume="", ft_continue=None, models=
         inputs.update(FAMILY_FT_CONTINUE=ft_continue["continue"], FAMILY_FT_ROTATIONS=str(ft_continue["rotations"]),
                       resuming=True)
     if resume or ft_continue or str(values.get("RESUME_TRAINING") or "").strip():
-        inputs["recache"] = _size_changed(name, out_dir, values)
+        inputs["recache"] = _size_changed(name, out_dir, values) or _lines_changed(desc, name, out_dir, values)
     return desc, inputs, launch.plan(desc, inputs)
 
 
@@ -1133,6 +1203,8 @@ _SIZE_KEYS = ("DATASET_MEGAPIXELS", "CLIP_MEGAPIXELS")
 # new one, logged); the rest trains on as it was
 _RESUME_SAMPLE_KEYS = ("SAMPLE_PROMPT", "SAMPLE_SEED", "SAMPLE_WIDTH", "SAMPLE_HEIGHT", "SAMPLE_STEPS",
                        "SAMPLE_CFG_SCALE", "FAMILY_TURBO_STRENGTH", "FAMILY_TURBO_ON", "SAMPLE_CHECKPOINT",
+                       "FAMILY_TURBO_STEPS", "FAMILY_TURBO_PACE",                          # H3's Turbo row
+                       "SAMPLE_FIRST_FRAME", "SAMPLE_LAST_FRAME",                          # H3's First / Last frame
                        "FAMILY_PREVIEW_LOOK",                                              # + the SFT look tick
                        "SAMPLE_EVERY_N_EPOCHS", "SAMPLE_LATER", "SAMPLE_UNTIL_EPOCH", "SAMPLE_EVERY_AFTER",
                        "BLOCKS_SWAP", "SAVE_EVERY_N_EPOCHS", "SAVE_LATER", "SAVE_UNTIL_EPOCH", "SAVE_EVERY_AFTER",
@@ -1185,6 +1257,20 @@ def _size_changed(lora, out_dir, values):
         except ValueError:
             return str(v or "").strip()
     return any(num(old.get(k, "")) != num(values.get(k, "")) for k in _SIZE_KEYS)
+
+
+def _lines_changed(desc, lora, out_dir, values):
+    """A resume with Several captions per picture ticked or unticked since the run last started caches the captions
+    again: the text cache holds them as that run read them (one caption a file, or one a line)."""
+    from fizgig.web import history
+    old = history.last_values(lora, out_dir)
+    return (old is not None and bool(getattr(desc, "multi_caption", False))
+            and bool(old.get("MULTI_CAPTION")) != bool(values.get("MULTI_CAPTION")))
+
+
+def _rebuilding_cache(plan):
+    """Whether a plan is making the cache it will train on: its settings aren't proven until that pass finishes."""
+    return any(s.name.startswith(n) for s in plan.stages for n in ("Cache Preparation", "Text Encoder Caching"))
 
 
 def _ref_strength(v):
@@ -1392,9 +1478,22 @@ def samples_zip(folder, name) -> str:
     return out
 
 
-def _checkpoint_kind(path) -> str:
+_KIND_CACHE = {}       # (path, size, mtime) -> kind: a folder of thousands of LoRAs is read once a session, not per look
+
+
+def _checkpoint_kind(path, st=None) -> str:
     """'finetune' (a whole model, the source file with the trained tensors replaced) or 'lora', from the file's
-    metadata header - a few KB read, never the tensors."""
+    metadata header - its header read, never the tensors - and kept for the session by size and modified time."""
+    key = (path, st.st_size, st.st_mtime) if st is not None else None
+    if key is not None and key in _KIND_CACHE:
+        return _KIND_CACHE[key]
+    kind = _read_checkpoint_kind(path)
+    if key is not None:
+        _KIND_CACHE[key] = kind
+    return kind
+
+
+def _read_checkpoint_kind(path) -> str:
     try:
         with open(path, "rb") as f:
             n = int.from_bytes(f.read(8), "little")
@@ -1436,6 +1535,85 @@ def run_outputs(folder, name) -> dict:
         except OSError:
             pass
     return {"checkpoints": ckpts, "states": states, "previews": previews, "bytes": total}
+
+
+KEEP_NEWEST = 5             # Delete run's "Keep the newest 5 epochs"
+
+
+def _epoch_of(path):
+    """A checkpoint's or saved state's epoch (<run>-000012[.safetensors|-state]), a Save now's step order after it,
+    or None for the finished LoRA / an unnumbered state."""
+    stem = os.path.basename(path)
+    stem = stem[:-len(".safetensors")] if stem.lower().endswith(".safetensors") else stem
+    stem = stem[:-len("-state")] if stem.endswith("-state") else stem
+    m = _CKPT.match(stem)
+    if not m:
+        return None
+    return (int(m.group(2)), 0) if m.group(2) else (-1, int(m.group(3)))
+
+
+def trim_plan(found, keep=KEEP_NEWEST) -> dict:
+    """Delete run's "Delete, keep the newest N epochs": everything Delete takes except the newest N epochs (all of them
+    when there are fewer): their checkpoints and previews stay, with the finished LoRA, a Save now's checkpoints and
+    the previews from before training. Older epochs' checkpoints and previews and every saved state go."""
+    epoch = lambda p: (_epoch_of(p) or (-1, 0))[0]           # a Save now (-step...) is one you asked for: it stays
+    eps = sorted((p for p in found["checkpoints"] if epoch(p) >= 0), key=epoch)
+    kept = {epoch(p) for p in eps[-keep:]} if keep > 0 else set()
+    ckpts = eps[:-keep] if len(eps) > keep else []
+    states = list(found["states"])
+
+    def preview_epoch(p):
+        info = sample_info(os.path.basename(p)) or {}
+        return info.get("epoch")
+    previews = [p for p in found["previews"] if preview_epoch(p) not in (None, 0) and preview_epoch(p) not in kept]
+    total = 0
+    for p in ckpts + states + previews:
+        try:
+            total += (sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(p) for f in fs)
+                      if os.path.isdir(p) else os.path.getsize(p))
+        except OSError:
+            pass
+    return {"checkpoints": ckpts, "states": states, "previews": previews, "bytes": total, "epochs": len(eps),
+            "kept": len(kept)}
+
+
+def trim_run(run_id, confirm=False, keep=KEEP_NEWEST) -> dict:
+    """Delete run's "Delete, keep the newest N epochs": what it would delete (confirm False), or delete it - the run
+    goes off the list as with Delete, its newest N epochs' LoRA files (all of them when fewer) stay on disk. Refused
+    while that run is training."""
+    import shutil
+    rec = history.get(run_id)
+    if rec is None:
+        return {"error": "That run isn't in the list any more."}
+    folder, name = str(rec.get("output_dir") or ""), str(rec.get("lora") or "")
+    with _lock:
+        web_live = _run["proc"] is not None and _run["proc"].poll() is None or _run["state"] in ("starting", "running")
+        if web_live and os.path.normcase(os.path.abspath(_run["output_dir"] or ".")) == os.path.normcase(
+                os.path.abspath(folder or ".")) and (_run["lora"] or "").lower() == name.lower():
+            return {"error": "That run is training now. Stop it first."}
+    found = run_outputs(folder, name) if folder and name else {"checkpoints": [], "states": [], "previews": [],
+                                                              "bytes": 0}
+    plan = trim_plan(found, keep)
+    if not confirm:
+        return {"ok": True, "keep": keep if keep < 10 ** 9 else "all", "epochs": plan["epochs"], "kept": plan["kept"],
+                "checkpoints": len(plan["checkpoints"]), "states": len(plan["states"]),
+                "previews": len(plan["previews"]), "bytes": plan["bytes"]}
+    failed = []
+    for p in plan["checkpoints"] + plan["previews"]:
+        try:
+            os.remove(p)
+        except OSError:
+            failed.append(p)
+    for p in plan["states"]:
+        try:
+            shutil.rmtree(p)
+        except OSError:
+            failed.append(p)
+    if failed:
+        return {"error": f"{len(failed)} file(s) couldn't be deleted (in use?), e.g. {failed[0]}. The run stays in "
+                         "the list; try again."}
+    history.remove(run_id)                     # the run goes, as with Delete; its kept LoRA files stay on disk
+    return {"ok": True}
 
 
 def delete_run(run_id, confirm=False) -> dict:
@@ -1714,7 +1892,8 @@ def _oom_go(rid, do, values, tries):
         r = _continue_run(rid, queue_ok=False, values=values)
     else:
         r = _start(rec.get("family") or "", values, rec.get("image_folder") or "")
-        if isinstance(r, dict) and not r.get("error") and not r.get("problems") and _run.get("history_id"):
+        if isinstance(r, dict) and not r.get("error") and not r.get("problems") and not r.get("queued") \
+                and _run.get("history_id"):
             history.set_field(_run["history_id"], "oom", tries)       # the new record carries the count on
     if not isinstance(r, dict) or r.get("error") or r.get("problems"):
         why = (r or {}).get("error") or "; ".join((r or {}).get("problems") or []) if isinstance(r, dict) else str(r)
@@ -1739,7 +1918,7 @@ def _run_form(rec, values=None):
     return {"family": desc.key, "values": vals, "image_folder": rec.get("image_folder") or ""}
 
 
-def _continue_run(run_id, more="", queue_ok=True, values=None):
+def _continue_run(run_id, more="", queue_ok=True, values=None, raw_wait=False):
     """Continue on Runs & outputs: the run trains on from its newest save, with its own settings and into its own
     record. more: the epochs (a fine-tune: rotations) to train to, for a run that already trained all it was set to.
     values: the settings to carry on with in place of the run's (a queued Continue edited on the queue). A run
@@ -1776,10 +1955,10 @@ def _continue_run(run_id, more="", queue_ok=True, values=None):
     note = f"=== Continuing {rec.get('lora')} from {os.path.basename(pt['path'])}: to {target} {unit} ==="
     if pt["kind"] == "ft":
         r = _resumed(_start(rec["family"], values, rec.get("image_folder") or "", ft_continue={
-            "continue": cont, "rotations": left}, note=note, carry=run_id))
+            "continue": cont, "rotations": left}, note=note, carry=run_id, raw_wait=raw_wait))
     else:
         r = _resumed(_start(rec["family"], values, rec.get("image_folder") or "", resume=pt["path"], note=note,
-                            carry=run_id))
+                            carry=run_id, raw_wait=raw_wait))
     if isinstance(r, dict) and r.get("ok"):
         f = _run_form(rec, values)            # the Training tab then shows this run's settings (it kept the last ones)
         if not f.get("error"):
@@ -1942,14 +2121,6 @@ def _start_warnings(out_dir, resume, max_epochs) -> list:
     return out
 
 
-def _unclaim(prev, result=None):
-    """A Start that didn't launch gives its claim back (a paused run stays resumable). Returns `result`."""
-    with _lock:
-        if _run["state"] == "starting":
-            _run["state"] = prev
-    return result
-
-
 def _resumed(result):
     """A resume that started: the queue held for that paused run stops showing as held."""
     if isinstance(result, dict) and result.get("ok"):
@@ -1960,49 +2131,98 @@ def _resumed(result):
 _claim = threading.Lock()                   # only one caller may check and plan a Start
 
 
-def _start(family_key, values, image_folder, resume="", ft_continue=None, note="", models=None, confirm=(), carry=""):
-    if not _claim.acquire(blocking=False):
-        return {"error": "A run is already going. Stop or pause it first."}
-    try:
-        return _start_one(family_key, values, image_folder, resume, ft_continue, note, models, carry, confirm)
-    finally:
-        _claim.release()
+_gpu_wait = {"n": 0}                          # starts waiting for a Studio render / the Profiler to finish
+_gpu_wait_lock = threading.Lock()
+GPU_WAIT_S = 2                                # how often a waiting start looks again
+
+
+def _start(family_key, values, image_folder, resume="", ft_continue=None, note="", models=None, confirm=(), carry="",
+           raw_wait=False):
+    """raw_wait: a render going in Studio (or the Profiler) comes back as {"wait": why} - Start Training and the queue
+    put the run first in the queue. Otherwise (Resume, Continue, the restart offer, recovery, after a download) the
+    run waits here and starts by itself as soon as the render is done: {"ok": True, "queued": True, "note"}."""
+    def once():
+        # a second Start while the first is still being checked (a double click, two tabs, the queue) waits here
+        # and then finds the first one going - before, each passed the check and three copies of one run trained
+        with _claim:
+            return _start_one(family_key, values, image_folder, resume, ft_continue, note, models, carry, confirm)
+    r = once()
+    if raw_wait or not (isinstance(r, dict) and r.get("wait")):
+        return r
+
+    def go():
+        try:
+            while True:
+                time.sleep(GPU_WAIT_S)
+                r2 = once()
+                if isinstance(r2, dict) and r2.get("wait"):
+                    continue
+                if isinstance(r2, dict) and r2.get("warnings"):
+                    append_log("\nThe run waiting for the GPU didn't start: "
+                               + "; ".join(w.get("message") or w.get("code") or "" for w in r2["warnings"]) + "\n")
+                    return
+                if not isinstance(r2, dict) or r2.get("error") or r2.get("problems"):
+                    why = (r2 or {}).get("error") or "; ".join((r2 or {}).get("problems") or []) \
+                        if isinstance(r2, dict) else str(r2)
+                    append_log(f"\nThe run waiting for the GPU couldn't start: {why}\n")
+                elif resume:                     # a Resume that started: the queue held for it follows it now
+                    webqueue.resumed()
+                return
+        finally:
+            with _gpu_wait_lock:
+                _gpu_wait["n"] -= 1
+    with _gpu_wait_lock:
+        _gpu_wait["n"] += 1
+    threading.Thread(target=go, daemon=True).start()
+    append_log(f"\n{r['wait']}\n")
+    return {"ok": True, "queued": True, "note": r["wait"], "error": ""}
+
+
+def _training_waits():
+    """A training run is waiting for a Studio render (or the Profiler) to finish: Studio starts nothing new."""
+    with _gpu_wait_lock:
+        if _gpu_wait["n"]:
+            return True
+    with webqueue._lock:
+        w = webqueue._q["waiting"]
+    return w.startswith(("Studio is finishing", "The Profiler is rendering"))
 
 
 def _start_one(family_key, values, image_folder, resume, ft_continue, note, models, carry, confirm):
-    from fizgig.web import tools
-    if tools.holding_gpu():                     # as Studio, Royale and RefMod: the run would run out of VRAM
-        return {"error": "The Profiler is rendering on the GPU - wait for it, or Stop it, then start the run."}
-    if studio.holding_gpu():                    # Repair Studio's model leaves the GPU for the run
-        append_log("Unloading Repair Studio's model to free the GPU for this run.\n")
-        studio.stop_worker()
     with _lock:
         if _run["proc"] is not None and _run["proc"].poll() is None or _run["state"] in ("starting", "running"):
             return {"error": "A run is already going. Stop or pause it first."}
-        prev = _run["state"]
-        _run["state"] = "starting"          # preserve the fork's claim/unclaim and warning paths
     if captions.status()["state"] in ("loading", "running", "translating"):
-        return _unclaim(prev, {"error": "Captions are being made (Captions tab). Stop that first, then start the run."})
-    try:
-        captions.unload()                                     # the run gets the GPU memory the caption model held
-        from fizgig.web import helpers
-        helpers.share_stop_all()   # this computer's own run comes first: a share it trains for another stops there
-        desc, inputs, plan = _plan(family_key, values, image_folder, resume, ft_continue, models)
-        if plan.problems:
-            return _unclaim(prev, {"problems": plan.problems})
-        lk = desc.preview_look() if desc is not None else None
-        if lk is not None and lk.fetch_on_use and (values or {}).get("FAMILY_PREVIEW_LOOK"):
-            # a run started with the SFT look ticked (from the queue, a script or a helper's lead) fetches it as the
-            # Samples tab's tick does: the run picks it up at a preview once it's there
-            _look_fetch(desc, values, launch.look_path(desc, {"models": {lk.pref_key: pref_path(load_prefs(), lk.pref_key)}}))
-    except BaseException:
-        _unclaim(prev)
-        raise
+        return {"error": "Captions are being made (Captions tab). Stop that first, then start the run."}
+    from fizgig.web import tools
+    # a render going in Studio (yours, a Studio queue job, LoRA Royale's) or the Profiler finishes first: the run
+    # waits for it (Start puts it at the head of the queue), and the Studio queue pauses so nothing follows it
+    if studio.generating() or tools.holding_gpu():
+        studio_queue.pause("A training run is waiting for the GPU.")
+        why = ("The Profiler is rendering: the run starts when it finishes." if tools.holding_gpu() else
+               "Studio is finishing a render: the run starts when it's done.")
+        return {"wait": why, "error": why}
+    if studio_queue.pause("A training run started."):
+        append_log("The Studio queue is paused for this run: resume it on Studio when you want.\n")
+    if studio.holding_gpu():                    # Repair Studio's model leaves the GPU for the run
+        append_log("Unloading Repair Studio's model to free the GPU for this run.\n")
+        studio.stop_worker()
+    captions.unload()                                     # the run gets the GPU memory the caption model held
+    from fizgig.web import helpers
+    helpers.share_stop_all()       # this computer's own run comes first: a share it trains for another stops there
+    desc, inputs, plan = _plan(family_key, values, image_folder, resume, ft_continue, models)
+    if plan.problems:
+        return {"problems": plan.problems}
+    lk = desc.preview_look() if desc is not None else None
+    if lk is not None and lk.fetch_on_use and (values or {}).get("FAMILY_PREVIEW_LOOK"):
+        # a run started with the SFT look ticked (from the queue, a script or a helper's lead) fetches it as the
+        # Samples tab's tick does: the run picks it up at a preview once it's there
+        _look_fetch(desc, values, launch.look_path(desc, {"models": {lk.pref_key: pref_path(load_prefs(), lk.pref_key)}}))
     out_dir = inputs["LORA_OUTPUT_DIR"]
     warnings = [w for w in _start_warnings(out_dir, resume or (values or {}).get("RESUME_TRAINING"),
                                            inputs.get("MAX_TRAIN_EPOCHS")) if w["code"] not in confirm]
     if warnings:
-        return _unclaim(prev, {"warnings": warnings})
+        return {"warnings": warnings}
     # as the desktop's Start clears them; a resume's pause record is used up once its run launches
     for stale in (".pause_requested", ".sample_override.json", ".sample_now", ".save_now") + (
             (PAUSED_FILE,) if resume or ft_continue else ()):
@@ -2018,7 +2238,7 @@ def _start_one(family_key, values, image_folder, resume, ft_continue, note, mode
             with open(path, "w", encoding="utf-8") as f:
                 f.write(text)
     except OSError as e:
-        return _unclaim(prev, {"error": _folder_problem(e, out_dir)})
+        return {"error": _folder_problem(e, out_dir)}
     helpers.share_cache_plan(                # a training share can make the cache on the helper the same way
         out_dir, inputs["LORA_NAME"], [s.cmd for s in plan.stages])
     for f in (SLIDER_LIVE, SLIDER_LIVE_APPLIED):     # an earlier run's live slider prompts are not this one's (a resume
@@ -2026,14 +2246,19 @@ def _start_one(family_key, values, image_folder, resume, ft_continue, note, mode
             os.remove(os.path.join(out_dir, f))      # an Apply while it loads waits for its first epoch, not deleted
         except OSError:
             pass
+    resuming = bool(resume or ft_continue)
+    # a resume that is rebuilding its cache hasn't trained at these settings yet: the record keeps what the last
+    # completed pass proved, and takes the new ones when the Training stage starts (in _run_stages)
+    recaching = resuming and _rebuilding_cache(plan)
     with _lock:
         _run.update(state="starting", stage="", lora=inputs["LORA_NAME"], output_dir=out_dir, family=family_key,
-                    values=dict(values), image_folder=image_folder, pause=False, resume="", resume_mode="")
+                    values=dict(values), image_folder=image_folder, pause=False, resume="", resume_mode="",
+                    recaching=recaching)
     save_state({"last_run": {"family": family_key, "values": values, "image_folder": image_folder}})
     if _startup["offer"] or load_state().get("interrupted"):
         _startup_done()                              # a run is starting: the start-up question is answered
-    hid = history.start("web", family_key, inputs["LORA_NAME"], out_dir, image_folder, dict(values),
-                        resume=bool(resume or ft_continue), carry=carry)
+    hid = history.start("web", family_key, inputs["LORA_NAME"], out_dir, image_folder,
+                        None if recaching else dict(values), resume=resuming, carry=carry)
     with _lock:
         _run["history_id"] = hid
     append_log(LOG_CLEAR)                    # this run's log on a clean console
@@ -2046,6 +2271,23 @@ def _start_one(family_key, values, image_folder, resume, ft_continue, note, mode
     return {"ok": True, "stages": [s.name for s in plan.stages]}
 
 
+def _start_ai_captions(b):
+    """An AI caption job from the Captions tab's request (its body), as /api/captions/ai starts it; the queue too."""
+    prefs, folder, clips, photos, _ = _caption_args(b)
+    cap = captioner_for(prefs)
+    model = str(b.get("model") or "")
+    _caption_gpu_check(captions.need_gb(model))
+    inside = {os.path.abspath(f) for f in captions.with_crops(folder)}
+    only = [p for p in (b.get("only") or []) if os.path.dirname(os.path.abspath(p)) in inside]
+    return captions.ai_captions(
+        prefs, cap if cap and os.path.isfile(cap) else "", folder, model, str(b.get("task") or ""),
+        str(b.get("instruction") or ""), int(b.get("max_tokens") or 120), str(b.get("trigger") or ""),
+        bool(b.get("overwrite")), clips, only=only or None, photos=photos,
+        ext=captions.caption_ext(b.get("ext")), threshold=float(b.get("threshold") or 0.35),
+        leave_out=str(b.get("leave_out") or ""), underscores=bool(b.get("underscores")),
+        add_line=bool(b.get("add_line")), first_line=bool(b.get("first_line")) and bool(only))
+
+
 def _queue_starter(item):
     """For webqueue.start_next: (True, "") once the item's run has started; (False, "wait: ...") while the GPU is
     busy elsewhere (this run, a caption job); (False, why) when it can't start."""
@@ -2054,14 +2296,29 @@ def _queue_starter(item):
             return False, "wait: a run is training here"
     if captions.status()["state"] in ("loading", "running", "translating"):
         return False, "wait: captions are being made - the next run starts when they finish"
+    if item.get("kind") == "captions":            # a queued AI caption job (#14): the queue moves on when it ends
+        try:
+            r = _start_ai_captions(item.get("body") or {})
+        except Exception as e:
+            return False, str(e)
+        if r.get("error"):
+            return False, r["error"]
+        captions.when_done(lambda result, lab=item.get("lora"): webqueue.on_run_ended(result, lab, _queue_starter))
+        return True, ""
     try:
         cid = (item.get("values") or {}).get("__continue")
-        r = (_continue_run(cid, item["values"].get("__more") or "", queue_ok=False, values=item["values"]) if cid else
-             _start(item["family"], item["values"], item.get("image_folder") or ""))
+        with _gpu_wait_lock:
+            if _gpu_wait["n"]:                   # a Resume / Continue waiting for Studio starts first
+                return False, "wait-soon: a run waiting for the GPU starts first"
+        r = (_continue_run(cid, item["values"].get("__more") or "", queue_ok=False, values=item["values"],
+                           raw_wait=True) if cid else
+             _start(item["family"], item["values"], item.get("image_folder") or "", raw_wait=True))
     except Exception as e:
         return False, str(e)
     if r.get("ok"):
         return True, ""
+    if r.get("wait"):                             # a Studio render or the Profiler finishing: soon
+        return False, "wait-soon: " + r["wait"]
     if r.get("error") and ("Captions are" in r["error"] or "Profiler is" in r["error"]):
         return False, "wait: " + r["error"]
     return False, r.get("error") or "; ".join(r.get("problems") or [w["message"] for w in r.get("warnings") or []]
@@ -2121,7 +2378,8 @@ def _progress_dict(upd):
     return {"epoch": upd.get("epoch"), "total_epochs": upd.get("total_epochs"), "step": step, "total_steps": total,
             "speed": upd.get("speed_text") or "", "loss": upd.get("average_loss_text") or "",
             "eta": upd.get("eta_text") or "", "percent": 100.0 * min(step, total) / total if total else 0.0,
-            "note": "", "lr": upd.get("lr_text") or "", "grad_norm": upd.get("grad_norm_text") or ""}
+            "note": "", "lr": upd.get("lr_text") or "", "grad_norm": upd.get("grad_norm_text") or "",
+            "braked": upd.get("braked_text") or ""}
 
 
 def _run_stages(stages, out_dir):
@@ -2143,6 +2401,9 @@ def _run_stages(stages, out_dir):
             _run["stage"] = stage.name
             if stage.name == "Training" and not _run.get("training_at"):
                 _run["training_at"] = time.time()
+                if _run.get("recaching"):
+                    # the cache stages all exited 0: this run trains at what it asked for, so its record can say so
+                    history.set_values(_run.get("history_id"), _run.get("values") or {})
             if str((_run.get("progress") or {}).get("note") or "").startswith("Caching"):
                 _run["progress"] = None          # the last stage's cache count isn't this stage's
         append_log(f"\n▶ {stage.name}\n")
@@ -2272,6 +2533,7 @@ UPLOAD_EXTS = (MEDIA - {".gif", ".webm"}) | {".txt", ".caption", ".json", ".zip"
 UPLOAD_DEFAULT = os.path.join(BASE_DIR, "training_data")     # when Preferences has no input folder set
 UPLOAD_FILES = os.path.join(BASE_DIR, "uploads")              # single files: a context LoRA, a test photo
 UPLOAD_FILE_EXTS = (UPLOAD_EXTS - {".zip"}) | {".safetensors", ".onnx"}      # .onnx: a YOLO face model (Image Prep)
+UPLOAD_FILE_EXTS |= {".mov", ".m4v", ".mkv", ".webm", ".avi"}                 # a video for Studio's Upscale to read
 
 
 def uploads_root() -> str:
@@ -3361,7 +3623,7 @@ class Handler(BaseHTTPRequestHandler):
                                          for k in form.model_keys(d)},
                               "cache_dir": str(p.get("cache_dir") or ""),
                               "settings": {k: str(p.get(k) or "") for k in SETTING_PREFS},
-                              "sageattention_option": sageattention_option(),
+                              "sageattention_option": sageattention_option(), "rocm": ROCM_LAUNCH,
                               "captioning": {"main": pref_path(p, "krea2_text_encoder"),
                                              "main_ok": bool(pref_path(p, "krea2_text_encoder")
                                                              and os.path.isfile(pref_path(p, "krea2_text_encoder"))),
@@ -3370,7 +3632,10 @@ class Handler(BaseHTTPRequestHandler):
                                             "note": secondary_captioner_note(p),
                                             "links": [{"label": lab, "href": f"https://huggingface.co/{r}/blob/main/{f}"}
                                                       for lab, r, f in captions.SECONDARY_LINKS]},
-                              "abs": {k: pref_path(p, k) for k in ("profiles_dir", "cache_dir")},
+                              "abs": {k: pref_path(p, k) for k in ("profiles_dir", "cache_dir", "studio_outputs_dir")},
+                              # Studio's Save every render, per model (off unless ticked)
+                              "studio_autosave": {d.key: str(p.get(f"studio_autosave_{d.key}") or "") == "1"
+                                                  for d in training_families()},
                               "lora_output_dir": str(p.get("lora_output_dir") or ""), "output_default": default_output_dir(),
                               "web_port": saved_port(p), "port_now": self.server.server_address[1], "on_pod": on_pod(), "file_manager": pod_stop.file_manager(), "host_name": socket.gethostname(), "port_fixed": getattr(self, "port_fixed", False),
                               "password_on": bool(self.password),
@@ -3405,6 +3670,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.json({"word": folder_trigger((qs.get("folder") or [""])[0])})
         if path == "/api/fetch":
             return self.json(_fetch_status())
+        if path == "/api/pod/dataset":                # Start tab, on a pod: the training-folder download (#308)
+            from fizgig.web import pod_dataset
+            return self.json(pod_dataset.status())
         if path.startswith(("/api/helper/", "/api/helpers")):   # helpers: another Fizgig's GPU (web/helpers.py)
             from fizgig.web import helpers
             g = lambda k: (qs.get(k) or [""])[0]
@@ -3475,6 +3743,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.json(studio.layout(desc, load_prefs(), pref_path, samples=_studio_samples(desc)))
         if path == "/api/studio/status":
             return self.json(studio.status())
+        if path == "/api/studio/queue":             # Studio's own queue
+            return self.json(studio_queue.status())
         if path == "/api/refmod/info":              # RefMod Toolkit: its choices, the desktop's last setup, presets
             from fizgig.web import refmod_studio as rms
             fams = rms.families()
@@ -3494,11 +3764,20 @@ class Handler(BaseHTTPRequestHandler):
             p = (it or {}).get("mp4" if (qs.get("mp4") or [""])[0] else "png") or ""
             if not p or not os.path.isfile(p):
                 return self.json({"error": "no picture"}, 404)
+            if (qs.get("pp") or [""])[0]:              # the page's Ping-pong loop
+                p = studio.pingpong(p)
+            return self._stream(p, attachment=False)
+        if path == "/api/studio/output":            # a Studio queue job's saved file (the Studio outputs folder only)
+            p = studio.output_file((qs.get("path") or [""])[0])
+            if not p:
+                return self.json({"error": "That file isn't in the Studio outputs folder (moved or deleted?)."}, 404)
             return self._stream(p, attachment=False)
         if path == "/api/studio/image":
             p = studio.image((qs.get("which") or [""])[0], (qs.get("gen") or [""])[0])
             if not p:
                 return self.json({"error": "no picture yet"}, 404)
+            if (qs.get("pp") or [""])[0]:              # the page's Ping-pong loop
+                p = studio.pingpong(p)
             dl = re.sub(r'[\\/:*?"<>|]+', "_", (qs.get("dl") or [""])[0])        # a Save / Download button
             if dl:                                    # the name the page asks for, with the file's own extension
                 dl = os.path.splitext(dl)[0] + os.path.splitext(p)[1]
@@ -3509,6 +3788,18 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, png, "image/png",
                                       [("Content-Disposition", f"attachment; filename=\"{dl}\"")])
             return self._stream(p, attachment=bool(dl), filename=dl or None, keep=bool((qs.get("gen") or [""])[0]))
+        if path in ("/api/studio/video_info", "/api/studio/video_frame"):     # Upscale's own video (its fold)
+            from fizgig.utils import video_in
+            p = (qs.get("path") or [""])[0]
+            if os.path.splitext(p)[1].lower() not in video_in.VIDEO_EXT or not os.path.isfile(p):
+                return self.json({"error": "Not a video Fizgig can read here (mp4, mov, m4v, mkv, webm or avi)."}, 404)
+            try:
+                if path.endswith("_info"):
+                    return self.json(video_in.info(p))
+                at, side = (qs.get("at") or ["0"])[0], (qs.get("side") or ["1280"])[0]
+                return self._send(200, video_in.frame_jpeg(p, float(at or 0), int(side or 1280)), "image/jpeg")
+            except (ValueError, OSError) as e:
+                return self.json({"error": str(e)}, 404)
         if path == "/api/studio/peaks":             # a song's waveform for the player's strip
             p = studio.image((qs.get("which") or [""])[0], (qs.get("gen") or [""])[0])
             if not p or not p.lower().endswith(".wav"):
@@ -3720,6 +4011,9 @@ class Handler(BaseHTTPRequestHandler):
             it = webqueue.get((qs.get("id") or [""])[0])
             if it is None:
                 return self.json({"error": "That run has left the queue."}, 404)
+            if it.get("kind") == "captions":         # a caption job: its Captions tab settings, for the pill
+                return self.json({**{k: it.get(k) for k in ("id", "kind", "image_folder", "lora")},
+                                  "body": it.get("body") or {}})
             return self.json({**{k: it.get(k) for k in ("id", "family", "image_folder", "lora")},
                               "values": {k: v for k, v in (it.get("values") or {}).items() if not str(k).startswith("__")},
                               "continues": bool((it.get("values") or {}).get("__continue"))})
@@ -3838,6 +4132,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._log_stream(int((qs.get("since") or ["0"])[0] or 0))
         if path == "/api/browse":
             return self._browse((qs.get("path") or [""])[0])
+        if path == "/api/native_pick":              # the computer's own Open / folder window (this machine only)
+            from fizgig.web import native_pick
+            if not self._local_viewer():
+                return self.json({"unavailable": True})
+            return self.json(native_pick.pick((qs.get("path") or [""])[0], (qs.get("dir") or ["1"])[0] == "1"))
         if path == "/api/samples":
             return self._samples((qs.get("dir") or [""])[0], (qs.get("run") or [""])[0])
         if path == "/api/style":                    # the gallery's Style score (resumes the scorer when on)
@@ -3864,7 +4163,7 @@ class Handler(BaseHTTPRequestHandler):
             # in pieces, with byte ranges: songs and clips seek; kept by the browser when the page names its time
             return self._stream(p, attachment=False, keep=bool((qs.get("v") or [""])[0]))
         if path == "/api/checkpoints":
-            return self._checkpoints((qs.get("dir") or [""])[0])
+            return self._checkpoints((qs.get("dir") or [""])[0], (qs.get("run") or [""])[0])
         if path == "/api/outputs":
             return self.json(list_outputs(fizgig_only=(qs.get("all") or ["0"])[0] != "1"))
         if path == "/api/outputs/previews":
@@ -4026,8 +4325,10 @@ class Handler(BaseHTTPRequestHandler):
             found[max(epochs)] = final
         return {str(k): p for k, p in found.items() if _checkpoint_kind(p) != "finetune"}
 
-    def _checkpoints(self, folder):
-        """The run's saved LoRAs / checkpoints in its output folder, newest first."""
+    def _checkpoints(self, folder, run=""):
+        """The run's saved LoRAs / checkpoints in its output folder, newest first. With run: only that run's (and
+        how many belong to other runs, "others") - a run's card in a folder of thousands of LoRAs (a ComfyUI loras
+        folder) read every file's header and took minutes."""
         try:
             items = [e for e in os.scandir(folder) if e.is_file() and e.name.lower().endswith(".safetensors")]
         except OSError:
@@ -4041,14 +4342,20 @@ class Handler(BaseHTTPRequestHandler):
             if now - st.st_mtime > 5:            # not one still being written
                 stats.append((e, st))
         stats.sort(key=lambda x: x[1].st_mtime, reverse=True)
-        base = lambda n: (lambda m: m.group(1) if m else n)(_CKPT.match(n[:-len(".safetensors")]))
+        # an epoch's file -> its run's name; the run's final file (<run>.safetensors) is its run too (it was its own
+        # name with the extension, so a run's list left out its finished LoRA)
+        base = lambda n: (lambda s: (lambda m: m.group(1) if m else s)(_CKPT.match(s)))(n[:-len(".safetensors")])
+        others = 0
+        if run:
+            mine = [(e, st) for e, st in stats if base(e.name) == run]
+            others, stats = len(stats) - len(mine), mine
         out = [{"name": e.name, "path": e.path, "size": st.st_size, "time": st.st_mtime,
-                "kind": _checkpoint_kind(e.path), "run": base(e.name)} for e, st in stats]
+                "kind": _checkpoint_kind(e.path, st), "run": base(e.name)} for e, st in stats]
         from fizgig.web import stars                  # a star on the epoch's own preview (stars.starred_checkpoints)
         starred = stars.starred_checkpoints(folder, out, sample_info)
         for it in out:
             it["starred"] = it["name"] in starred
-        return self.json({"items": out})
+        return self.json({"items": out, "others": others})
 
     def _captions(self, folder, ext, family=""):
         from fizgig.dataset import detail_crops
@@ -4518,6 +4825,10 @@ class Handler(BaseHTTPRequestHandler):
                 webqueue.hold("Held by you. Press Start queue to carry on.")
                 return self.json({"ok": True})
             if path == "/api/runs/delete":              # Delete run: asks first (confirm false = what it'd delete)
+                if b.get("keep"):           # Delete, keep the newest 5 epochs ("all": every epoch) - their files stay
+                    r = trim_run(str(b.get("id") or ""), confirm=bool(b.get("confirm")),
+                                 keep=10 ** 9 if b.get("keep") == "all" else KEEP_NEWEST)
+                    return self.json(r, 400 if r.get("error") else 200)
                 r = delete_run(str(b.get("id") or ""), confirm=bool(b.get("confirm")))
                 return self.json(r, 400 if r.get("error") else 200)
             if path == "/api/runs/purge":               # Purge older than X days: preview first, then the purge
@@ -4559,7 +4870,14 @@ class Handler(BaseHTTPRequestHandler):
                         return self.json({"warnings": warn})
                     if fetch:
                         return self.json(_fetch_then_start(desc, fam, vals, folder, plan.problems))
-                r = _start(fam, vals, folder, confirm=b.get("confirm") or ())   # the fork's {code, message} warnings
+                r = _start(fam, vals, folder, confirm=b.get("confirm") or (), raw_wait=True)
+                if r.get("wait"):                # Studio (or the Profiler) is finishing: first in the queue, waiting
+                    lora, out_dir = (_in0 or {}).get("LORA_NAME", ""), (_in0 or {}).get("LORA_OUTPUT_DIR", "")
+                    webqueue.add(fam, vals, folder, lora, out_dir, first=True)
+                    webqueue.unhold()            # the queue follows it as any run started now
+                    webqueue.start_next(_queue_starter)
+                    return self.json({"ok": True, "queued": True,
+                                      "note": r["wait"] + " It's first in the queue until then."})
                 desc = get_family(fam) if r.get("problems") and fam != refmod.KEY else None
                 if desc is not None and _only_downloads(desc, r["problems"]):
                     r = _fetch_then_start(desc, fam, vals, folder, r["problems"])
@@ -4635,6 +4953,7 @@ class Handler(BaseHTTPRequestHandler):
                 if form_now:                     # the run's Samples values as changed: what a look at the run shows
                     ok_keys = {k: v for k, v in form_now.items()
                                if str(k).startswith("SAMPLE_") or k in ("FAMILY_TURBO_STRENGTH", "FAMILY_TURBO_ON",
+                                                                         "FAMILY_TURBO_STEPS", "FAMILY_TURBO_PACE",
                                                                          "FAMILY_PREVIEW_LOOK", "__SAMPLE_LIVE")}
                     with _lock:
                         _run["values"] = {**(_run.get("values") or {}), **ok_keys}
@@ -4702,6 +5021,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json({"ok": True})
             if path == "/api/fetch/cancel":
                 return self.json({"ok": _cancel_fetch()})
+            if path in ("/api/pod/dataset/fetch", "/api/pod/dataset/stop"):   # a training folder from a link (#308)
+                from fizgig.web import pod_dataset
+                if path.endswith("/stop"):
+                    return self.json(pod_dataset.stop())
+                try:
+                    return self.json(pod_dataset.start(str(b.get("link") or ""), str(b.get("name") or "")))
+                except ValueError as e:
+                    return self.json({"error": str(e)})
             if path == "/api/stop":
                 return self.json({"ok": _stop() or _stop_paused()})
             if path == "/api/logout":                     # this device: its login cookie goes
@@ -4718,9 +5045,10 @@ class Handler(BaseHTTPRequestHandler):
                 # Studio's own pick of a Samples-tab choice it also offers (FamilyOption.studio): one of its labels
                 studio_keys = {f"studio_opt_{o.key}": set(o.choice_labels()) for d in training_families()
                                for o in d.options if getattr(o, "studio", False)}
+                autosave_keys = {f"studio_autosave_{d.key}" for d in training_families()}   # Save every render
                 allowed = {k for d in training_families() for k in form.model_keys(d)} | set(SETTING_PREFS) | {
                     "input_dataset_dir", "welcome_v8_hidden", "sysmem_tip_hidden", "qt_disable_gpu",
-                    captions.SECONDARY_PREF} | render_keys | set(studio_keys)
+                    captions.SECONDARY_PREF} | render_keys | set(studio_keys) | autosave_keys
                 ch = b.get("changes") or {}
                 ch = {k: v for k, v in ch.items() if (k not in render_keys or v in ("checkpoint", "samples"))
                       and (k not in studio_keys or v in studio_keys[k])}
@@ -4729,7 +5057,8 @@ class Handler(BaseHTTPRequestHandler):
                                                                   if k in SETTING_PREFS}}
                 if "inference_int8" in ch:
                     ch["inference_int8"] = "1" if ch["inference_int8"] in (True, "1", 1) else "0"
-                for k in ("lan_discovery", "update_check", "qt_disable_gpu", "inference_sageattention"):
+                for k in ("lan_discovery", "update_check", "qt_disable_gpu", "inference_sageattention",
+                          *(k for k in ch if k in autosave_keys)):
                     if k in ch:
                         ch[k] = "1" if ch[k] in (True, "1", 1) else "0"
                 upd = {k: str(v) for k, v in ch.items() if k in allowed}
@@ -4774,20 +5103,34 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json({"ok": True})
             if path == "/api/captioners/download":    # one captioner's files now, rather than on first use
                 return self.json(captions.download_captioner(str(b.get("key") or ""), load_prefs()))
-            if path == "/api/captions/ai":
+            if path == "/api/queue/captions":            # Captions tab: this AI caption job, in the queue (#14)
                 prefs, folder, clips, photos, _ = _caption_args(b)
-                cap = captioner_for(prefs)
-                model = str(b.get("model") or "")
-                _caption_gpu_check(captions.need_gb(model))
-                from fizgig.dataset import detail_crops     # the folder's files, or its largest detail crops
-                inside = {os.path.abspath(f) for f in captions.with_crops(folder)}
-                only = [p for p in (b.get("only") or []) if os.path.dirname(os.path.abspath(p)) in inside]
-                return self.json(captions.ai_captions(
-                    prefs, cap if cap and os.path.isfile(cap) else "", folder, model, str(b.get("task") or ""),
-                    str(b.get("instruction") or ""), int(b.get("max_tokens") or 120), str(b.get("trigger") or ""),
-                    bool(b.get("overwrite")), clips, only=only or None, photos=photos,
-                    ext=captions.caption_ext(b.get("ext")), threshold=float(b.get("threshold") or 0.35),
-                    leave_out=str(b.get("leave_out") or ""), underscores=bool(b.get("underscores"))))
+                if not os.path.isdir(folder):
+                    return self.json({"error": "Choose the training folder on the Start tab first."})
+                n = len(captions.media_files(folder, clips, photos=photos))
+                label = (f"Captions: {os.path.basename(os.path.normpath(folder))} ({n} file{'s' if n != 1 else ''}, "
+                         f"{b.get('model') or 'the main model'})")
+                body = {k: v for k, v in b.items() if k not in ("only", "id")}
+                if b.get("id"):                          # Save to queue: a queued caption job's settings, in its place
+                    if not webqueue.update_captions(str(b["id"]), body, folder, label):
+                        return self.json({"error": "That caption job has left the queue (it has started)."})
+                    return self.json({"ok": True, "item": {"id": b["id"], "lora": label}, "saved": True})
+                item = webqueue.add_captions(body, folder, label)
+                webqueue.start_next(_queue_starter)      # starts now if nothing else is using the GPU (and the queue isn't held)
+                return self.json({"ok": True, "item": item})
+            if path == "/api/captions/ai":
+                return self.json(_start_ai_captions(b))
+            if path == "/api/studio/save_output":
+                # Save original / tweaked (and the song's Save): straight into Preferences' Studio outputs folder,
+                # no Save window; a tweaked still keeps the setup the page sent just before (download_setup)
+                which = str(b.get("which") or "")
+                try:
+                    r = studio.save_output(which, _STUDIO_DL_SETUP[0] if which == "tweaked" and _STUDIO_DL_SETUP
+                                           else None)
+                except (ValueError, OSError) as e:
+                    return self.json({"error": f"Couldn't save: {e}"})
+                r["name"] = os.path.basename(r["path"])
+                return self.json(r)
             if path.startswith("/api/studio/"):
                 try:
                     return self.json(_studio_post(path[len("/api/studio/"):], b))
@@ -5040,7 +5383,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/captions/add":
                 _, folder, *_ = _caption_args(b)
                 return self.json(captions.add_text(folder, b.get("start"), b.get("end"), b.get("trigger"),
-                                                   bool(b.get("apply")), captions.caption_ext(b.get("ext"))))
+                                                   bool(b.get("apply")), captions.caption_ext(b.get("ext")),
+                                                   each_line=bool(b.get("each_line"))))
             if path == "/api/captions/translate":
                 prefs, folder, *_ = _caption_args(b)
                 _caption_gpu_check(1.0)
@@ -5059,7 +5403,7 @@ class Handler(BaseHTTPRequestHandler):
                 from fizgig.web import royale
                 fams = {d.key: d for d in royale.families()}
                 scan = royale.scan(str(b.get("folder") or "").strip())
-                items = royale.pick(scan["items"], b.get("max") or "12")
+                items = royale.pick(scan["items"], b.get("max") or "12", b.get("from"), b.get("to"))
                 if not items:
                     raise ValueError("No checkpoints found - pick a folder with trained LoRAs.")
                 prompt = str(b.get("prompt") or "").strip()
@@ -5490,6 +5834,7 @@ def run_server(host, port=None, password=None, password_arg=False, open_browser=
         if history.last_orphan[0]:
             save_state({"interrupted": history.last_orphan[0]})
     webqueue.load()                                    # held if it holds anything: a restart never launches a run
+    studio_queue.configure(lambda body: _studio_post("load", body, from_queue=True), _studio_queue_busy)
     _startup["offer"] = _startup_offer()               # the run that was cut off: the page asks what to do
     _restore_pause()                                   # a run paused before the restart can still be resumed
     __import__("fizgig.web.helpers", fromlist=["x"]).ensure_home()   # pods' checkpoints still coming home

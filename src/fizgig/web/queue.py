@@ -47,7 +47,8 @@ def load():
             items = json.load(f)
     except (OSError, ValueError):
         items = []
-    items = [i for i in items if isinstance(i, dict) and i.get("family") and isinstance(i.get("values"), dict)]
+    items = [i for i in items if isinstance(i, dict) and isinstance(i.get("values"), dict)
+             and (i.get("family") or (i.get("kind") == "captions" and isinstance(i.get("body"), dict)))]
     with _lock:
         _q.update(items=items, held=bool(items), waiting="",
                   reason=("Your queued runs from Fizgig 7 are here: press Start queue when you want them to run."
@@ -57,7 +58,8 @@ def load():
 
 def status():
     with _lock:
-        return {"items": [{**{k: i.get(k) for k in ("id", "family", "lora", "image_folder", "queued_at", "output_dir")},
+        return {"items": [{**{k: i.get(k) for k in ("id", "family", "lora", "image_folder", "queued_at", "output_dir",
+                                                    "kind")},
                            "continues": bool((i.get("values") or {}).get("__continue"))}     # Continue on Runs & outputs
                           for i in _q["items"]],
                 "held": _q["held"], "reason": _q["reason"], "waiting": _q["waiting"],
@@ -66,13 +68,39 @@ def status():
                            if _q["failed"] else "")}
 
 
-def add(family, values, image_folder, lora, output_dir):
+def add(family, values, image_folder, lora, output_dir, first=False):
+    """first: at the head (Start Training while Studio finishes a render: it waits there, then starts)."""
     item = {"id": uuid.uuid4().hex[:10], "family": family, "values": dict(values), "image_folder": image_folder,
             "lora": lora, "output_dir": output_dir, "queued_at": time.strftime("%Y-%m-%d %H:%M")}
+    with _lock:
+        if first:
+            _q["items"].insert(0, item)
+        else:
+            _q["items"].append(item)
+        _save()
+    return item
+
+
+def add_captions(body, folder, label):
+    """An AI caption job for one folder (the Captions tab's request as it would send it), queued like a run."""
+    item = {"id": uuid.uuid4().hex[:10], "kind": "captions", "body": dict(body), "family": "", "values": {},
+            "image_folder": folder, "lora": label, "output_dir": "", "queued_at": time.strftime("%Y-%m-%d %H:%M")}
     with _lock:
         _q["items"].append(item)
         _save()
     return item
+
+
+def update_captions(item_id, body, folder, label):
+    """A queued caption job's settings replaced (Save to queue on the Captions tab): it keeps its place. False when it
+    has gone (started)."""
+    with _lock:
+        for i in _q["items"]:
+            if i["id"] == item_id and i.get("kind") == "captions":
+                i.update(body=dict(body), image_folder=folder, lora=label)
+                _save()
+                return True
+    return False
 
 
 def clashes(output_dir, lora, skip=""):
@@ -205,9 +233,10 @@ def start_next(starter):
             _q["waiting"] = ""
             _save()
         return
-    if why.startswith("wait:"):                  # the GPU is busy elsewhere: look again soon
+    if why.startswith(("wait:", "wait-soon:")):  # the GPU is busy elsewhere: look again soon (a Studio render: in a
+        soon = why.startswith("wait-soon:")       # few seconds)
         with _lock:
-            _q["waiting"] = why[5:].strip()
-        schedule(WAIT_S, starter)
+            _q["waiting"] = why.split(":", 1)[1].strip()
+        schedule(3 if soon else WAIT_S, starter)
         return
     hold(f"The next run ({item.get('lora')}) couldn't start: {why}")

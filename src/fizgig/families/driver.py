@@ -238,6 +238,12 @@ class FamilyDriver:
         family that keeps its own cache layout (H3's hidden_states + audio rows) maps its keys here."""
         return {k[len("cond__"):]: v.to(device) for k, v in batch.items() if k.startswith("cond__")}
 
+    def save_text_cache(self, item, cond: dict) -> None:
+        """A caption re-encoded mid-run (a Problem Images edit, auto-recaption) written to the item's text cache, in
+        the layout batch_cond reads. Default: the shared `cond__` file. A family with its own layout (H3) writes that."""
+        from fizgig.families import cache
+        cache.save_cond(self.description, item, cond)
+
     # ---- edit training (optional) -----------------------------------------------------------------
     supports_references = False       # reference ("before") images: pair datasets and edit previews
 
@@ -290,6 +296,13 @@ class FamilyDriver:
         return out
 
     # ---- prompt-pair sliders (optional) ------------------------------------------------------------
+    def set_preview_keyframes(self, vae, paths: dict) -> None:
+        """The Samples tab's First / Last frame ({"first": path, "last": path}) for a family that declares
+        preview_keyframes: its clip previews start / end on them, encoded through `vae` at each preview's size."""
+        import logging
+        logging.getLogger(__name__).warning("[sample] %s previews take no first / last frame - ignored",
+                                            self.description.display_name)
+
     def slider_setup(self, group) -> None:
         """A slider run's data is known (an image-pair group, or a prompt slider's practice bank)."""
 

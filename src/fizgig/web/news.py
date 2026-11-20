@@ -5,6 +5,92 @@ _ARTICLE = "https://github.com/shootthesound/Fizgig/blob/master/docs/NEWS.md"
 
 NEWS = [
     {
+        "date": "19 Nov 2026",
+        "title": "MiniMax H3 Image fine-tuning, and Studio as a generator",
+        "body": (
+            "Fine-tune is now a kind of training for MiniMax H3 Image, with a built-in 5e-5 preset and the training "
+            "adapter on: it saves a full H3 Image file that Studio and ComfyUI load as the base, on cards down to 24 GB.\n\n"
+            "Leave Studio's primary empty and it renders the base model on its own, any model; Unload primary takes "
+            "a LoRA out without reloading. On H3 Image, Studio's sizes go up to 12288."
+        ),
+        "links": [{"text": "Read more", "href": _ARTICLE + "#19-nov-2026-minimax-h3-image-fine-tuning-and-studio-as-a-generator"},
+                  {"text": "Release notes", "href": "https://github.com/shootthesound/Fizgig/releases/tag/v9.8.2"}],
+    },
+    {
+        "date": "19 Nov 2026",
+        "title": "Studio's own queue and outputs folder",
+        "body": (
+            "Studio has its own queue: while a render is going, Add to queue lines up the next (another model or LoRA "
+            "too), each job is saved, and a training run waits for a Studio render instead of cutting it short.\n\n"
+            "Save writes straight into Studio_Outputs, Save every render saves each one, and the arrows between "
+            "Baseline and Tweaked hide a pane, which then isn't rendered. MiniMax H3 previews can start and end on "
+            "a picture."
+        ),
+        "links": [{"text": "Read more", "href": _ARTICLE + "#19-nov-2026-studios-own-queue-and-outputs-folder"},
+                  {"text": "Release notes", "href": "https://github.com/shootthesound/Fizgig/releases/tag/v9.8.1"}],
+    },
+    {
+        "date": "19 Nov 2026",
+        "title": "MiniMax H3 Turbo previews keep their steps",
+        "body": (
+            "Changing a Samples-tab setting while a MiniMax H3 run trained sent the plain Steps box (20) to the run "
+            "instead of the Turbo preview steps, so its Turbo previews came out with artefacts.\n\n"
+            "They now keep your Turbo steps and strength, and Resume takes them too."
+        ),
+        "links": [{"text": "Read more", "href": _ARTICLE + "#19-nov-2026-minimax-h3-turbo-previews-keep-their-steps"},
+                  {"text": "Release notes", "href": "https://github.com/shootthesound/Fizgig/releases/tag/v9.8.0"}],
+    },
+    {
+        "date": "18 Nov 2026",
+        "title": "MiniMax H3 Studio twice as fast, long clips in pieces, Continue and Loop back",
+        "body": (
+            "On the int8 base, MiniMax H3 Studio renders through the int8 kernel ComfyUI uses: a 5-second clip's "
+            "six steps take about half the time, and the int8 video VAE works.\n\n"
+            "In pieces makes clips of any length, Continue adds a clip on the end of the one you rendered, and Loop "
+            "back adds one that returns to its first frame. Plus Cancel in Studio and the big caption view a line "
+            "at a time."
+        ),
+        "links": [{"text": "Read more", "href": _ARTICLE + "#18-nov-2026-minimax-h3-studio-twice-as-fast-long-clips-in-pieces-continue-and-loop-back"},
+                  {"text": "Release notes", "href": "https://github.com/shootthesound/Fizgig/releases/tag/v9.7.9"}],
+    },
+    {
+        "date": "18 Nov 2026",
+        "title": "Download a dataset onto a pod, caption jobs in the queue, and every preview setting in one place",
+        "body": (
+            "On a pod, the Start tab downloads a training folder straight from a Hugging Face, Google Drive or zip "
+            "link, so a big dataset no longer goes up from your home connection.\n\n"
+            "The Captions tab's Add to queue captions a folder before the run you queue after it, and the Samples "
+            "gallery lists every setting the previews use, with Copy. Krea 2 previews fit 16 and 24 GB AMD cards."
+        ),
+        "links": [{"text": "Read more", "href": _ARTICLE + "#18-nov-2026-download-a-dataset-onto-a-pod-caption-jobs-in-the-queue-and-every-preview-setting-in-one-place"},
+                  {"text": "Release notes", "href": "https://github.com/shootthesound/Fizgig/releases/tag/v9.7.8"}],
+    },
+    {
+        "date": "17 Nov 2026",
+        "title": "Repeats from folder names, and several captions per picture",
+        "body": (
+            "Sub-folders named like 10_Laffey_base train that many times an epoch (Repeats from folder names, under "
+            "Also train on its sub-folders), the naming kohya's sd-scripts and OneTrainer use.\n\n"
+            "Caption files can hold several captions, one per line, picked at random each time a picture trains "
+            "(Several captions per picture), and the Captions tab shows them a line at a time."
+        ),
+        "links": [{"text": "Read more", "href": _ARTICLE + "#17-nov-2026-repeats-from-folder-names-and-several-captions-per-picture"},
+                  {"text": "Release notes", "href": "https://github.com/shootthesound/Fizgig/releases/tag/v9.7.7"}],
+    },
+    {
+        "date": "17 Nov 2026",
+        "title": "LoRA Isolation learns on MiniMax H3 video, Royale renders part of a run, and Gizmo's crop box follows the mouse",
+        "body": (
+            "Fizgig LoRA Isolation and Leave the rest of the model alone learned nothing with Automagic (every MiniMax "
+            "H3 and H3 Image preset); such a run now trains with AdamW, at the Learning Rate box's rate or Adaptive "
+            "LR's.\n\n"
+            "LoRA Royale renders part of a run (Epochs from ... to ...), and Gizmo's crop box is drawn, moved and "
+            "resized as you drag."
+        ),
+        "links": [{"text": "Read more", "href": _ARTICLE + "#17-nov-2026-lora-isolation-learns-on-minimax-h3-video-royale-renders-part-of-a-run-and-gizmos-crop-box-follows-the-mouse"},
+                  {"text": "Release notes", "href": "https://github.com/shootthesound/Fizgig/releases/tag/v9.7.6"}],
+    },
+    {
         "date": "16 Nov 2026",
         "title": "MiniMax H3 at int8 on any pruned file, and H3 Image on 12 GB cards",
         "body": (

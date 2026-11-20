@@ -221,10 +221,12 @@ MINIMAX = FamilyDescription(
                                 "conditioning to bf16 (validated), just a slower one-off load",
                   alt_repo=_H, alt_path="text_encoders/qwen3vl_32b_minimax_h3_bf16.safetensors", alt_label="bf16",
                   alt_note="~51.5GB bf16 — the full-precision original; loads faster, 3.3x the disk"),
-        ModelFile("minimax_vae", "Video VAE", True, _H, "vae/minimax_h3_video_vae_fp16.safetensors", 4.9, role="vae",
-                  hint="The H3 video VAE — encodes each training image to a 24-channel latent (used only during "
-                       "caching).",
-                  download_note="~4.9GB — Comfy-Org/MiniMax-H3 → vae/minimax_h3_video_vae_fp16.safetensors"),
+        ModelFile("minimax_vae", "Video VAE", True, _H, "vae/minimax_h3_video_vae_int8_convrot.safetensors", 2.8,
+                  role="vae",
+                  hint="The H3 video VAE — encodes each training image to a 24-channel latent while caching, and "
+                       "decodes previews and Studio clips. The int8 file decodes faster and takes half the VRAM; "
+                       "the fp16 file (minimax_h3_video_vae_fp16) works here too.",
+                  download_note="~2.8GB — Comfy-Org/MiniMax-H3 → vae/minimax_h3_video_vae_int8_convrot.safetensors"),
         ModelFile("minimax_audio_vae", "Audio VAE", False, _H, "vae/minimax_h3_audio_vae_fp32.safetensors", 0.61,
                   role="audio_vae", fetch_optional=False,
                   announce="Audio VAE (~605 MB) — train on the sound in video clips, and on voices",
@@ -309,17 +311,20 @@ MINIMAX = FamilyDescription(
     multi_concept_hint="See the MiniMax section of the README.",
     int8_attention=True,              # workbench renders: comfy-kitchen's INT8 attention
     activation_cache=True,            # Reuse unchanged blocks: step-1 replay, identical to a full render
-    adaptive_lr=False,
+    # Adaptive LR and the per-image loss watch: on since 18 Nov 2026 (tested on H3 the night before: the watch's
+    # verdicts and per-image LR worked; Adaptive LR only steers AdamW-type runs - Automagic sets its own rate). A caption
+    # re-encoded mid-run goes into H3's own text cache (driver.save_text_cache). The presets are unchanged.
     not_offered={
-        "adaptive_lr": "retired for H3 by decision (its LR is set by the adapter ramp)",
-        "loss_watch": "off for H3 by decision (CLAUDE.md, Per-Image Loss Watch)",
         "training_maps": "clips: the maps draw on a still's latent grid (a clip's frames would need their own view)",
         "caption_dropout": "H3 has its own caption dropout option (H3_CAPTION_DROPOUT), not the shared row",
         "detail_crops": "a crop of a clip's frame isn't a clip",
         "resolution_stages": "clips train at their own size: not measured with stages",
     },
     slider_training=True,             # prompt pairs, photo pairs and clip pairs (driver: _slider_loss / predict)
-    loss_watch=False,
+    preview_keyframes=("first", "last"),   # clip previews can start / end on a picture (an i2v dataset, #376)
+    slider_min_side=768,              # H3 wants a side at 768 or more: the presets' 0.25 MP would practise at 496
+    #                                   (Peter, 19 Nov 2026)
+    multi_caption=False,              # H3 caches its text its own way (minimax/caching.py): one caption a clip
     training_maps=False,
     lora_regularisation=False,        # clips: the regularisation dataset is for still-picture LoRAs
     batch_training=True,              # Batch size (Other Options): pictures packed (forward_packed); clips one a step
@@ -359,7 +364,9 @@ MINIMAX = FamilyDescription(
                             VideoCheckpoint("First / Last Frame (fl2va)", "dit")),
         refmod_lengths=(("Still (1 frame)", 1), ("22 frames (~1s)", 22), ("39 frames (~1.6s)", 39),
                         ("56 frames (~2.3s)", 56), ("73 frames (~3s)", 73)),
-        refmod_size=(640, 768), sweep_frames=22, speed_boost=True),
+        # upscale: Studio's Upscale fold (minimax/upscale.py) is built and kept, but hidden until Peter is happy with
+        # it (18 Nov 2026) - True shows it
+        refmod_size=(640, 768), sweep_frames=22, speed_boost=True, pieces=124, upscale=False),
 
     latent_channels=24,
     spatial_factor=16,                # dataset/image_dataset.py LATENT_SPATIAL_FACTOR[minimaxh3]
