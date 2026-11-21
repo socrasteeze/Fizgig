@@ -185,6 +185,27 @@ function showTrigger(word) {
 }
 const saveTriggerSoon = debounce((word) => api("/api/trigger", {folder: S.imageFolder || "", word}).catch(() => {}), 500);
 
+// the LoRA name follows the training folder (#386): picking a folder brings back the name last used with it (typed,
+// started or queued), or a folder never named gets its own folder's name. A name you typed for no folder in
+// particular is left alone: only the model's default name, none, or one that came with the folder before is replaced
+const saveFolderNameSoon = debounce((folder, name) => name && api("/api/folder_name", {folder, name}).catch(() => {}), 500);
+const folderBase = (p) => String(p || "").replace(/[\\/]+$/, "").split(/[\\/]/).pop()
+  .replace(/[<>:"|?*]/g, "_").replace(/^[.\s]+|[.\s]+$/g, "");
+async function folderNameFollow(was) {
+  const now = S.imageFolder;
+  if (!now || !["draft", "queue"].includes(ctxKind())) return;
+  const get = (f) => api("/api/folder_name?folder=" + encodeURIComponent(f)).then((r) => r.name || "").catch(() => "");
+  const [mine, before] = await Promise.all([get(now), was ? get(was) : ""]);
+  if (S.imageFolder !== now) return;                        // another folder picked meanwhile
+  const cur = String(S.values.LORA_NAME || "").trim();
+  if (cur && cur !== before && cur !== folderBase(was) && cur !== String(defaults().LORA_NAME || "")) return;
+  const name = mine || folderBase(now);
+  if (!name || name === cur) return;
+  S.values.LORA_NAME = name;
+  syncInputs(["LORA_NAME"]);
+  refreshStateSoon(); saveStateSoon();
+}
+
 function defaults() {
   const v = {};
   for (const s of S.fam.form.sections) for (const r of s.rows) if (r.kind !== "note" && r.kind !== "shown") {
@@ -894,6 +915,8 @@ function onValue(r, val) {
        "FAMILY_TURBO_STRENGTH", "FAMILY_TURBO_ON", "SAMPLE_EVERY_N_EPOCHS", "SAMPLE_LATER", "SAMPLE_UNTIL_EPOCH",
        "SAMPLE_EVERY_AFTER", "FAMILY_PREVIEW_LOOK", "SAMPLE_CHECKPOINT"].includes(r.key))) sampleLiveSoon();
   if (r.key === "CAPTION_TRIGGER_WORD") { S.trigger = String(val).trim(); $("capTrigger").value = S.trigger; saveTriggerSoon(S.trigger); }
+  if (r.key === "LORA_NAME" && S.imageFolder && ["draft", "queue"].includes(ctxKind()))
+    saveFolderNameSoon(S.imageFolder, String(val || "").trim());
   const extra = r.sets && r.sets[val];            // a kind of training that also sets others (Fine-tune's LR)
   // Fine-tune sets Adafactor (#312): the LoRA optimizer is kept, and comes back when another kind is picked
   const ftOpt = (k) => !!(r.sets && r.sets[k] && "OPTIMIZER_TYPE" in r.sets[k]);
@@ -1123,6 +1146,7 @@ function renderPrefs() {
   if (qt) host.append(qt);                 // between Theme (above) and Web UI
   host.append(webPortCard());
   if (!S.pod) host.append(networkCard());
+  if (!S.onPod && !pageIsElsewhere()) host.append(fileWindowCard());
   host.append(dataFolderCard());
   host.append(outputFolderCard());
   host.append(foldersCard());
@@ -1774,6 +1798,24 @@ function firewallRow() {
   };
   api("/api/lan/firewall").then(show).catch(() => {});
   return box;
+}
+
+// Choose…: Fizgig's own chooser or this computer's Open window (prefs native_file_window; off by default on Windows,
+// #387). Shown only on the machine running Fizgig: a pod or another device always gets Fizgig's chooser
+function fileWindowCard() {
+  const on = el("input", {type: "checkbox"});
+  on.checked = String(S.set.native_file_window) === "1";
+  on.addEventListener("change", () => api("/api/prefs", {changes: {native_file_window: on.checked}})
+    .then(() => { S.set.native_file_window = on.checked ? "1" : "0"; nativePickOff = false; })
+    .catch((e) => { on.checked = !on.checked; showProblems([e.message]); }));
+  return el("div", {class: "section-card"}, el("div", {class: "card-title"}, el("span", {text: "Choose… buttons"})),
+    el("div", {class: "card-desc", text: "Which window opens when you press Choose… to pick a file or folder."}),
+    el("div", {class: "card-content"},
+      el("label", {class: "checkbox-label"}, on, " Use this computer's own Open window"),
+      el("div", {class: "field-hint", text: "Off: Fizgig's chooser, with buttons that go straight to your training " +
+        "data, your trained LoRAs and the Fizgig folder. On: the Open and folder windows of Windows (or " +
+        "your desktop), with its own shortcuts. Off by default on Windows. A pod, or this page opened from another " +
+        "device, always uses Fizgig's chooser."})));
 }
 
 // what Fizgig does on the network by itself (issue #236): finding your other computers and being found by them (a
@@ -8673,7 +8715,7 @@ function studioPending() {
 
 function studioSchedule(live) {
   if (!S.st.ready) return;
-  if (S.st.split === "base") {                        // sliders change Tweaked only, and it's hidden
+  if (S.st.split === "base" && !S.st.noLora) {        // sliders change Tweaked only, and it's hidden
     $("stStatus").textContent = "Tweaked is hidden: slider changes render when you show it again and press Render.";
     return;
   }
@@ -8786,7 +8828,7 @@ async function studioPollOnce() {
   // Continue, Loop back and Upscale work on the clip in the Tweaked pane: they wait for the render going now (a
   // queued copy could find another clip there by its turn); a queued job upscales only by its Auto tick
   for (const id of ["stContinue", "stLoopBack", "stUpGo", "stUpPrev", "stKeepBtn"]) {
-    $(id).disabled = going || S.st.split === "base" || !!S.st.noTweak;
+    $(id).disabled = going || (S.st.split === "base" && !S.st.noLora) || !!S.st.noTweak;
   }
   $("stStart").title = going ? "A model is loading or a render is going: Add to queue lines this one up behind it " +
     "(or Cancel the one going)." : "";
@@ -9333,7 +9375,8 @@ function wireStudio() {
   playTogether($("stPlayBothBtn"), () => {
     const v = S.st.layout?.kind === "video";
     const ids = (v ? ["stBaseVid", "stTweakVid"] : ["stBaseAud", "stTweakAud"])     // only the panes on screen
-      .filter((id) => !(S.st.split === "tweak" && id.startsWith("stBase")) && !(S.st.split === "base" && id.startsWith("stTweak")));
+      .filter((id) => !((S.st.split === "tweak" || S.st.noLora) && id.startsWith("stBase")) &&
+        !(S.st.split === "base" && !S.st.noLora && id.startsWith("stTweak")));
     if ($("stNolPane").style.display !== "none") ids.unshift(v ? "stNolVid" : "stNolAud");
     return ids;
   });
@@ -9343,7 +9386,7 @@ function wireStudio() {
   });
   $("stQAdd").addEventListener("click", studioQueueAdd);
   // the arrows between Baseline and Tweaked: ◀ hides the Baseline (Tweaked takes the width), ▶ hides Tweaked; the
-  // arrow left at the edge brings the other back. Remembered in this browser
+  // arrow left at the edge brings the other back
   const split = (mode) => {
     S.st.split = mode;
     // a pane stepping aside stops playing (an unmuted clip would go on being heard unseen)
@@ -9353,14 +9396,13 @@ function wireStudio() {
     $("stPreview").classList.toggle("only-base", mode === "base");
     $("stSplitL").title = mode === "base" ? "Show Tweaked again, beside the Baseline" : "Hide the Baseline: Tweaked takes the whole width";
     $("stSplitR").title = mode === "tweak" ? "Show the Baseline again, beside Tweaked" : "Hide Tweaked: the Baseline takes the whole width";
-    try { localStorage.setItem("fizgig_st_split", mode); } catch (e) { /* this browser keeps nothing */ }
     if (S.st.layout) studioMetrics();
     if (mode !== "tweak" && S.st.noBase || mode !== "base" && S.st.noTweak)
       $("stStatus").textContent = "Press Render to fill the pane that was hidden.";
   };
-  let splitWas = "both";
-  try { splitWas = localStorage.getItem("fizgig_st_split") || "both"; } catch (e) { /* both */ }
-  split(["tweak", "base"].includes(splitWas) ? splitWas : "both");
+  // both panes each time the page opens: a pane hidden last time isn't remembered (it hid renders without a word)
+  try { localStorage.removeItem("fizgig_st_split"); } catch (e) { /* this browser keeps nothing */ }
+  split("both");
   $("stSplitL").addEventListener("click", () => split(S.st.split === "base" ? "both" : "tweak"));
   $("stSplitR").addEventListener("click", () => split(S.st.split === "tweak" ? "both" : "base"));
   const stqOpen = (open) => {                         // the queue bar's list: open or closed, remembered here
@@ -10771,10 +10813,11 @@ function playTogether(btn, ids) {
 
 // ---- file picker -------------------------------------------------------------------------------------------
 let pickDone = null, pickDir = false, nativePickOff = false;
-// On the machine running Fizgig: the computer's own Open / folder window. Cancel there = nothing; no window to be
-// had (no tkinter, no screen, another computer, an error) = Fizgig's own picker below.
+// On the machine running Fizgig, with Preferences' "Use this computer's own Open window" on (off by default on
+// Windows, #387): the computer's own Open / folder window. Cancel there = nothing; no window to be had (no tkinter,
+// no screen, another computer, an error) = Fizgig's own picker below.
 async function pick(start, dirOnly, done) {
-  if (!nativePickOff && !pageIsElsewhere()) {
+  if (!nativePickOff && !pageIsElsewhere() && String((S.set || {}).native_file_window) === "1") {
     try {
       const r = await api(`/api/native_pick?dir=${dirOnly ? 1 : 0}&path=${encodeURIComponent(start || "")}`);
       if (r && r.path) { done(r.path); return; }
@@ -12352,7 +12395,7 @@ function wire() {
   const setFolder = () => {
     const was = S.imageFolder;
     S.imageFolder = folder.value.trim(); loadTrigger(); refreshStateSoon(); saveStateSoon();
-    if (S.imageFolder !== was) lookForget();
+    if (S.imageFolder !== was) { lookForget(); folderNameFollow(was); }
   };
   folder.addEventListener("change", setFolder);
   $("uploadFiles").addEventListener("change", (e) => { uploadFiles([...e.target.files]); e.target.value = ""; });
@@ -12580,17 +12623,21 @@ function wire() {
         const q = (S.run && S.run.web_queue && S.run.web_queue.items) || [], live = S.run.running || S.run.state === "starting";
         const before = r.position > 1 ? (q[r.position - 2] || {}).lora : live ? S.run.lora : "";
         const eta = r.position === 1 && live && S.run.progress && S.run.progress.eta;
+        // added: the form stays your own setup, Add to queue with it, so the next run is a folder and a name away
+        // (#386: it used to become the queued run, and only the pill led back to queue another)
+        // position 0: nothing was training, so the server started it straight away
         showProblems([], ed ? `Saved: queued run ${r.position} has these settings now.` :
-          `Added to the queue as number ${r.position}` + (before ? `: it starts after ${before}` + (eta ? ` (about ${eta})` : "") :
-          ": it starts as soon as nothing else is training") + ".");
+          (r.position ? `Added to the queue as number ${r.position}` + (before ? `: it starts after ${before}` +
+            (eta ? ` (about ${eta})` : "") : ": it starts as soon as nothing else is training") + ". " +
+            "To change this one, use the pill or Edit in the queue. " : "Nothing else was training, so it has started. ") +
+          "To queue another, pick its training folder and name, then Add to queue again.");
         await pollRun();
         const queued = ((S.run.web_queue || {}).items || []).some((i) => i.id === r.id);
         if (ed && queued) {                                   // saved: still that queued run, as it now is
           queueEditing({...ed, n: r.position || ed.n});
           $("queueEditText").replaceChildren(el("b", {text: `Saved: queued run ${r.position || ed.n}`}),
             el("span", {text: (ed.lora ? `: ${ed.lora}. ` : ". ") + "Change more and Save to queue again, or leave with the pill."}));
-        } else if (!ed && queued) await ctxSwitch({kind: "queue", id: r.id});   // added: the tabs show that job now
-        else if (ed) queueEditing(null);                      // it started meanwhile: it is the run now
+        } else if (ed) queueEditing(null);                    // it started meanwhile: it is the run now
       } else {
         showProblems(r.problems || (r.error ? [r.error] : []));
         if (ed) $("queueEditText").replaceChildren(el("b", {text: `Not saved: `}),   // the bar is where you pressed it
@@ -12604,10 +12651,12 @@ function wire() {
   });
   $("queueEditSave").addEventListener("click", () => $("btnQueue").click());
   $("btnQueueCancel").addEventListener("click", async () => {
+    // the queued run stays as it was, and the form goes back to your own setup (#386: Cancel edit used to stay on
+    // the queued run, its bar still up)
     const c = S.ctx || {};
-    if (c.kind === "queue") await ctxSwitch({kind: "queue", id: c.id});    // its settings as queued, back in the form
+    if (c.kind === "queue") await ctxSwitch({kind: "draft"});
     else queueEditing(null);
-    $("runStatus").textContent = "Edit cancelled: the queued run is as it was.";
+    $("runStatus").textContent = "Edit cancelled: the queued run is as it was, and the form is your own setup again.";
   });
   $("webQueueStart").addEventListener("click", () => api("/api/queue/start", {}).then(pollRun)
     .catch((e) => { $("runStatus").textContent = e.message; }));

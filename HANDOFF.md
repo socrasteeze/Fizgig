@@ -1,8 +1,13 @@
 # HANDOFF
 
-**Updated:** 2026-11-20 | **Branch:** master | **Upstream:** 8c28881b | **Delivery target:** fork/master
+**Updated:** 2026-11-20 | **Branch:** master | **Upstream:** 4376030eefd5137cc9f370878bf270b74f4296da | **Delivery target:** fork/master
 
 ## State
+2026-11-20: merged six commits from `origin/master` after `8c28881b` through `4376030e`. Adopted all six: the Windows chooser preference (`cddd3655`), queue and per-folder LoRA names (`d8a0e487`), Vimoo Glyph-ByT5 download and conversion (`b67b3527`), and three Studio pane fixes (`a0e2f9a7`, `bf04ccd5`, `4376030e`). No conflicts. Both sides' changed lines survived in `server.py` and `app.js`, the only files changed by both sides.
+
+Static checks passed: 455 tracked Python files compiled in memory (452 before the merge), both Web UI scripts parsed, and conflict-marker and whitespace checks were clean. Unittest, pytest, and runtime checks remain open. Vimoo helper prefetch uses the default revision. The tokenizer loader requests a pinned revision, so offline first use remains unverified.
+
+## Earlier: first 2026-11-20 sync
 2026-11-20: merged 186 upstream commits after 89a0ac16 through 8c28881b (release notes v9.7.6 to v9.8.2). Conflicts in `server.py`, `studio.py` and `app.js`: fork start warnings, idle unload and Studio-save refusal kept; upstream GPU wait, load id and no-LoRA save refusal kept. Compile of 456 tracked Python files and `node --check` on `app.js` and `qrcode.js` passed. No GPU work.
 
 ## Earlier: 2026-11-16 sync
