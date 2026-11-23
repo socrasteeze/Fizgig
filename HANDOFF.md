@@ -1,8 +1,13 @@
 # HANDOFF
 
-**Updated:** 2026-11-20 | **Branch:** master | **Upstream:** 4376030eefd5137cc9f370878bf270b74f4296da | **Delivery target:** fork/master
+**Updated:** 2026-11-23 | **Branch:** master | **Upstream:** 43c88d82e | **Delivery target:** fork/master
 
 ## State
+2026-11-23: merged 58 upstream commits after `4376030e` through `43c88d82` (release notes v9.8.3 to v9.8.5: Frankenstein mode for H3 Image + H3 video, the simulated-GPU memory checks, primary LoRA swap without a reload, Studio in two tabs, AMD MIOpen database paths and `FIZGIG_MIOPEN=0`, offline tokenizers, GGUF header refusal, H3 Image Speed boost, edit-model reference sizing). All adopted. One conflict, `src/fizgig/web/studio.py` `loaded` event: kept upstream's Frankenstein fields and the fork's `used=time.time()` for idle unload. Every other fork-added line in the 6 files both sides touched is still present, and both lazy-torch patches and the 16 MB raw-body cap are intact.
+
+Gates, CPU-only (`CUDA_VISIBLE_DEVICES=-1`, temporary `TEMP`, system Python with torch 2.10.0+cu130, `--continue-on-collection-errors`): compile of 471 tracked Python files and `node --check` pass. pytest on the merged tree: 30 failed, 1004 passed, 8 collection errors, against a pre-merge 98 failed, 861 passed, 8 errors. The only new failures are 3 in upstream's new `checks/test_offline_tokenizers.py` (no `tokenizers` package here), which fail the same way on pure upstream. No GPU work, app startup or Frankenstein run was exercised.
+
+## Earlier: 2026-11-20 second sync
 2026-11-20: merged six commits from `origin/master` after `8c28881b` through `4376030e`. Adopted all six: the Windows chooser preference (`cddd3655`), queue and per-folder LoRA names (`d8a0e487`), Vimoo Glyph-ByT5 download and conversion (`b67b3527`), and three Studio pane fixes (`a0e2f9a7`, `bf04ccd5`, `4376030e`). No conflicts. Both sides' changed lines survived in `server.py` and `app.js`, the only files changed by both sides.
 
 Static checks passed: 455 tracked Python files compiled in memory (452 before the merge), both Web UI scripts parsed, and conflict-marker and whitespace checks were clean. Unittest, pytest, and runtime checks remain open. Vimoo helper prefetch uses the default revision. The tokenizer loader requests a pinned revision, so offline first use remains unverified.
