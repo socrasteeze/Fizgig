@@ -379,6 +379,10 @@ class FamilyDescription:
     # chain - each frame also edits the previous frame's clean latent (LoRA Royale's sequential reference); the
     # original Klein engine's _build_ref_tokens. Shows the Strength boxes and the Sequential reference ticks
     reference_strength: bool = False
+    # an edit family's workbench reference keeps its own shape at Studio's (and Royale's) Reference MP, each side a
+    # multiple of this many pixels: every edit model packs a reference as tokens of its own size (Klein, Flux 3,
+    # Qwen Image, Fibo 2, MiniMax H3 Image). 32 suits them all (16x VAEs with 2 x 2 patches need it)
+    reference_grid: int = 32
     # the Extract tab's presets: (name, ((block id, multiplier), ...)) - the blocks kept and the scale each is
     # extracted at; an empty block list = every block. The tab adds Custom (a block pick). () = all blocks only
     extract_presets: tuple = ()
@@ -745,6 +749,12 @@ class FamilyDescription:
     # generic video engine, families/video_workbench.py). H3 brings its own for keyframes, references and RefMod on
     # top of the shared clip contract. Built as Class(description).
     workbench_engine: str = ""
+    # Frankenstein mode in Studio (families/frankenstein.py): base DiTs this one's blocks blend with, each (pref key of
+    # the other DiT, its name, pref key of a LoRA baked into its side or "", that LoRA's strength). () = no such mode
+    frankenstein_with: tuple = ()
+    # Frankenstein mode's built-in presets: (name, ((block id, blend weight 0..1), ...)) - every other block at 0 (the
+    # loaded model's own). Shown in Studio's preset menu in the mode, in place of repair_presets
+    frankenstein_presets: tuple = ()
     # a video family's clip render regimes in the workbench: ((name, steps, speed LoRA strength), ...) - H3's "dial"
     # (the fast loop) and "confirm" (the render that matches training previews). () = one regime, the speed LoRA's
     # own steps and strength (or the default sampling without one)

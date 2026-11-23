@@ -655,6 +655,24 @@ def save_state(changes: dict):
 STUDIO_PRESETS = os.path.join(user_data.PRESETS_DIR, "repair_studio")
 
 
+def _frank_plan(desc, prefs):
+    """Frankenstein mode's load settings from Preferences: the other base DiT and the LoRA baked into its side ->
+    (settings, problems). Both files must be there: without that LoRA its blocks aren't few-step blocks, and every
+    blend renders noise."""
+    key, name, lora_key, lora_strength = desc.frankenstein_with[0]
+    problems = []
+    other = pref_path(prefs, key)
+    if not other or not os.path.isfile(other):
+        problems.append(f"Frankenstein mode blends in {name}: set its model file on the Preferences tab first.")
+    lora = pref_path(prefs, lora_key) if lora_key else ""
+    if lora_key and not (lora and os.path.isfile(lora)):
+        from fizgig.families.registry import FAMILIES
+        label = next((f.label for d in FAMILIES.values() for f in d.model_files if f.pref_key == lora_key), "LoRA")
+        problems.append(f"Frankenstein mode blends in {name} with its {label} in it: set {name}'s {label} on the "
+                        "Preferences tab first.")
+    return {"path": other, "name": name, "lora": lora if lora_key else "", "strength": float(lora_strength)}, problems
+
+
 def _studio_desc(key):
     d = get_family(key)
     if d is None or d not in studio.families():
@@ -849,6 +867,11 @@ def _studio_post(what, b, from_queue=False):
         else:
             kw, settings, status, problems = studio.plan(desc, prefs, pref_path, fast=b.get("fast", True) is not False,
                                                          samples=_studio_samples(desc), negative=b.get("negative"))
+        if b.get("frankenstein") and getattr(desc, "frankenstein_with", ()):
+            frank, more = _frank_plan(desc, prefs)
+            problems = list(problems) + more
+            kw = dict(kw, frankenstein=frank)
+            b = dict(b, primary="", donor="")
         if problems:
             raise ValueError(" ".join(problems))
         captions.unload()                       # the caption model leaves the GPU too
@@ -894,11 +917,15 @@ def _studio_post(what, b, from_queue=False):
     if what == "donor":
         studio.donor(str(b.get("path") or "").strip())
         return {"ok": True}
+    if what == "adopt":                      # a queue job's / another tab's load: the page's LoRA swaps on it?
+        desc = _studio_desc(b.get("family", ""))
+        if desc.video_workbench or studio_queue.running():
+            return {}
+        return studio.adopt(b)
     if what == "primary":                    # Unload primary: the zero adapter in its place, no model reload
         if studio_queue.running():
             raise ValueError("The Studio queue is rendering a job. Pause the queue and let the job finish first.")
-        studio.primary(str(b.get("path") or "").strip())
-        return {"ok": True}
+        return {"ok": True, "load_id": studio.primary(str(b.get("path") or "").strip())}
     if what == "settings":
         desc = _studio_desc(b.get("family", ""))
         ps = None
@@ -916,6 +943,16 @@ def _studio_post(what, b, from_queue=False):
         if os.path.exists(out) and not b.get("overwrite"):
             return {"exists": True}
         studio.save(out, b.get("state") or {}, b.get("include_donor"))
+        return {"ok": True}
+    if what == "frank_export":                 # Frankenstein mode: the blend as a new base model
+        out = str(b.get("out") or "").strip()
+        if not out.lower().endswith(".safetensors"):
+            raise ValueError("Give the file a name ending in .safetensors.")
+        if not os.path.isdir(os.path.dirname(os.path.abspath(out))):
+            raise ValueError("That folder isn't there.")
+        if os.path.exists(out) and not b.get("overwrite"):
+            return {"exists": True}
+        studio.frank_export(out, b.get("state") or {})
         return {"ok": True}
     if what == "reset":
         studio.reset()
@@ -3799,8 +3836,8 @@ class Handler(BaseHTTPRequestHandler):
             dl = re.sub(r'[\\/:*?"<>|]+', "_", (qs.get("dl") or [""])[0])        # a Save / Download button
             if dl:                                    # the name the page asks for, with the file's own extension
                 dl = os.path.splitext(dl)[0] + os.path.splitext(p)[1]
-            if dl and (qs.get("which") or [""])[0] == "tweaked" and _STUDIO_DL_SETUP:
-                # Download tweaked: the setup on the page when it was pressed, inside the PNG (drop it on Studio)
+            if dl and (qs.get("which") or [""])[0] in ("baseline", "tweaked") and _STUDIO_DL_SETUP:
+                # Save on another device: the setup on the page when it was pressed, inside the PNG (drop it on Studio)
                 png = studio.png_with_setup(p, _STUDIO_DL_SETUP[0])
                 if png is not None:
                     return self._send(200, png, "image/png",
@@ -5149,11 +5186,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(_start_ai_captions(b))
             if path == "/api/studio/save_output":
                 # Save original / tweaked (and the song's Save): straight into Preferences' Studio outputs folder,
-                # no Save window; a tweaked still keeps the setup the page sent just before (download_setup)
+                # no Save window; a still keeps its render's setup, else the one the page sent just before
+                # (download_setup)
                 which = str(b.get("which") or "")
                 try:
-                    r = studio.save_output(which, _STUDIO_DL_SETUP[0] if which == "tweaked" and _STUDIO_DL_SETUP
-                                           else None)
+                    r = studio.save_output(which, _STUDIO_DL_SETUP[0] if _STUDIO_DL_SETUP else None)
                 except (ValueError, OSError) as e:
                     return self.json({"error": f"Couldn't save: {e}"})
                 r["name"] = os.path.basename(r["path"])

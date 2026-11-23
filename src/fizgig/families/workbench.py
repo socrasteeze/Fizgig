@@ -172,6 +172,42 @@ class WorkbenchEngine:
         self._source_cache = {}
         self.reference_path = None
         self._reference_cache = {}
+        # Frankenstein mode (families/frankenstein.py): another base DiT blended into this one block by block, the
+        # primary sliders its weights (0 = this model, 1 = the other); None = off
+        self.frank = None
+
+    # ---- Frankenstein mode ------------------------------------------------------------------------------------------
+    def frankenstein(self, other_path, other_lora=None):
+        """Blend another base DiT into the loaded one, block by block (a fresh session: call after load_primary(""))."""
+        from fizgig.families.frankenstein import DiTBlend
+        if self.pipeline is None or self.dit is None:
+            raise RuntimeError("Pipeline not loaded; call ensure_pipeline() first.")
+        ring = getattr(self.dit, "_h2d_offloader", None)
+        if getattr(self, "swapped", 0) and getattr(ring, "kind", "") != "int8":
+            # block swap is fine when it's H3's int8 streaming ring: a swapped block blends in its RAM master
+            # (DiTBlend._swap_home); any other swap moves the weights in ways the blend doesn't follow
+            raise ValueError("Frankenstein mode can't blend this model's swapped blocks (it needs int8 block "
+                             "streaming, or no block swap). Set Preferences' inference block swap to Auto or 0.")
+        self.frank = DiTBlend(self.dit, self.block_groups(), other_path, other_lora=other_lora, log=logger.info,
+                              own_path=getattr(self, "dit_path", None))   # read back, not held: ~42 GB less RAM
+        self.primary_block_ids = sorted(self.frank.items)
+        self._invalidate_baseline_cache()
+        self._invalidate_activation_cache()
+
+    def frank_export(self, out_path, state=None, progress=None):
+        """The blend (at the state's sliders, or as it is now) as a new base file in the loaded model's format."""
+        if self.frank is None:
+            raise ValueError("Frankenstein mode isn't on.")
+        if state is not None:
+            self.frank.set(self.frank_weights(state))
+        if not any(w > 0 for w in self.frank.weights().values()):
+            raise ValueError("Nothing is blended: move a block slider above 0 first.")
+        return self.frank.export(self.dit_path, out_path, log=logger.info, progress=progress)
+
+    def frank_weights(self, state):
+        """The blend weights a slider state asks for: each block's primary slider, 0..1 (off = 0)."""
+        return {b: (min(1.0, max(0.0, float(bs.primary_strength))) if bs.primary_enabled else 0.0)
+                for b, bs in state.blocks.items()}
 
     # ---- the block map ------------------------------------------------------------------------------
     def block_groups(self):
@@ -202,6 +238,7 @@ class WorkbenchEngine:
         speed LoRA: never under the block sliders, never in a save."""
         if self.pipeline is not None:
             return
+        self.dit_path = dit_path                     # Frankenstein mode exports the blend in this file's format
         self.checkpoint_sampling = preview_sampling
         self.speed_on_checkpoint = bool(speed_on_checkpoint and preview_sampling is not None)
         if preview_sampling is not None and not self.speed_on_checkpoint:
@@ -503,6 +540,9 @@ class WorkbenchEngine:
         """Per-block strength / on-off and each LoRA's load strength, live (no reload)."""
         if self.primary_network is None:
             return
+        if self.frank is not None:              # Frankenstein mode: the sliders are blend weights, the LoRA a zero
+            self.frank.set(self.frank_weights(state))
+            return
         targets = []
         for role, who in ((PRIMARY, "primary"), (DONOR, "donor")):
             scale = float(getattr(state, f"{who}_scale", 1.0))
@@ -595,6 +635,20 @@ class WorkbenchEngine:
             mp = 1.0
         return (path, mp) if path and os.path.isfile(path) else ("", 1.0)
 
+    def _ref_size(self, path, ref_mp, width, height):
+        """The size an edit reference is used at: the picture's own shape at ref_mp megapixels (Studio's Reference MP),
+        each side on the family's grid - every edit model takes a reference at its own size. The render's
+        (width, height) when the picture can't be read."""
+        from PIL import Image
+        try:
+            with Image.open(path) as im:
+                w, h = upright(im).size
+        except Exception:
+            return int(width), int(height)
+        g = int(getattr(self.desc, "reference_grid", 32) or 32)
+        s = (float(ref_mp or 1.0) * 1_000_000 / float(w * h)) ** 0.5
+        return max(g, round(w * s / g) * g), max(g, round(h * s / g) * g)
+
     def _fit_reference(self, path, width, height):
         """An edit reference as uint8 (H, W, 3), or (H, W, 4) with its transparency, as training takes it, cropped and
         scaled to the preview's size."""
@@ -627,6 +681,8 @@ class WorkbenchEngine:
         encoder's vision path at `ref_mp`, or as an edit of the picture at the preview `size`. The DiT parks on CPU
         while the encoder runs when both would not fit."""
         kind = self.reference_kind if ref else ""
+        if kind == "edit":
+            size = self._ref_size(ref, ref_mp, *size)
         tag = ((ref, round(float(ref_mp), 4)) if kind == "vision" else
                (ref, int(size[0]), int(size[1])) if kind == "edit" else ()) + tuple(self.driver.text_cache_key())
         need = [p for p in prompts if (p,) + tag not in self._prompt_cache]
@@ -992,7 +1048,7 @@ class WorkbenchEngine:
             except (TypeError, ValueError):
                 s1 = 1.0
         if ref and s1 != 0.0:
-            z = self._reference_latents(ref, width, height)
+            z = self._reference_latents(ref, *self._ref_size(ref, self._state_reference(state)[1], width, height))
             out.append(z if s1 == 1.0 else z * s1)
         if chain and prev_latent is not None and float(prev_strength) != 0.0:
             z = prev_latent.detach().to("cpu")
@@ -1003,7 +1059,8 @@ class WorkbenchEngine:
     def _act_for_render(self):
         """The activation cache for this render, or None (Turbo off, no family cache, a streamed DiT, or a render
         generate_preview did not set up: prompt / seed travel, the baseline)."""
-        if not self.turbo_preview or self._act_ctx is None or getattr(self, "swapped", 0) or self.dit is None:
+        if not self.turbo_preview or self._act_ctx is None or getattr(self, "swapped", 0) or self.dit is None \
+                or self.frank is not None:     # Frankenstein mode rewrites the blocks themselves: nothing to reuse
             return None
         if self._act is None:
             from fizgig.families.act_cache import ActivationCache
@@ -1039,6 +1096,8 @@ class WorkbenchEngine:
         base.donor_scale = 0.0              # the primary alone: a loaded donor stays out of the left pane
         for bs in base.blocks.values():
             bs.donor_enabled = False
+            if self.frank is not None:      # Frankenstein mode: the Baseline is the loaded model, nothing blended
+                bs.primary_strength = 0.0
         self._act_bypass = True             # the baseline would overwrite the tweaked render's cache
         try:
             img = self.generate_preview(base)
@@ -1049,7 +1108,10 @@ class WorkbenchEngine:
 
     def same_as_baseline(self, state):
         """True when the tweaked render would be the baseline: every primary block on at 1.0 and no donor block
-        contributing (no donor, its load strength 0, or each of its blocks off or at 0)."""
+        contributing (no donor, its load strength 0, or each of its blocks off or at 0). Frankenstein mode: nothing
+        blended."""
+        if self.frank is not None:
+            return not any(w > 0.0 for w in self.frank_weights(state).values())
         if any(not bs.primary_enabled or float(bs.primary_strength) != 1.0 for bs in state.blocks.values()):
             return False
         if self.donor_network is None or float(getattr(state, "donor_scale", 1.0)) == 0.0:
@@ -1313,6 +1375,7 @@ class WorkbenchEngine:
                 except Exception:
                     pass
         self.dit = self.vae = self.net = None
+        self.frank = None
         self.pipeline = None
         self.speed = None
         self._speed_follow = None

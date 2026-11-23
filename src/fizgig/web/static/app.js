@@ -6670,7 +6670,7 @@ function studioQueueDraw(q) {
   $("stQPause").textContent = q.paused ? "▶ Resume" : "⏸ Pause";
   $("stQPause").disabled = !q.paused && !q.left;
   $("stQSay").textContent = q.paused ? `Paused. ${q.reason || ""}` : q.waiting || (q.job ? "Rendering…" : q.left ? "" : "Done.");
-  const word = {waiting: "Waiting", loading: "Loading model", rendering: "Rendering", done: "Saved", failed: "Failed"};
+  const word = {waiting: "Waiting", loading: "Loading model", swapping: "Loading LoRA", rendering: "Rendering", done: "Saved", failed: "Failed"};
   const act = (path, body) => async () => {
     try { studioQueueDraw(await api(path, body)); } catch (e) { $("stQSay").textContent = e.message; }
   };
@@ -6681,7 +6681,7 @@ function studioQueueDraw(q) {
       onclick: act("/api/studio/queue/move", {id: it.id, delta: -1})}) : null,
     it.status === "waiting" ? el("button", {class: "btn btn-sm", text: "↓", title: "Later",
       onclick: act("/api/studio/queue/move", {id: it.id, delta: 1})}) : null,
-    ["loading", "rendering"].includes(it.status) ? null : el("button", {class: "btn btn-sm", text: "✕",
+    ["loading", "swapping", "rendering"].includes(it.status) ? null : el("button", {class: "btn btn-sm", text: "✕",
       title: it.status === "waiting" ? "Remove this job" : "Take this line off the list (its saved files stay)",
       onclick: act("/api/studio/queue/remove", {id: it.id})}),
     it.paths && it.paths.length ? el("div", {class: "stq-files"}, ...it.paths.flatMap((p, k) => [k ? "  ·  " : null,
@@ -6723,6 +6723,12 @@ async function studioFamily(res, w, h) {
   const key = $("stFamily").value;
   studioAutosaveShow();                               // Save every render: this model's own tick
   const L = S.st.layout = await api("/api/studio/layout?family=" + encodeURIComponent(key));
+  const frankWith = L.frankenstein || [];             // Frankenstein mode: the models this one's blocks blend with
+  $("stFrankRow").style.display = frankWith.length ? "" : "none";
+  $("stModeFrank").title = `Blend ${frankWith[0] || "another base model"} into this one, block by block: each block ` +
+    "slider is how much of that block comes from it (0 = this model as loaded, 1 = all of it). No LoRA. Baseline is " +
+    "this model on its own; Tweaked is the blend.";
+  if (!frankWith.length) $("stFrank").checked = false;
   const sv = stSaved();
   studioKind(L, sv);
   $("stRes").innerHTML = "";
@@ -6740,7 +6746,7 @@ async function studioFamily(res, w, h) {
   $("stNeg").value = (sv.neg || {})[key] ?? (L.negative_default || "");
   $("stTurboRow").style.display = L.turbo_preview ? "" : "none";
   $("stRefRow").style.display = L.reference_kind ? "" : "none";
-  $("stRefMp").disabled = L.reference_kind === "edit";
+  $("stRefMp").disabled = false;     // every reference kind uses it: an edit model takes the reference at this size
   $("stRefStr").style.display = $("stRefStrLabel").style.display = L.reference_strength ? "" : "none";
   // which model previews: the follows-the-Samples-tab families say so; others pick fast or full
   $("stDitRow").style.display = L.follows_samples || !L.dit_fast ? "none" : "";
@@ -6755,6 +6761,11 @@ async function studioFamily(res, w, h) {
   for (const g of L.groups) for (const b of g.blocks) S.st.blocks[b.id] = {pe: true, ps: 1, de: true, ds: 1};
   S.st.locks = new Set(); S.st.dlocks = new Set(); S.st.frozen = new Set(); S.st.dfrozen = new Set();
   S.st.hist = []; S.st.redo = [];
+  // Frankenstein mode follows the tick, loaded or not: its sliders start at 0 and its presets show at once
+  S.st.frank = studioFrankAsked();
+  S.st.frankName = frankWith[0] || "";
+  if (S.st.frank) for (const b of Object.values(S.st.blocks)) b.ps = 0;
+  studioFrankUi();
   studioLuckyCounts();
   studioMasters();
   studioPresets();
@@ -7943,7 +7954,7 @@ async function studioSetupLoad(name) {
   await studioSetupApply(d, name);
 }
 
-async function studioSetupApply(d, name) {        // a saved setup, or one read from a picture Save tweaked saved
+async function studioSetupApply(d, name) {        // a saved setup, or one read from a picture Studio saved
   const fam = d.family && [...$("stFamily").options].some((o) => o.value === d.family) ? d.family : $("stFamily").value;
   if (fam !== $("stFamily").value) { $("stFamily").value = fam; await studioFamily(); stRemember(); }
   const v = d.values || {};
@@ -8004,7 +8015,7 @@ async function studioSetupMix() {
   studioSchedule();
 }
 
-// a PNG's fizgig_studio_setup text (Save tweaked writes it), or null
+// a PNG's fizgig_studio_setup text (Studio writes it into every still it saves), or null
 function studioSetupFromPng(buf) {
   const u = new Uint8Array(buf), dv = new DataView(buf);
   if (u.length < 8 || u[0] !== 0x89 || u[1] !== 0x50) return null;
@@ -8029,15 +8040,16 @@ function wireStudioSetups() {
   $("stSetupList").addEventListener("change", () => { const n = $("stSetupList").value; $("stSetupList").value = ""; if (n) studioSetupLoad(n); });
   studioSetupList();
   // Save original / tweaked (and the song's Save): straight into Preferences' Studio outputs folder (images,
-  // videos or songs), no Save window. A tweaked still sends the setup first, so the picture carries it. Viewed from
-  // another device (a pod, a phone), the file is also downloaded to that device.
+  // videos or songs), no Save window. A still sends the setup first, so the picture carries it (the render's own
+  // setup wins when the server has it). Viewed from another device (a pod, a phone), the file is also downloaded to
+  // that device.
   for (const id of ["stDlBase", "stDlTweak", "stSongSave"]) {
     $(id).addEventListener("click", async (e) => {
       const b = $(id);
       if (b.dataset.go) return;                       // the browser's download (another device)
       e.preventDefault();
       const tweak = id !== "stDlBase";
-      if (tweak && S.st.layout && S.st.layout.kind === "stills") {
+      if (S.st.layout && S.st.layout.kind === "stills") {
         try { await api("/api/studio/download_setup", {data: studioSetupData()}); } catch (err) { /* the picture alone */ }
       }
       try {
@@ -8066,7 +8078,7 @@ function wireStudioSetups() {
     if (!f || e.defaultPrevented) return;
     e.preventDefault();
     const d = studioSetupFromPng(await f.arrayBuffer());
-    if (!d || !d.fizgig_repair_setup) { $("stSetupMsg").textContent = `${f.name} has no Studio settings in it (Save tweaked saves them).`; return; }
+    if (!d || !d.fizgig_repair_setup) { $("stSetupMsg").textContent = `${f.name} has no Studio settings in it (pictures Studio saves carry them).`; return; }
     await studioSetupApply(d, f.name.replace(/\.png$/i, ""));
   });
 }
@@ -8312,6 +8324,9 @@ function studioNegRow() {
 }
 
 // ---- the sliders ----
+// a primary slider's bounds: in Frankenstein mode a share of the other model's block, 0 to 1; else a LoRA's -3 to 3
+const stLo = () => (S.st.frank ? 0 : -3), stHi = () => (S.st.frank ? 1 : 3);
+const stClampP = (v) => Math.max(stLo(), Math.min(stHi(), v));
 const stFmt = (v) => Math.abs(v - 1) < 1e-9 ? "1.00" : (v >= 0 ? "+" : "") + v.toFixed(2);
 function studioRows() {
   const host = $("stBlocks");
@@ -8322,7 +8337,64 @@ function studioRows() {
       el("div", {}, ...g.blocks.slice(half).map(studioRow)));
     host.append(el("div", {class: "st-group"}, el("h3", {text: g.label}), cols));
   }
+  studioFrankRanges();
   studioActivity();
+}
+
+// the blend's save card: a progress bar while the new base is written, then where it went (or why it couldn't)
+function studioFrankMsg(st) {
+  const box = $("stFrankMsg"), gb = (b) => (b / 1e9).toFixed(1);
+  const s = st.frank_saving;
+  $("stFrankExport").disabled = !!s;
+  if (s) {
+    const bar = el("progress", {max: s.total || 1, value: s.done || 0, class: "st-frank-bar"});
+    box.replaceChildren(el("div", {class: "field-row"}, bar, el("span", {class: "field-hint", text: s.total ?
+      `Writing the new base model… ${gb(s.done)} of ${gb(s.total)} GB` : "Getting the blend ready to write…"})));
+    return;
+  }
+  S.st.frankSaving = false;
+  if (st.frank_error) box.replaceChildren(el("div", {class: "problems", text: st.frank_error}));
+  else if (st.frank_exported) box.replaceChildren(el("div", {class: "field-hint st-saved",
+    text: `Saved: ${st.frank_exported}${st.frank_saved_gb ? ` (${st.frank_saved_gb} GB)` : ""}`}));
+}
+
+// Frankenstein mode (a family's frankenstein_with): another base model blended in block by block
+function studioFrankAsked() {
+  return !!((S.st.layout || {}).frankenstein || []).length && $("stFrank").checked;
+}
+// the tick alone hides the LoRA rows (primary, donor, their mixes): the mode loads no LoRA, so nothing typed there counts
+function studioFrankTick() {
+  const on = studioFrankAsked();
+  if (on !== !!S.st.frank) studioFrankEnter(on, ((S.st.layout || {}).frankenstein || [])[0] || "");
+  else studioFrankUi();
+}
+// the page's side of the mode (from the tick): LoRA rows, lucky limits, the note. What needs the mode LOADED - the Save
+// blend row, Save repaired LoRA out of the way - goes by the "frankenstein" class the status poll sets.
+function studioFrankUi() {
+  const on = !!S.st.frank;
+  $("tab-studio").classList.toggle("frank-asked", on);
+  // rolls from 0 to 0.6 (Peter): past about 0.75, and with many blocks rolled at once, the sweep's blends broke up
+  if (on) { $("stLuckyLo").value = "0"; $("stLuckyHi").value = "0.6"; }
+  else if ($("stLuckyHi").value === "0.6" && $("stLuckyLo").value === "0") $("stLuckyHi").value = "1.5";   // the LoRA default
+  // the switch shows the mode; one short line says what's blended in (the detail is on the button's tooltip)
+  document.querySelectorAll("#stModeSeg .btn").forEach((b) => b.classList.toggle("active", (b.dataset.frank === "1") === on));
+  $("stFrankNote").textContent = on ? `Blending in ${S.st.frankName}: each slider is how much of that block comes from it.` : "";
+}
+function studioFrankRanges() {
+  // in the mode each block slider is a share of the other model's block, 0 to 1; else the LoRA's -3 to 3
+  for (const r of document.querySelectorAll("#stBlocks .st-row:not(.donor) input[type=range]")) {
+    r.min = S.st.frank ? "0" : "-3"; r.max = S.st.frank ? "1" : "3";
+  }
+}
+function studioFrankEnter(on, name) {
+  // the sliders start at 0 (the model as loaded) on entering the mode, and back at 1 (the LoRA as is) on leaving it
+  S.st.frank = on;
+  S.st.frankName = name || "";
+  studioFrankUi();
+  for (const b of Object.values(S.st.blocks)) { b.ps = on ? 0 : 1; b.pe = true; }
+  studioFrankRanges();
+  studioSync(Object.keys(S.st.blocks));
+  studioPresets();                              // the mode's own presets (and your presets for it)
 }
 
 function studioRow(b) {
@@ -8340,9 +8412,12 @@ function studioRow(b) {
       onchange: (e) => {
         const v = Number(String(e.target.value).replace(",", ".").replace(/^\+/, ""));
         if (!Number.isFinite(v)) { row._sync(); return; }
-        studioSet(b.id, sv, Math.max(-3, Math.min(3, Math.round(v * 100) / 100))); studioCommit();
+        const r = Math.round(v * 100) / 100;
+        studioSet(b.id, sv, side === "p" ? stClampP(r) : Math.max(-3, Math.min(3, r))); studioCommit();
       }});
     const btn = (t, title, f) => el("button", {class: "btn btn-sm", text: t, title, onclick: () => { f(); studioCommit(); }});
+    const flip = btn("±", "Flip the sign", () => studioSet(b.id, sv, -st()[sv]));
+    flip.classList.add("st-flip");
     const label = side === "p" ? el("span", {class: "st-label", style: b.color ? `color:${b.color}` : ""},
       b.label, b.cat ? el("small", {text: `[${b.cat}]`}) : null) : el("span", {class: "st-label", text: "donor"});
     const locks = () => side === "p" ? S.st.locks : S.st.dlocks, frozen = () => side === "p" ? S.st.frozen : S.st.dfrozen;
@@ -8355,14 +8430,17 @@ function studioRow(b) {
     const row = el("div", {class: "st-row" + (side === "d" ? " donor" : "")}, lock, tick, label, range, val,
       el("span", {class: "st-btns"},
         btn("0", "Set to 0", () => studioSet(b.id, sv, 0)), btn("1", "Set to 1", () => studioSet(b.id, sv, 1)),
-        btn("±", "Flip the sign", () => studioSet(b.id, sv, -st()[sv])),
+        flip, // ± (a sign means nothing for a blend share: hidden in Frankenstein mode)
         btn("−", "−0.1", () => studioSet(b.id, sv, Math.max(-3, Math.round((st()[sv] - 0.1) * 100) / 100))),
         btn("+", "+0.1", () => studioSet(b.id, sv, Math.min(3, Math.round((st()[sv] + 0.1) * 100) / 100))),
         btn("⇄", "Balance: the other side gets 1 − this (with a donor)", () => {
           const o = side === "p" ? "ds" : "ps", v = st()[sv];
           if (S.st.donor && v >= 0 && v <= 1) { studioSet(b.id, o, Math.round((1 - v) * 100) / 100); studioSet(b.id, "de", true); }
         })));
+    const bal = [...row.querySelectorAll(".st-btns button")].find((x) => x.textContent === "⇄");
+    if (bal) bal.classList.add("st-bal");
     row._sync = () => { tick.checked = st()[en]; range.value = st()[sv];
+      val.title = side === "p" && S.st.frank ? "Type a share from 0 to 1, then Enter" : "Type a value from -3 to 3, then Enter";
       if (document.activeElement !== val) val.value = stFmt(st()[sv]);
       const on = locks().has(b.id); lock.textContent = on ? "🔒" : "🔓"; lock.classList.toggle("on", on); };
     row._sync();
@@ -8376,6 +8454,7 @@ function studioRow(b) {
 }
 
 function studioSync(ids) {
+  if (S.st.frank) for (const b of Object.values(S.st.blocks)) b.ps = stClampP(b.ps);
   document.querySelectorAll("#stBlocks .st-block").forEach((box) => {
     if (!ids || ids.includes(box.dataset.id)) box._rows.forEach((r) => r._sync());
   });
@@ -8463,6 +8542,7 @@ function studioActivity() {
 
 function studioSet(id, k, v, live) {
   if ((k === "ds" || k === "de" ? S.st.dlocks : S.st.locks).has(id)) { studioSync([id]); return; }
+  if (k === "ps") v = stClampP(v);
   S.st.blocks[id][k] = v;
   studioSync([id]);
   studioSchedule(live);
@@ -8534,15 +8614,20 @@ function studioMastersFollow() {
 }
 
 // ---- presets and bulk ----
+// your presets are kept apart in Frankenstein mode: there a slider is a blend weight, not a LoRA strength
+function studioPresetKey() { return S.st.layout.key + (S.st.frank ? "__frankenstein" : ""); }
+function studioBuiltins() { const L = S.st.layout; return S.st.frank ? (L.frank_presets || []) : L.presets; }
+
 async function studioPresets() {
   const L = S.st.layout, sel = $("stPreset");
-  const user = (await api("/api/studio/presets?family=" + encodeURIComponent(L.key)).catch(() => ({user: []}))).user;
+  if (!L) return;
+  const user = (await api("/api/studio/presets?family=" + encodeURIComponent(studioPresetKey())).catch(() => ({user: []}))).user;
   sel.innerHTML = "";
   sel.append(el("option", {value: "", text: "Presets…"}));
-  // every model's: the primary and the donor evenly, block by block (needs a donor loaded)
-  sel.append(el("option", {value: "x:even", text: "Primary + donor, 50/50", title: "Every block both LoRAs touch: " +
-    "each at 0.5. A block only one of them touches: that one at full strength. Needs a donor LoRA loaded."}));
-  for (const p of L.presets) sel.append(el("option", {value: "b:" + p.name, text: p.name}));
+  // every model's: the primary and the donor evenly, block by block (needs a donor loaded; none in Frankenstein mode)
+  if (!S.st.frank) sel.append(el("option", {value: "x:even", text: "Primary + donor, 50/50", title: "Every block both " +
+    "LoRAs touch: each at 0.5. A block only one of them touches: that one at full strength. Needs a donor LoRA loaded."}));
+  for (const p of studioBuiltins()) sel.append(el("option", {value: "b:" + p.name, text: p.name}));
   if (user.length) sel.append(el("optgroup", {label: "Your presets"}, ...user.map((n) => el("option", {value: "u:" + n, text: n}))));
 }
 
@@ -8566,16 +8651,18 @@ async function studioPresetApply(v) {
     $("stStatus").textContent = `Primary + donor, 50/50: ${both} block(s) at 0.5 each, ${one} touched by one LoRA ` +
       "at full strength" + (S.st.locks.size + S.st.dlocks.size ? "; locked sliders left alone." : ".");
   } else if (v.startsWith("b:")) {
-    const p = L.presets.find((x) => x.name === v.slice(2));
+    const p = studioBuiltins().find((x) => x.name === v.slice(2));
+    if (!p) { $("stPreset").value = ""; return; }
+    const rest = S.st.frank ? 0 : 1;              // a block the preset doesn't name: the LoRA as is / the model as loaded
     for (const [id, b] of Object.entries(S.st.blocks)) {
       if (!S.st.dlocks.has(id)) Object.assign(b, {de: true, ds: 1});
       if (S.st.locks.has(id)) continue;
-      Object.assign(b, {pe: true, ps: 1});
+      Object.assign(b, {pe: true, ps: rest});
       if (p.keep) b.pe = p.keep.includes(L.category_of[id]);
       if (p.blocks && id in p.blocks) { b.pe = true; b.ps = Number(p.blocks[id]); }
     }
   } else {
-    const r = await api("/api/studio/preset_load", {family: L.key, name: v.slice(2)});
+    const r = await api("/api/studio/preset_load", {family: studioPresetKey(), name: v.slice(2)});
     for (const [id, bs] of Object.entries(r.blocks || {})) {
       const b = S.st.blocks[id];
       if (!b) continue;
@@ -8656,7 +8743,7 @@ function studioPresetSaveOpen() {
     const blocks = {};
     for (const [id, b] of Object.entries(S.st.blocks)) blocks[id] = {primary_enabled: b.pe, primary_strength: b.ps, donor_enabled: b.de, donor_strength: b.ds};
     try {
-      const r = await api("/api/studio/preset_save", {family: S.st.layout.key, name: name.value, blocks, overwrite: !!overwrite});
+      const r = await api("/api/studio/preset_save", {family: studioPresetKey(), name: name.value, blocks, overwrite: !!overwrite});
       if (r.exists) { msg.replaceChildren(document.createTextNode("That name is taken. "), el("button", {class: "btn btn-sm btn-danger", text: "Replace it", onclick: () => save(true)})); return; }
       host.innerHTML = ""; studioPresets(); $("stStatus").textContent = "Preset saved.";
     } catch (e) { msg.textContent = e.message; }
@@ -8715,6 +8802,11 @@ function studioPending() {
 
 function studioSchedule(live) {
   if (!S.st.ready) return;
+  if (!!S.st.frank !== !!S.st.frankLoaded) {          // ticked (or unticked) since the load: Render loads it that way
+    $("stStatus").textContent = S.st.frank ? "Press Render to load Frankenstein mode: the sliders are blend shares now." :
+      "Press Render to leave Frankenstein mode: the sliders are LoRA strengths again.";
+    return;
+  }
   if (S.st.split === "base" && !S.st.noLora) {        // sliders change Tweaked only, and it's hidden
     $("stStatus").textContent = "Tweaked is hidden: slider changes render when you show it again and press Render.";
     return;
@@ -8726,7 +8818,7 @@ function studioSchedule(live) {
 async function studioRender() {
   if (!$("stPrompt").value.trim()) { $("stStatus").textContent = "Enter a prompt (include the LoRA's trigger word), then press Render."; return; }
   if (S.st.foreign && !(S.stq && S.stq.job)) {       // a Studio queue job loaded another model or LoRA: yours again
-    S.st.foreign = false; S.st.loadedKey = "";
+    await studioAdopt();
     return studioStart();
   }
   // seed 0: random, rolled by Render / Start (studioStart) and kept while sliders and the other controls render, so
@@ -8736,16 +8828,32 @@ async function studioRender() {
     if (!S.st.seedUsed) studioRollSeed();
     state.seed = S.st.seedUsed;
   }
-  // Save every render saves a tweaked still with the setup inside, as Save does
-  const setup = $("stAutoSave").checked && S.st.layout && S.st.layout.kind === "stills" ? {setup: studioSetupData()} : {};
+  // every still render carries its setup, so whatever saves it (Save, Save every render - ticked here or in another
+  // tab) writes the setup the picture was rendered with into it
+  const setup = S.st.layout && S.st.layout.kind === "stills" ? {setup: studioSetupData()} : {};
   try {
     const r = await api("/api/studio/render", {state, ...studioExtra(), ...studioMixExtra(), ...setup});
     if (r.after_job) $("stStatus").textContent = "Renders when the Studio queue's job finishes…";
-    if (r.reload) { S.st.foreign = false; S.st.loadedKey = ""; return studioStart(); }   // a job's LoRA is loaded
+    if (r.reload) { await studioAdopt(); return studioStart(); }   // a job's LoRA is loaded
     studioPoll();
   }
   catch (e) { $("stStatus").textContent = e.message; }
   finally { if (S.st.upHold) S.st.upHold = S.st.upNow = S.st.upPrev = 0; }     // the held Upscale request has gone
+}
+
+// What's loaded is a Studio queue job's (or another tab's). The server compares it with this page's load: only the
+// primary LoRA differs - take it as this page's load with that primary, so studioStart swaps this page's LoRA on in
+// seconds (#394); the same primary too - render on it as it is; anything else - load again
+async function studioAdopt() {
+  S.st.foreign = false; S.st.loadedKey = "";
+  const L = S.st.layout;
+  if (!L || L.kind === "video" || studioFrankAsked()) return;
+  try {
+    const r = await api("/api/studio/adopt", studioLoadBody());
+    const fast = (document.querySelector('input[name="stDit"]:checked') || {}).value !== "full";
+    if (r.same) S.st.loadedKey = studioLoadKey(L, fast);
+    else if (r.swap) S.st.loadedKey = studioLoadKey(L, fast, r.primary || "");
+  } catch (e) { /* load again */ }
 }
 
 function studioRollSeed() { S.st.seedUsed = 1 + Math.floor(Math.random() * (2 ** 31 - 2)); }
@@ -8757,13 +8865,14 @@ function studioLoadBody() {
   return {family: L.key, primary: $("stPrimary").value.trim(), donor: $("stDonor").value.trim(),
     fast, turbo: $("stTurbo").checked, negative: $("stNeg").value.trim(),
     h3_model: L.kind === "video" ? $("stH3Model").value : "", base: L.kind === "video" ? $("stH3Base").value : "",
-    canvas: studioCanvas()};
+    canvas: studioCanvas(), frankenstein: studioFrankAsked()};
 }
 
 // what a loaded model is: the model, the primary and the preview settings - a change of any is a reload at Render
-function studioLoadKey(L, fast) {
-  return [L.key, $("stPrimary").value.trim(), fast, L.kind === "video" ? $("stH3Model").value + $("stH3Base").value : "",
-    (L.render_choice || {}).value || "", L.follow_ck || "", L.follow_look || "", L.follow_turbo || ""].join("|");
+function studioLoadKey(L, fast, primary) {
+  return [L.key, primary === undefined ? $("stPrimary").value.trim() : primary, fast, L.kind === "video" ? $("stH3Model").value + $("stH3Base").value : "",
+    (L.render_choice || {}).value || "", L.follow_ck || "", L.follow_look || "", L.follow_turbo || "",
+    studioFrankAsked() ? "frank" : ""].join("|");
 }
 
 async function studioStart() {
@@ -8786,6 +8895,12 @@ async function studioStart() {
       studioRender();
       return;
     }
+    // only the primary LoRA changed: it goes on the loaded model in seconds, not a model reload of minutes (#394).
+    // Not a video model (H3's engine switches an old LoRA off rather than taking it out) or Frankenstein mode
+    if (st.state === "ready" && !st.rendering && !st.worker_busy && !S.st.foreign && L.kind !== "video" &&
+        !st.frankenstein && !studioFrankAsked() && S.st.loadedKey === studioLoadKey(L, fast, st.primary || "")) {
+      if (await studioSwapPrimary(key, st.primary_seq || 0)) return;
+    }
     if (st.state === "loading" || st.rendering || st.worker_busy) {   // never a new model under a render going
       $("stStatus").textContent = "A model is loading or a render is going: Add to queue lines this one up behind " +
         "it (or Cancel the one going, then Render).";
@@ -8802,6 +8917,36 @@ async function studioStart() {
   } catch (e) { $("stStatus").textContent = e.message; S.st.upHold = S.st.upNow = S.st.upPrev = 0; }
 }
 
+// Another primary on the loaded model (the worker takes the old one out and wires the new one): true = done here (a
+// render follows, or the LoRA couldn't load and the old one is back on); false = no answer, so Render loads it fresh
+async function studioSwapPrimary(key, seq) {
+  const p = $("stPrimary").value.trim(), L = S.st.layout;
+  if (S.st.eq && S.st.eq.primary) studioEq("primary", false);
+  $("stStatus").textContent = "Loading the LoRA…";
+  const r = await api("/api/studio/primary", {path: p});
+  S.st.myLoad = r.load_id || S.st.myLoad;               // this tab's own change: another tab sees it as a new load
+  for (let i = 0; i < 600; i++) {                     // a LoRA file loads in seconds: two minutes is plenty
+    await new Promise((r) => setTimeout(r, 200));
+    const s = await api("/api/studio/status");
+    if ((s.primary_seq || 0) > seq) {
+      if (s.primary !== p) { $("stStatus").textContent = s.status || "Couldn't load that LoRA."; studioPoll(); return true; }
+      // the primary's epochs / LoRA mix went with it; the donor's epoch blend stays (as Unload primary)
+      S.st.mix = {mode: "off", epochs: [], rows: []};
+      document.querySelector('input[name="stMixMode"][value="off"]').checked = true;
+      $("stMixInfo").textContent = ""; studioMixLayout();
+      S.st.loadedKey = key; S.st.foreign = false;
+      if ($("stDonor").value.trim() !== (s.donor || "")) await api("/api/studio/donor", {path: $("stDonor").value.trim()});
+      if (L.follows_samples) await api("/api/studio/settings", {family: L.key, negative: $("stNeg").value.trim()});
+      studioPoll();
+      studioRender();
+      return true;
+    }
+    if (s.state !== "ready") break;
+  }
+  S.st.loadedKey = "";
+  return false;
+}
+
 // Studio's status poll. It always comes round again while the tab is open: a status request that failed, or an error
 // while drawing one, used to end it, and then a finished render never showed until something else polled (Cancel did)
 async function studioPoll() {
@@ -8813,11 +8958,14 @@ async function studioPoll() {
 }
 async function studioPollOnce() {
   const st = await api("/api/studio/status");
-  if (st.load_id && S.st.myLoad && st.load_id !== S.st.myLoad) S.st.foreign = true;
+  // what was loaded when this tab first looked counts as its own (a page reload finds its own load); any later load
+  // it didn't make is another tab's or a queue job's (#395: a tab that never noted its load copied the other tab's)
+  if (S.st.myLoad == null) S.st.myLoad = st.load_id || 0;
+  if ((st.load_id || 0) !== S.st.myLoad) S.st.foreign = true;
   // your render waited for a queue job that had another LoRA loaded: load yours again and render it (once)
   if (st.page_waiting && !S.st.reloading && st.state === "ready" && !st.rendering) {
-    S.st.reloading = true; S.st.foreign = false; S.st.loadedKey = "";
-    studioStart().finally(() => { S.st.reloading = false; });
+    S.st.reloading = true;
+    studioAdopt().then(studioStart).finally(() => { S.st.reloading = false; });
   }
   let qActive = false;
   try { qActive = studioQueueDraw(await api("/api/studio/queue")); } catch (e) { /* an older server */ }
@@ -8832,12 +8980,37 @@ async function studioPollOnce() {
   }
   $("stStart").title = going ? "A model is loading or a render is going: Add to queue lines this one up behind it " +
     "(or Cancel the one going)." : "";
+  // another Studio tab (or window) loaded over this one's model or LoRA: Studio holds one at a time, so say so and
+  // keep this tab's own pictures, sliders and Cancel out of it - its loads and renders are that tab's (#395). This
+  // tab's model picker still shows its own setup, which Render loads again
+  if (S.st.foreign && st.load_by === "page" && !(S.stq && S.stq.job)) {
+    S.st.shown = st.shown || S.st.shown;              // seen, never drawn: this tab's next picture is its own
+    S.st.baseEarlyShown = st.baseline_early || S.st.baseEarlyShown;
+    S.st.earlyShown = st.early || S.st.earlyShown;
+    $("stStatus").textContent = "Another Studio tab or window has loaded its own model or LoRA over this one's " +
+      "(Studio holds one at a time)" + (st.status ? ": " + st.status : ".") +
+      " Render here loads this tab's setup again" + (going ? " once it's done." : ".");
+    $("stBadge").textContent = going ? "Other tab" : "";
+    $("stBadge").dataset.state = going ? "running" : "idle";
+    $("stBar").style.width = going ? "100%" : "0";
+    $("stBar").parentElement.classList.toggle("indeterminate", going);
+    $("stStart").textContent = "Render";
+    $("stCancel").disabled = true;
+    return going || qActive;
+  }
   const wasReady = S.st.ready;
   S.st.ready = st.state === "ready";
   S.st.donor = !!st.donor;
   S.st.primaryBlocks = new Set(st.primary_blocks || []); S.st.donorBlocks = new Set(st.donor_blocks || []);
   // no LoRA loaded: Studio renders the base model on its own (a zero adapter stands in for the primary)
-  S.st.noPrimary = S.st.ready && !st.primary;
+  const frank = S.st.ready && !!st.frankenstein;
+  S.st.frankOut = st.frank_out || "";
+  S.st.frankLoaded = frank;
+  if (S.st.frankSaving || st.frank_saving || st.frank_error) studioFrankMsg(st);
+  $("tab-studio").classList.toggle("frankenstein", frank);
+  if (frank && !$("stFrankOut").value) $("stFrankOut").value = S.st.frankOut || "";
+  if (frank && !S.st.frank) { $("stFrank").checked = true; studioFrankTick(); }   // found loaded (a page reload)
+  S.st.noPrimary = S.st.ready && !st.primary && !frank;
   S.st.noLora = S.st.noPrimary && !st.donor;
   $("tab-studio").classList.toggle("no-primary", S.st.noPrimary);
   $("tab-studio").classList.toggle("no-lora", S.st.noLora);
@@ -8921,9 +9094,11 @@ async function studioPollOnce() {
       (ps === 1 ? "Baseline (LoRA at default 1.0)" : `Baseline (LoRA at ${ps})`) +
       (st.donor ? " - the donor is not in the baseline" : "");
     $("stTweakCap").textContent = noTweak ? "Tweaked (not rendered: it was hidden - press Render to fill it)" :
+      S.st.frankLoaded ? `The blend (${S.st.frankName}'s blocks at the sliders)` :
       !st.primary && !st.donor ? "The base model (no LoRA)" :
       "Tweaked (current sliders)" + (st.donor ? " - includes the donor" : "");
     if (!st.primary && st.donor) $("stBaseCap").textContent = "Baseline: the base model (no primary LoRA)";
+    if (S.st.frankLoaded) $("stBaseCap").textContent = `Baseline: ${S.st.layout.name} as loaded`;
   }
   studioNoLoraPane(st);
   studioAceNotes(st.notes);
@@ -9143,6 +9318,14 @@ function wireStudio() {
   new MutationObserver(studioDockPlay).observe($("stPlayBoth"), {attributes: true, attributeFilter: ["style"]});
   window.addEventListener("resize", debounce(() => { const d = $("stDock"); if (d && d.classList.contains("floating")) studioDockClamp(d); }, 150));
   $("stFamily").addEventListener("change", () => { studioFamily(); stRemember(); });
+  $("stFrank").addEventListener("change", studioFrankTick);
+  // Studio mode: LoRA | Frankenstein - the switch sets the (hidden) tick the mode follows
+  $("stModeSeg").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-frank]");
+    if (!b) return;
+    $("stFrank").checked = b.dataset.frank === "1";
+    studioFrankTick();
+  });
   // the clip row: length / size / steps / speed LoRA / sound wait for Render, as Model and Base do
   for (const id of ["stH3Len", "stH3LenS", "stH3W", "stH3H", "stH3Steps", "stH3Turbo", "stH3Sound", "stH3Boost", "stH3Pieces", "stH3PieceS"])
     $(id).addEventListener("change", () => { if (id.startsWith("stH3Len") || id === "stH3PieceS") studioLenOther(true); if (id === "stH3Pieces") studioLenOther(); studioH3Remember(); studioPending(); });
@@ -9439,6 +9622,36 @@ function wireStudio() {
   wireStudioSetups();
   $("stEqD").addEventListener("click", () => studioEq("donor", !S.st.eq.donor));
   $("stCancel").addEventListener("click", () => api("/api/studio/cancel", {}).then(studioPoll).catch(() => {}));
+  // Folder… beside a save box: the folder picker, keeping the file name in the box (or the usual one when it's empty)
+  const studioSaveFolder = (id, name) => {
+    const cur = $(id).value.trim();
+    const base = cur.split(/[\\/]/).pop() || "";
+    const file = base.trim() || name();
+    const dir = cur.slice(0, cur.length - base.length).replace(/[\\/]+$/, "");
+    pick(dir, true, (p) => {
+      $(id).value = p.replace(/[\\/]+$/, "") + (p.includes("\\") ? "\\" : "/") + file;
+      if (id === "stOut") stRemember();
+    });
+  };
+  const fileOf = (p) => (p || "").split(/[\\/]/).pop();
+  $("stOutPick").addEventListener("click", () => studioSaveFolder("stOut",
+    () => (fileOf($("stPrimary").value).replace(/\.safetensors$/i, "") || "lora") + "_repaired.safetensors"));
+  $("stFrankOutPick").addEventListener("click", () => studioSaveFolder("stFrankOut",
+    () => fileOf(S.st.frankOut) || ((S.st.layout || {}).name || "model").replace(/\s+/g, "_") + "_frankenstein.safetensors"));
+  $("stFrankExport").addEventListener("click", async () => {
+    // Frankenstein mode: the blend at the sliders as a new base model; a file already there needs a second press
+    if (!S.st.frankLoaded) { $("stStatus").textContent = "Press Render to load Frankenstein mode first: then the blend can be saved."; return; }
+    const out = $("stFrankOut").value.trim();
+    const again = S.st.frankOverwrite === out;
+    try {
+      const r = await api("/api/studio/frank_export", {out, state: studioState(), overwrite: again});
+      if (r.exists) { S.st.frankOverwrite = out; studioFrankMsg({frank_error: "That file is there already: press Save blend as a new base again to replace it."}); return; }
+      S.st.frankOverwrite = null;
+      S.st.frankSaving = true;                   // the card shows it at once; the poll takes over
+      studioFrankMsg({frank_saving: {done: 0, total: 0}});
+      studioPoll();
+    } catch (e) { studioFrankMsg({frank_error: e.message}); }
+  });
   $("stUnload").addEventListener("click", async () => { await api("/api/studio/reset", {}); S.st.ready = false; S.st.loadedKey = ""; studioPoll(); });
   $("stPrimaryPick").addEventListener("click", () => pick($("stPrimary").value || loraStart(), false, (p) => { $("stPrimary").value = p; stRemember(); }));
   $("stDonorPick").addEventListener("click", () => pick($("stDonor").value || $("stPrimary").value, false, (p) => { $("stDonor").value = p; stRemember();
@@ -9453,8 +9666,11 @@ function wireStudio() {
     document.querySelector('input[name="stMixMode"][value="off"]').checked = true;
     $("stMixInfo").textContent = ""; studioMixLayout();
     if (!S.st.ready) return;
+    if (S.st.foreign) { S.st.loadedKey = ""; studioPending(); return; }   // another tab's model: Render loads this one's
     try {
-      await api("/api/studio/primary", {path: ""});
+      const r = await api("/api/studio/primary", {path: ""});
+      S.st.myLoad = r.load_id || S.st.myLoad;              // this tab's own change, not another tab's
+      S.st.foreign = false;
       const fast = (document.querySelector('input[name="stDit"]:checked') || {}).value !== "full";
       S.st.loadedKey = studioLoadKey(S.st.layout, fast);       // what's loaded now: Render needn't reload it
       studioPoll(); studioPending();

@@ -235,13 +235,11 @@ def latest_ft_checkpoint(out_dir, name):
 def ft_continuation(path):
     """(next_window, epochs_done, n_windows) from a fine-tune checkpoint's metadata (the trainers stamp them); the
     -NNNNNN in the file name wins for the epochs. Anything missing reads as 0."""
-    import json
     import struct
+    from fizgig.utils.st_meta import read_metadata
     md = {}
     try:
-        with open(path, "rb") as f:
-            n = struct.unpack("<Q", f.read(8))[0]
-            md = json.loads(f.read(n)).get("__metadata__") or {}
+        md = read_metadata(path)
     except (OSError, ValueError, struct.error):
         pass
     def num(k):
@@ -1874,10 +1872,18 @@ MASK_FLOORS = ("0 - not at all", "0.05", "0.1 (recommended)", "0.2", "0.3", "0.5
 MASK_PRIORS = ("Off", "0.5", "1", "2")
 
 
+def no_photos(folder, include_subfolders=False):
+    """A training folder (with its sub-folders when they train) holding clips or voice and no photos: nothing to
+    mask, nor for Element boost to find. The Training tab hides both for it (#402)."""
+    media = dataset_media(folder, include_subfolders) if folder else set()
+    return bool(media) and "photo" not in media
+
+
 def masked_on(desc, st):
     """Masked training (fizgig/dataset/masks.py): the tick on, a family whose driver takes masks, a run that trains on
-    pictures (a prompt slider makes its own)."""
-    return bool(st.get("MASKED_TRAINING")) and desc.masked_training and not slider_on(desc, st, "prompts")
+    pictures (a prompt slider makes its own; a folder of clips has none)."""
+    return (bool(st.get("MASKED_TRAINING")) and desc.masked_training and not slider_on(desc, st, "prompts")
+            and not no_photos(_s(st.get("image_folder")), subfolders_on(desc, st)))
 
 
 def mask_floor(st):
@@ -1939,8 +1945,10 @@ def boost_too_small(desc, st):
 
 def face_weight(desc, st):
     """Boost the face: the face weight when ticked, else None. Stills of a family with masked training, not a
-    prompt slider (no photos), at BOOST_MIN_MP or more."""
+    prompt slider (no photos) nor a folder of clips, at BOOST_MIN_MP or more."""
     if not (st.get("FACE_BOOST") and desc.element_boost and desc.masked_training) or slider_on(desc, st, "prompts"):
+        return None
+    if no_photos(_s(st.get("image_folder")), subfolders_on(desc, st)):
         return None
     if boost_too_small(desc, st):
         return None
