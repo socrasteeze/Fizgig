@@ -1181,7 +1181,7 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                  dop=False, dop_trigger=None, dop_class="", dop_weight=1.0, dop_every=1, dop_ft_samples=8,
                  lr_boost=None, share_worker=None, masked_training=False, mask_floor=0.1, mask_prior=0.0, face_weight=1.0, face_area="face", face_cycle="1:0", face_until="0:0",
                  caption_dropout=0.0, stage_dataset_config=None, stage_until=0.3, stage_blend=0.1,
-                 batch_size_auto=False):
+                 batch_size_auto=False, send_only_swap=False):
     desc = get_family(family)
     if desc is None or not desc.training_ready:
         raise RuntimeError(f"unknown or untrainable family {family!r}")
@@ -1339,6 +1339,9 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                 raise RuntimeError(f"{desc.display_name} has no masked training - drop --masked_training")
             from fizgig.dataset.image_dataset import ImageDataset
             ImageDataset.loss_masks = True      # each still with a photo-masklabel.png gets its mask (dataset/masks.py)
+        if desc.masked_training:
+            from fizgig.dataset.image_dataset import ImageDataset
+            ImageDataset.side_by_side_masks = True     # LoRA Isolation's side-by-sides: the stranger's background out (#407)
         if face_on:
             from fizgig.dataset.image_dataset import ImageDataset
             ImageDataset.face_boost = float(face_weight)     # each still's largest face as an oval (Boost the face)
@@ -1357,6 +1360,12 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                              for b in ds.batch_manager.buckets.values() for it in b if getattr(it, "mask_path", None)})
         logger.info(f"[masks] masked training: {masked_images} picture(s) with a mask, outside the mask counts "
                     f"x{float(mask_floor):g}")
+    from fizgig.dataset.image_dataset import side_by_side
+    sbs_masked = sum(1 for ds in group.datasets for b in ds.batch_manager.buckets.values() for it in b
+                     if getattr(it, "mask_path", None) and side_by_side(it.item_key))
+    if sbs_masked:
+        logger.info(f"[masks] LoRA Isolation: {sbs_masked} side-by-side picture(s): the stranger's background counts "
+                    f"x0, whatever the masked-training setting")
     mask_prior = float(mask_prior or 0.0) if masked_training else 0.0
     if mask_prior and (slider or finetune):
         logger.info("[masks] keeping the model's own picture outside the mask needs a LoRA to switch off (not a "
@@ -1411,8 +1420,11 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
         return total, out
 
     def _loss_mask(batch):
-        """The step's per-cell loss weights (masked training), or None: a picture without a mask trains as normal."""
-        m = batch.get("loss_mask") if masked_training else None
+        """The step's per-cell loss weights (masked training), or None: a picture without a mask trains as normal.
+        LoRA Isolation's side-by-sides weigh by their masks at floor 0 whatever the run's setting (#407)."""
+        from fizgig.dataset.image_dataset import side_by_side
+        sbs = [side_by_side(k) for k in batch.get("item_keys") or []]
+        m = batch.get("loss_mask") if masked_training or any(sbs) else None
         if face_on and any(_face_end) and _face_cyc[1] > 0 and not face_phase["ended"]:
             # with --face_until, the cycle runs in steps: the window (epoch E or step S, the sooner) splits into E
             # equal blocks (12 if no epoch is given) - an epoch each when they fit, so a big dataset whose S steps
@@ -1437,8 +1449,12 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
             f = None
         if m is None and f is None:
             return None
-        from fizgig.dataset.masks import mask_weight
-        w = mask_weight(m.to(device).float(), mask_floor) if m is not None else None
+        from fizgig.dataset.masks import mask_weight, weights_with_side_by_sides
+        w = None
+        if m is not None and torch.is_tensor(m) and any(sbs) and len(sbs) == m.shape[0]:
+            w = weights_with_side_by_sides(m.to(device).float(), sbs, mask_floor, masked_training)
+        elif m is not None:
+            w = mask_weight(m.to(device).float(), mask_floor)
         if f is not None:                    # the face: x face_weight over its oval (0 = not at all), on top of the mask
             f = 1.0 + (float(face_weight) - 1.0) * f.to(device).float()
             w = f if w is None else w * f
@@ -1830,7 +1846,21 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
 
     # ---- model ----------------------------------------------------------------------------------
     logger.info(f"Loading {desc.display_name} DiT ({precision}) from {dit_path}")
-    dit, swapped = quant.load_base(driver, dit_path, device, precision, blocks_to_swap)
+    send_only = False
+    if send_only_swap:
+        if finetune:
+            logger.info("[block swap] send-only off: fine-tune trains base weights - classic swap")
+        elif precision == "nf4":
+            pass
+        elif not gradient_checkpointing:
+            logger.info("[block swap] send-only off: gradient checkpointing is off this run - classic swap")
+        elif gc_off_blocks:
+            logger.info(f"[block swap] send-only off: {gc_off_blocks} block(s) run un-checkpointed - classic swap")
+        elif 0 < int(blocks_to_swap or 0) < 4:
+            logger.info(f"[block swap] Faster block swap is off for this run: only {blocks_to_swap} blocks swapped (it helps from 4)")
+        elif int(blocks_to_swap or 0) > 0:
+            send_only = True
+    dit, swapped = quant.load_base(driver, dit_path, device, precision, blocks_to_swap, send_only=send_only)
     if gradient_checkpointing:
         driver.enable_gradient_checkpointing(dit, True)
         dit.gc_off_blocks = gc_off_blocks       # the compiled blocks / H3's loop leave the last ones un-checkpointed
@@ -3175,6 +3205,8 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                                                        **({"refs": refs} if refs else {}),
                                                        **({"loss_mask": _lm} if _lm is not None else {}),
                                                        **({"prior": prior} if prior is not None and _lm is not None
+                                                          and not any(side_by_side(k) for k in
+                                                                      batch.get("item_keys") or [])
                                                           else {}))
                 if "lr_mult" in _info and lr_acc:
                     lr_acc[-1] *= _info["lr_mult"]     # where the step landed (the H3 noise-band LR)
@@ -3388,6 +3420,8 @@ def setup_parser():
                    help="base precision: bf16, int8 (8-bit, int8 matmuls), nf4 (4-bit) or auto (fits free VRAM)")
     p.add_argument("--blocks_to_swap", type=int, default=0,
                    help="blocks streamed between CPU and GPU (not with nf4); -1 = as few as fit free VRAM")
+    p.add_argument("--send_only_swap", action="store_true", default=False,
+                   help="stream frozen base weights host -> device into a ring buffer without copying back")
     p.add_argument("--network_dim", type=int, default=32)
     p.add_argument("--network_type", default="lora", choices=("lora", "lokr"))
     p.add_argument("--preview_lora", default=None,
@@ -3603,7 +3637,7 @@ def main():
         prompts = [""]          # a reference alone: 'generate from this picture'
     train_family(
         a.family, a.dit, a.dataset_config, a.output_dir, a.output_name, precision=a.precision,
-        blocks_to_swap=a.blocks_to_swap, speed_lora_strength=a.speed_lora_strength, network_type=a.network_type, lokr_factor=a.lokr_factor,
+        blocks_to_swap=a.blocks_to_swap, send_only_swap=a.send_only_swap, speed_lora_strength=a.speed_lora_strength, network_type=a.network_type, lokr_factor=a.lokr_factor,
         log_per_image_loss=a.log_per_image_loss, per_image_lr=a.per_image_lr, auto_recaption=a.auto_recaption,
         training_maps=a.training_maps, training_maps_images=a.training_maps_images,
         warmup_look_outliers=a.warmup_look_outliers, trigger_word=a.trigger_word, trigger_position=a.trigger_position,

@@ -479,6 +479,14 @@ class BucketSelector:
 # BucketBatchManager
 # ---------------------------------------------------------------------------
 
+SIDE_BY_SIDE = "fizgig_mp_"      # LoRA Isolation's side-by-side pictures' names (families/multi_person.PREFIX)
+
+
+def side_by_side(key) -> bool:
+    """Is this item key (its dataset block's prefix + its name) one of LoRA Isolation's side-by-sides?"""
+    return str(key).rsplit(":", 1)[-1].startswith(SIDE_BY_SIDE)
+
+
 class BucketBatchManager:
     """Manages batched iteration over bucketed items, loading cached tensors."""
 
@@ -504,20 +512,52 @@ class BucketBatchManager:
                 self.bucket_batch_indices.append((reso, i))
 
     def limit(self, per_epoch: int) -> int:
-        """At most per_epoch items an epoch (a LoRA's regularisation set, --reg_per_epoch). Each bucket gives a fixed
-        share of them by its size, so an epoch's steps are the same every epoch (the run's totals hold), and the
-        buckets' shuffle at each epoch's start makes them a different handful each time. Returns the items there are."""
+        """At most per_epoch items an epoch (a LoRA's regularisation set, --reg_per_epoch). Each bucket gives its
+        share by its size: the whole part every epoch, and the leftover places go to buckets drawn afresh each epoch
+        in proportion to what's left of their share (shuffle), so a small bucket whose share is under one picture
+        still trains its fair part of the epochs (it was never picked: a fixed share of 0). The steps an epoch stay
+        the count made here (the run's totals hold), and the buckets' shuffle makes them a different handful each
+        time. Returns the items there are."""
         total = sum(len(b) for b in self.buckets.values())
         if per_epoch <= 0 or per_epoch >= total:
             return total
-        raw = {r: per_epoch * len(self.buckets[r]) / total for r in self.bucket_resos}
-        quota = {r: int(v) for r, v in raw.items()}
-        for r in sorted(self.bucket_resos, key=lambda r: raw[r] - quota[r], reverse=True)[:per_epoch - sum(quota.values())]:
-            quota[r] += 1                      # largest remainders first: the shares add up to per_epoch
+        self._raw = {r: per_epoch * len(self.buckets[r]) / total for r in self.bucket_resos}
+        quota = {r: int(v) for r, v in self._raw.items()}
+        for r in sorted(self.bucket_resos, key=lambda r: self._raw[r] - quota[r], reverse=True)[:per_epoch - sum(quota.values())]:
+            quota[r] += 1                      # the count: largest remainders first, the shares add up to per_epoch
         self.quota = quota
-        self.bucket_batch_indices = [(r, i) for r in self.bucket_resos
-                                     for i in range(math.ceil(quota[r] / self.bucket_batch(r)))]
+        self.bucket_batch_indices = self._indices(quota)
+        self._n_batches = len(self.bucket_batch_indices)
         return total
+
+    def _indices(self, quota):
+        return [(r, i) for r in self.bucket_resos for i in range(math.ceil(quota[r] / self.bucket_batch(r)))]
+
+    def _draw_quota(self):
+        """This epoch's shares: each bucket's whole part, plus the leftover places by systematic sampling over the
+        buckets in a random order, so a bucket gets one with a chance equal to its share's fraction."""
+        quota = {r: int(v) for r, v in self._raw.items()}
+        extra = sum(self.quota.values()) - sum(quota.values())
+        if extra > 0:
+            order = list(self.bucket_resos)
+            random.shuffle(order)
+            u, acc, got = random.random(), 0.0, []
+            for r in order:
+                frac = self._raw[r] - quota[r]
+                if frac > 0 and math.floor(acc + frac - u) > math.floor(acc - u):
+                    got.append(r)
+                acc += frac
+            rest = sorted((r for r in order if r not in got), key=lambda r: self._raw[r] - quota[r], reverse=True)
+            for r in (got + rest)[:extra]:           # rounding can leave one short or over: the count holds
+                quota[r] += 1
+        self.quota = quota
+        idx = self._indices(quota)
+        if len(idx) > self._n_batches:               # batches over 1 picture: the steps stay the count made at start
+            random.shuffle(idx)
+            idx = idx[:self._n_batches]
+        while len(idx) < self._n_batches:
+            idx.append(random.choice(idx))
+        self.bucket_batch_indices = idx
 
     def bucket_batch(self, reso):
         """Items a step from this bucket: Batch size for pictures, 1 for a clip's or a voice's bucket (a step packs
@@ -532,6 +572,8 @@ class BucketBatchManager:
     def shuffle(self):
         for bucket in self.buckets.values():
             random.shuffle(bucket)
+        if self.quota is not None:
+            self._draw_quota()
         random.shuffle(self.bucket_batch_indices)
 
         if self.num_timestep_buckets is not None and self.num_timestep_buckets > 1:
@@ -931,6 +973,10 @@ class ImageDataset(torch.utils.data.Dataset):
     # on its latent's grid as `loss_mask` in the batch. Set on the CLASS by the trainer before the dataset group is
     # generated, like clip_still_as_photo.
     loss_masks: bool = False
+    # LoRA Isolation's side-by-sides (families/multi_person.py, files named SIDE_BY_SIDE...) get their masks whether or
+    # not the run trains masked: the trainer weights them at floor 0 (#407). Set on the CLASS, for a family with masked
+    # training.
+    side_by_side_masks: bool = False
     # Boost the face (an experiment): anything but 1 gives each still's largest face (masks.face_box) as `face_weight` in the
     # batch, a soft oval on its latent's grid; the trainer multiplies it into the loss weights. Set on the CLASS.
     face_boost: float = 1.0
@@ -1442,7 +1488,8 @@ class ImageDataset(torch.utils.data.Dataset):
             _mdir = self.mask_directory or self.image_directory
             # a regularisation set's pictures train whole and plain: no mask, no Boost the face (an anchor for the kind
             # of thing they show, not a subject)
-            if self.loss_masks and _mdir and bucket_key == bucket_reso and not self.is_reg \
+            if (self.loss_masks or (self.side_by_side_masks and item_key.startswith(SIDE_BY_SIDE))) and _mdir \
+                    and bucket_key == bucket_reso and not self.is_reg \
                     and self.latent_cache_frames(cache_file) <= 1:          # stills only: never a clip or a voice
                 if _mask_names is None:
                     _mask_names = folder_names(_mdir)

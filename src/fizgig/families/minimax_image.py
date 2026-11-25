@@ -220,6 +220,8 @@ MINIMAX_IMAGE = FamilyDescription(
     slider_sources=("pairs",),
     edit_training=True,               # one checkpoint for text-to-image and edits (model card)
     edit_references=16,               # "supports up to 16 reference images" (model card)
+    reference_strength=True,          # Studio's reference Strength box (and Royale's sequential reference)
+    reference_strength_noise=True,    # ...set as the reference rows' noise level, the model's own (not latent scaling)
     edit_note=("Pairs of an original and its edited version, the same crop and shape - about 40 pairs. Each photo "
                "1 MP or larger; Fizgig resizes them."),
     batch_training=True,              # Batch size (Other Options): pictures packed one after another (forward_packed)
@@ -341,13 +343,13 @@ MINIMAX_IMAGE = FamilyDescription(
                          ("Euler (the model's own)", "sampler=euler")),
                      hint=_SAMPLER_HINT, explain=_SAMPLER_EXPLAIN, studio=True),
         # Speed boost (Peter, 23 Nov 2026): MiniMax H3's clip speed boost on a still - the first steps at half size,
-        # then the full size. The step count is a choice while Peter finds the sweet spot; then it becomes a tick
-        FamilyOption("MINIMAX_IMAGE_SPEED_BOOST", "Speed boost, steps at half size", tab="samples", choices=(
-                         ("Off", ""), ("1", "boost_steps=1"), ("2", "boost_steps=2"),
-                         ("3", "boost_steps=3"), ("4", "boost_steps=4")),
+        # then the full size. On / off; on = 2 steps or a third of the steps, whichever is more (Peter's pick)
+        FamilyOption("MINIMAX_IMAGE_SPEED_BOOST", "Speed boost", tab="samples", choices=(
+                         ("Off", ""), ("On", "boost_steps=auto")),
                      hint="Renders the first steps at half the width and height (a quarter of the pixels), then grows "
-                          "the picture to full size for the rest, as MiniMax H3's Speed Boost does for clips. Faster; "
-                          "the later steps at full size make the detail. At least one step always runs at full size.",
+                          "the picture to full size for the rest, as MiniMax H3's Speed Boost does for clips: 2 steps "
+                          "or a third of the steps, whichever is more (2 of the usual 6). Faster; the later steps at "
+                          "full size make the detail.",
                      studio=True),
     ),
     workbench=("repair", "profiler", "extract", "royale"),

@@ -5,6 +5,30 @@ _ARTICLE = "https://github.com/shootthesound/Fizgig/blob/master/docs/NEWS.md"
 
 NEWS = [
     {
+        "date": "25 Nov 2026",
+        "title": "LoRA Isolation without split backgrounds, and faster Krea 2 block swap",
+        "body": (
+            "LoRA Isolation's side-by-side pictures no longer teach a background split down the middle: the "
+            "stranger's half is masked and their captions say what they are. Your side-by-sides rebuild on the next run.\n\n"
+            "Faster block swap (send-only) for Krea 2 LoRAs, 1.5x on an RTX 5090 at the same VRAM, sits in the new "
+            "Preferences card Speed-ups for your graphics card. Also far less memory on AMD, drag and drop, and fixes."
+        ),
+        "links": [{"text": "Read more", "href": _ARTICLE + "#25-nov-2026-lora-isolation-without-split-backgrounds-and-faster-krea-2-block-swap"},
+                  {"text": "Release notes", "href": "https://github.com/shootthesound/Fizgig/releases/tag/v9.8.7"}],
+    },
+    {
+        "date": "23 Nov 2026",
+        "title": "MiniMax H3 Image reference Strength and Speed boost",
+        "body": (
+            "Studio's reference Strength now works on MiniMax H3 Image, from 1 (the picture as it is) down to 0 (left "
+            "out), and Speed boost On renders the first steps at half size, on the Samples tab and in Studio.\n\n"
+            "Edit models' reference pictures are used whole at the Reference MP instead of cropped to the render. "
+            "Pillow 13.0.0 fixes a slow-PNG security issue, and the Captions tab opens PNG folders much faster."
+        ),
+        "links": [{"text": "Read more", "href": _ARTICLE + "#23-nov-2026-minimax-h3-image-reference-strength-and-speed-boost"},
+                  {"text": "Release notes", "href": "https://github.com/shootthesound/Fizgig/releases/tag/v9.8.6"}],
+    },
+    {
         "date": "22 Nov 2026",
         "title": "Studio swaps LoRAs for the queue and other tabs too",
         "body": (

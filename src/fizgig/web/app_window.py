@@ -462,6 +462,22 @@ def _last_pod(port):
         return ""
 
 
+SERVER_LOG_MAX = 5 * 1024 * 1024     # bytes: the server's output log starts afresh past this, one old copy kept
+
+
+def server_log():
+    """user_data/web_stdout.log, where the app window's server writes its output. Each start appends to it; past
+    SERVER_LOG_MAX it moves to web_stdout.log.1 (replacing the older copy) and a new one begins, so it never grows
+    without end."""
+    path = user_file("web_stdout.log")
+    try:
+        if os.path.getsize(path) > SERVER_LOG_MAX:
+            os.replace(path, path + ".1")
+    except OSError:
+        pass
+    return path
+
+
 def _start_server(port, key):
     """The web UI as `--web` serves it (this computer only, unless a password is saved: then your other devices too),
     the window's key in its environment."""
@@ -476,9 +492,10 @@ def _start_server(port, key):
     con = os.path.join(os.path.dirname(exe), "python.exe")
     if os.name == "nt" and os.path.basename(exe).lower() == "pythonw.exe" and os.path.isfile(con):
         exe = con
-    return subprocess.Popen([exe, os.path.join(BASE_DIR, "fizgig.py"), "--web", "--port",
-                             str(port)], cwd=BASE_DIR, env=env, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL, **kw)
+    with open(server_log(), "ab") as out:  # the server's prints (likeness/faces/runs) land here
+        return subprocess.Popen([exe, os.path.join(BASE_DIR, "fizgig.py"), "--web", "--port",
+                                 str(port)], cwd=BASE_DIR, env=env, stdout=out,
+                                stderr=subprocess.STDOUT, **kw)
 
 
 def quit_text(busy) -> str:
@@ -666,6 +683,68 @@ def _log_pywebview():
         pass
 
 
+class EngineFailed:
+    """pywebview saying WebView2 failed to start (its runtime missing or broken: #406). pywebview only logs it and
+    leaves a blank window, so this listens on its log and the window gives way to the browser at once, saying why."""
+    def __init__(self):
+        import logging
+        self.event = threading.Event()
+        self.why = ""
+        outer = self
+
+        class _H(logging.Handler):
+            def emit(self, record):
+                try:
+                    outer.saw(record.getMessage())
+                except Exception:
+                    pass
+        self.handler = _H(logging.ERROR)
+
+    def saw(self, msg):
+        if "WebView2 initialization failed" not in msg:
+            return
+        lines = [ln.strip() for ln in msg.splitlines()[1:] if ln.strip()]
+        self.why = lines[0].split(" ---> ")[0].strip() if lines else ""
+        self.event.set()
+
+
+def browser_done(busy, waited, idle=180, never=300):
+    """After the window gave way to the browser: whether Fizgig can stop. There's no window to close then and, from
+    Launch Fizgig.bat (pythonw), no console either, so closing the browser has to be what closes it (#406: it ran on
+    until Task Manager). `busy` is /api/app/busy's answer (None: no answer), `waited` the seconds since the browser
+    opened. Stops once no page has been heard from for `idle` seconds (3 minutes: a hidden tab's timers can slow to
+    once a minute) or none ever came in `never`, unless a run is training: it finishes first, as quitting the window
+    never cuts a run off unasked."""
+    if busy is None or busy.get("training"):
+        return False
+    age = busy.get("page_age")
+    if age is None:
+        return waited >= never
+    return age >= idle and waited >= idle
+
+
+def _ask_busy(port, key):
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/app/busy", data=b"{}", method="POST",
+                                     headers={"X-Fizgig-App-Key": key, "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read() or b"{}")
+    except Exception:
+        return None
+
+
+def _serve_for_browser(own, port, key, step=5.0, settle=3):
+    """Keep the server up for the browser until browser_done says so `settle` checks in a row (a queued run starts
+    a few seconds after the last one ends), or the server ends by itself."""
+    began, done = time.time(), 0
+    while own.poll() is None:
+        time.sleep(step)
+        done = done + 1 if browser_done(_ask_busy(port, key), time.time() - began) else 0
+        if done >= settle:
+            _log("[app] the browser page is closed and nothing is training: Fizgig stops")
+            return
+
+
 def _windows_engine_problem():
     """Why the window can't show the web UI on this Windows machine, or "". pywebview falls back to the Internet
     Explorer engine when it finds no WebView2 runtime (or .NET under 4.6.2), and the web UI can't run there: the
@@ -711,8 +790,11 @@ def main():
             cur = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "").strip()
             if flag not in cur.split():
                 os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = f"{cur} {flag}".strip()
+        import logging
         import webview
         _log_pywebview()
+        engine = EngineFailed()
+        logging.getLogger("pywebview").addHandler(engine.handler)
         if os.name == "nt":            # the taskbar shows Fizgig's own button and icon, not pythonw's (as the old app)
             try:
                 import ctypes
@@ -951,10 +1033,24 @@ def main():
         page_ready = threading.Event()
         started = threading.Event()       # webview.start came back (or failed: no engine) - the watchdog stands down
 
+        def give_way(why):
+            fallback[0] = why
+            try:
+                window.destroy()
+            except Exception:
+                pass
+
+        def failed():                      # WebView2 said it didn't start: the browser now, not a blank window
+            return engine.event.is_set() and not page_ready.is_set()
+        engine_why = lambda: ("WebView2 didn't start" + (f" ({engine.why})" if engine.why else "") +
+                              "; reinstalling the WebView2 Runtime usually fixes it")
+
         def watchdog():                    # a window that never appears ends, its server with it, not left unseen
             for _ in range(120):
                 if window.events.shown.wait(1):
                     break
+                if failed():
+                    return give_way(engine_why())
                 if started.is_set():       # no window at all: the browser took over and the server must stay up
                     return
             else:
@@ -962,14 +1058,16 @@ def main():
                 os._exit(1)
             # a window that appears but never runs the page (a white window: a broken WebView2, its sandbox on a
             # junctioned profile folder, a blocked GPU process) gives way to the browser rather than staying white.
-            # Only for this computer's own page: a pod's may be an older Fizgig that doesn't report in
-            if first == url and not page_ready.wait(30):
-                fallback[0] = ("the window opened but the page never ran in it (WebView2 may be failing to draw, or "
-                               "be blocked by security software)")
-                try:
-                    window.destroy()
-                except Exception:
-                    pass
+            # WebView2 failing to start gives way at once, for any page; the 30 s wait only for this computer's own
+            # page: a pod's may be an older Fizgig that doesn't report in
+            for _ in range(120):
+                if page_ready.wait(0.25):
+                    return
+                if failed():
+                    return give_way(engine_why())
+            if first == url:
+                give_way("the window opened but the page never ran in it (WebView2 may be failing to draw, or be "
+                         "blocked by security software)")
         threading.Thread(target=watchdog, daemon=True).start()
         profile = user_file("app_profile")
         try:
@@ -981,16 +1079,18 @@ def main():
     except Exception as e:
         # no engine here (a Linux machine without GTK/WebKit or Qt, Windows without WebView2) or a window that never
         # showed the page: the browser, and how to get the window
-        how = (f"For the window, install Microsoft Edge WebView2 Runtime: {WEBVIEW2_URL}" if os.name == "nt" else
+        how = (f"For the window, install (or reinstall) Microsoft Edge WebView2 Runtime: {WEBVIEW2_URL}"
+               if os.name == "nt" else
                "For the window on Linux, in Fizgig's venv: `venv/bin/pip install \"pywebview[qt]\"`, or WebKitGTK: "
                "your distro's gir1.2-webkit2-4.1 and libgirepository dev packages, then `venv/bin/pip install "
                "PyGObject` (the distro's python3-gi isn't seen inside the venv). If the window opens then crashes or "
                "stays blank, try Preferences → App window → Disable GPU for the app window, then open Fizgig again.")
-        _log(f"[app] no app window ({e}) - opening the web UI in your browser instead. {how}")
+        _log(f"[app] no app window ({e}) - opening the web UI in your browser instead. Closing the browser closes "
+             f"Fizgig (a run that's training finishes first). {how}")
         webbrowser.open(url)
         if own is not None:
             try:
-                own.wait()                               # keep the server up until it is stopped (Ctrl+C)
+                _serve_for_browser(own, port, key)
             except KeyboardInterrupt:
                 pass
     finally:

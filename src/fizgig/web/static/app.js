@@ -93,7 +93,7 @@ async function boot() {
   S.pod = pr.pod;
   S.outputDefault = pr.output_default || "";
   S.outputPref = pr.lora_output_dir || "";
-  S.set = pr.settings || {}; S.setAbs = pr.abs || {}; S.sageAttentionOption = !!pr.sageattention_option; S.rocm = !!pr.rocm;
+  S.set = pr.settings || {}; S.setAbs = pr.abs || {}; S.sageAttentionOption = !!pr.sageattention_option; S.rocm = !!pr.rocm; S.sysmemOption = !!pr.sysmem_option;
   S.studioAutosave = pr.studio_autosave || {};
   S.gpu = {chosen: pr.cuda_device || "", list: pr.gpus || [], envLocked: pr.gpu_env_locked};
   S.all = st.values || {};
@@ -1151,6 +1151,7 @@ function renderPrefs() {
   host.append(outputFolderCard());
   host.append(foldersCard());
   host.append(inferenceCard());
+  host.append(cardSpeedupsCard());
   host.append(captionerCard());
   const gpuCard = gpuPickCard();
   if (gpuCard) host.append(gpuCard);
@@ -1207,7 +1208,7 @@ function renderPrefs() {
         if (e.target.dataset.sure !== "1") { e.target.dataset.sure = "1"; e.target.textContent = "Reset? Click again"; return; }
         await api("/api/prefs", {reset: true});
         const pr = await api("/api/prefs");
-        S.set = pr.settings || {}; S.setAbs = pr.abs || {}; S.sageAttentionOption = !!pr.sageattention_option; S.rocm = !!pr.rocm;
+        S.set = pr.settings || {}; S.setAbs = pr.abs || {}; S.sageAttentionOption = !!pr.sageattention_option; S.rocm = !!pr.rocm; S.sysmemOption = !!pr.sysmem_option;
         S.studioAutosave = pr.studio_autosave || {};
         S.outputPref = pr.lora_output_dir || ""; S.outputDefault = pr.output_default;
         renderPrefs();
@@ -1335,34 +1336,103 @@ function inferenceCard() {
   swap.value = INFERENCE_SWAP.find((o) => lead && o.startsWith(lead + " ")) || INFERENCE_SWAP[0];
   swap.addEventListener("change", () => api("/api/prefs", {changes: {inference_blocks_to_swap: swap.value}})
     .then(() => { S.set.inference_blocks_to_swap = swap.value; }));
-  const int8 = el("input", {type: "checkbox"});
-  int8.checked = String(S.set.inference_int8 ?? (S.rocm ? "0" : "1")) !== "0";
-  int8.addEventListener("change", () => api("/api/prefs", {changes: {inference_int8: int8.checked}})
-    .then(() => { S.set.inference_int8 = int8.checked ? "1" : "0"; }));
-  const sage = el("input", {type: "checkbox"});
-  sage.checked = String(S.set.inference_sageattention ?? "0") === "1";
-  sage.addEventListener("change", async () => {
-    try {
-      await api("/api/prefs", {changes: {inference_sageattention: sage.checked}});
-      S.set.inference_sageattention = sage.checked ? "1" : "0";
-    } catch (e) { sage.checked = !sage.checked; showProblems([e.message]); }
-  });
-  const sageControls = S.sageAttentionOption ? [
-    el("label", {class: "checkbox-label"}, sage, " Force SageAttention for Krea 2 image generation"),
-    el("div", {class: "field-hint", text: "Krea 2 pictures (training previews, Studio, Royale, the Profiler) use the " +
-      "SageAttention the installer built for your card, from the next picture. Off by default. If pictures fail " +
-      "with it on, turn it off. Training keeps its own attention."})] : [];
   return el("div", {class: "section-card"}, el("div", {class: "card-title"}, el("span", {text: "Inference performance"})),
     el("div", {class: "card-desc", text: "For Studio, Royale, the Profiler and Extract. Block swap moves blocks to the CPU " +
       "between steps to save memory, at some speed. Training manages its own and ignores these."}),
     el("div", {class: "card-content"},
       el("div", {class: "field-row"}, el("span", {class: "field-label", text: "DiT block swap:"}), swap),
-      el("label", {class: "checkbox-label"}, int8, S.rocm ? " INT8 fast inference" : " INT8 fast inference (recommended)"),
-      el("div", {class: "field-hint", text: S.rocm
-        ? "Off by default on AMD cards: there the model's stored fp8 file renders faster and uses far less memory " +
-          "(Krea 2 at 2048 x 2048 on an RX 9070 XT: about twice as fast, a quarter of the RAM). Previews only."
-        : "On by default: same memory as fp8, near-identical pictures, previews only. Turn it off to use fp8."}),
-      ...sageControls));
+      el("div", {class: "field-hint", text: "INT8 fast inference and SageAttention are under Speed-ups for your graphics card."})));
+}
+
+// Preferences > Speed-ups for your graphics card: settings that help on some cards and not others, grouped by the kind
+// of card, only the group for this machine's card shown (AMD: the AMD launcher; NVIDIA: nvidia-smi lists a card)
+function cardSpeedupsCard() {
+  const tick = (key, dflt) => {
+    const box = el("input", {type: "checkbox"});
+    box.checked = String(S.set[key] || dflt) === "1";
+    box.addEventListener("change", async () => {
+      try {
+        await api("/api/prefs", {changes: {[key]: box.checked}});
+        S.set[key] = box.checked ? "1" : "0";
+      } catch (e) { box.checked = !box.checked; showProblems([e.message]); }
+    });
+    return box;
+  };
+  const g = S.gpu || {list: []};
+  const card = g.list.find((c) => c.uuid === g.chosen || String(c.index) === g.chosen) || g.list[0];
+  // INT8 fast inference: on by default on NVIDIA, off on AMD (the stored fp8 file renders faster there)
+  const int8 = el("input", {type: "checkbox"});
+  int8.checked = String(S.set.inference_int8 ?? (S.rocm ? "0" : "1")) !== "0";
+  int8.addEventListener("change", () => api("/api/prefs", {changes: {inference_int8: int8.checked}})
+    .then(() => { S.set.inference_int8 = int8.checked ? "1" : "0"; }));
+  // one setting a block: its switch and name (no switch: a setting outside Fizgig), what it's for, short notes, and
+  // a link to its section of the guide (docs/WEB_UI.md's Speed-ups sections; INSTALL.md for the Windows setting)
+  const GUIDE = "https://github.com/shootthesound/Fizgig/blob/master/docs/";
+  const setting = (box, name, forWhat, guide, ...notes) => el("div", {class: "speedup"},
+    box ? el("label", {class: "checkbox-label"}, box, " " + name) : el("div", {class: "speedup-name", text: name}),
+    el("div", {class: "speedup-for", text: forWhat}),
+    ...notes.map((n) => typeof n === "string" ? el("div", {class: "field-hint", text: n}) : n),
+    el("div", {class: "speedup-more"}, el("a", {href: GUIDE + guide, target: "_blank", rel: "noopener",
+                                                text: "More in the guide"})));
+  const rows = [];
+  if (S.rocm) {
+    rows.push(
+      setting(int8, "INT8 fast inference", "For pictures in Studio, Royale, the Profiler and training previews.",
+        "WEB_UI.md#int8-fast-inference",
+        "Off by default on AMD cards: the model's own fp8 file renders faster there and uses far less memory " +
+        "(Krea 2 at 2048 x 2048 on an RX 9070 XT: about twice as fast, a quarter of the RAM)."),
+      ...(S.sageAttentionOption ? [setting(tick("inference_sageattention", "0"),
+        "Force SageAttention for Krea 2 image generation",
+        "For Krea 2 pictures: training previews, Studio, Royale and the Profiler. Training itself is unchanged.",
+        "WEB_UI.md#krea-2-generation-on-rocm",
+        "Off by default. Uses the SageAttention the installer built for your card, from the next picture. If " +
+        "pictures fail with it on, turn it off.")] : []),
+      setting(tick("rocm_conv_bands", "1"), "Split large convolutions (saves memory)",
+        "For caching and turning previews into pictures (the VAE).", "WEB_UI.md#split-large-convolutions",
+        "On by default. The big convolutions run in strips, so they need about a third of the memory for the same " +
+        "result. Turn it off only if previews or caching go wrong with it on. From the next run or model load."),
+      setting(tick("rocm_miopen", "1"), "Use AMD's MIOpen for convolutions",
+        "For caching and previews, if they freeze or get slower picture after picture.",
+        "WEB_UI.md#use-amds-miopen-for-convolutions",
+        "On by default. MIOpen searches for the fastest kernels at each new picture size, which can stall. Off, " +
+        "PyTorch's own kernels are used instead, as ComfyUI does on newer Radeon cards. From the next run."));
+  } else if (card) {
+    rows.push(
+      setting(int8, "INT8 fast inference (recommended)", "For pictures in Studio, Royale, the Profiler and training previews.",
+        "WEB_UI.md#int8-fast-inference",
+        "On by default: faster than fp8, with the same memory and near-identical pictures. Turn it off to use fp8."),
+      setting(tick("pin_block_swap", "0"), "Keep swapped blocks in pinned RAM",
+        "For Krea 2 training with Blocks Swap on, on a machine with plenty of spare RAM: the blocks reach the card " +
+        "faster.", "WEB_UI.md#keep-swapped-blocks-in-pinned-ram",
+        "Off by default. It speeds training up on some machines and slows it down on others: 1.5x on an RTX 5090 " +
+        "with 128 GB of RAM, a little slower on an RTX 4070 Ti. To see which yours is, train once with it on and once " +
+        "off and compare s/step in the log.",
+        "It only turns on with enough free RAM (the swapped blocks plus 4 GB), and the log says whether it did. " +
+        "From the next run."),
+      setting(tick("send_only_block_swap", "0"), "Faster block swap (send-only)",
+        "For Krea 2 LoRA training with Blocks Swap on: each block is copied to the card and never back.",
+        "WEB_UI.md#faster-block-swap-send-only",
+        "Off by default. The base model doesn't change while a LoRA trains, so each swapped block is only copied to " +
+        "the card and never copied back, with the same memory and the same results. 1.5x on an RTX 5090, about " +
+        "the same on a 16 GB laptop RTX 4090: to see what it does on yours, train once with it on and once off and " +
+        "compare s/step in the log. Works with or without pinned RAM.",
+        "Fine-tunes and other models keep the usual swap. It also stays off for a run with NF4, with gradient " +
+        "checkpointing off, or with fewer than 4 blocks swapped, and the log says why. From the next run."),
+      ...(S.sysmemOption ? [setting(null, "Stop Windows moving training into system RAM",
+        "For training on Windows.", "INSTALL.md#training-suddenly-several-times-slower-windows-shared-gpu-memory",
+        "When the card fills up, NVIDIA's driver can quietly move part of a run into system RAM, and training runs " +
+        "several times slower. This is a setting in the NVIDIA Control Panel, not in Fizgig; driver and Windows " +
+        "updates can switch it back on.",
+        el("div", {class: "field-row"}, el("button", {class: "btn", text: "Show how",
+          onclick: () => sysmemOpen(true)})))] : []));
+  }
+  const intro = card ? `Your card: ${card.name}${card.total_gb ? ` (${Math.round(card.total_gb)} GB)` : ""}. ` : "";
+  return el("div", {class: "section-card"},
+    el("div", {class: "card-title"}, el("span", {text: "Speed-ups for your graphics card"})),
+    el("div", {class: "card-desc", text: intro + (rows.length
+      ? `Settings that help on some cards and not others. These are the ones for ${S.rocm ? "AMD" : "NVIDIA"} cards.`
+      : "Nothing here applies to this machine.")}),
+    el("div", {class: "card-content"}, ...rows));
 }
 
 // where the LoRA and reference pickers start (Preferences > Other folders, else what they used before)
@@ -1653,9 +1723,15 @@ function sysmemTipShow(pr) {
   let seen = false;
   try { seen = sessionStorage.getItem("fizgig.sysmemSeen") === "1"; } catch (e) { /* no storage */ }
   if (!pr.sysmem_tip || seen || S.onPod || pageIsElsewhere()) return;
+  sysmemOpen(false);
+}
+// the pop-up itself: at launch (with Don't show this again), or from Preferences' Show how (without it: asked for)
+function sysmemOpen(fromPrefs) {
   const m = $("sysmemModal");
+  $("sysmemNever").closest("label").style.display = fromPrefs ? "none" : "";
   const close = () => {
     m.classList.remove("active");
+    if (fromPrefs) return;
     try { sessionStorage.setItem("fizgig.sysmemSeen", "1"); } catch (e) { /* no storage */ }
     if ($("sysmemNever").checked) api("/api/prefs", {changes: {sysmem_tip_hidden: "1"}}).catch(() => {});
   };
@@ -3211,6 +3287,7 @@ async function likenessShow(dir, items, run, view) {
   $("likBtn").style.display = d.available ? "" : "none";
   const on = d.baselines.length === 3;
   $("likStatus").textContent = on ? "🎯 " + (d.status || "") : "";
+  $("likResume").style.display = on && d.resumable ? "" : "none";
   const pics = items.filter((it) => LIK_PICS.test(it.name));
   // the trend: the shown run's epochs, each the mean of its previews' scores
   const by = {};
@@ -3241,7 +3318,9 @@ async function likenessShow(dir, items, run, view) {
   $("likPeak").textContent = real ?
     `Your ${real.n} training photos score ${pc(real.median)} against the 3 reference photos (most between ` +
     `${pc(real.p25)} and ${pc(real.p75)}). A preview there looks as much like the person as a real photo does - ` +
-    `nothing reaches 100%, real photos don't either.` : adaPeak(d.embedder);
+    `nothing reaches 100%, real photos don't either.` : d.resumable ?
+    `Scoring stopped early - "Resume" finishes it; your photos' top is not measured yet.` :
+    adaPeak(d.embedder);
   // the best epoch, and the mean over every trained epoch so far (epoch 0 - the model before training - left out)
   const trained = avgs.filter((v, i) => epochs[i] > 0);
   const mean = trained.length ? trained.reduce((a, b) => a + b, 0) / trained.length : null;
@@ -4526,7 +4605,8 @@ async function ryTravel(mode) {
 async function rySheet(confirm) {
   try {
     const r = await api("/api/royale/travel", {mode: "sheet", confirm: confirm === true, family: $("ryFamily").value, source: rySource(),
-      single: $("rySingle").value.trim(), i: royaleCurrent(), prompts: $("ryCPrompts").value, sheet_mode: $("ryCMode").value,
+      single: $("rySingle").value.trim(), folder: $("ryFolder").value.trim(), i: royaleCurrent(),
+      prompts: $("ryCPrompts").value, sheet_mode: $("ryCMode").value,
       epochs: $("ryCEpochs").value, trigger: $("ryCTrigger").value.trim(), seed: seedOf("ryCSeed"),
       width: Number($("ryCW").value), height: Number($("ryCH").value), row_labels: $("ryCRows").checked, brand: $("ryCTag").checked});
     if (r.confirm) {                  // a big sheet: say so first, as the desktop does
@@ -4603,7 +4683,7 @@ async function wireRoyaleTravel() {
     if (!b.classList.contains("ry-tab-off")) ryShowTool(b.dataset.ry);       // greyed Epochs: its hover text says why
   }));
   const setSingle = (p) => { $("rySingle").value = p; ryRemember(); };
-  const up = uploadButton({kind: "path", key: "ROYALE_SINGLE"}, $("rySingle"), setSingle);
+  const up = uploadButton({kind: "path", key: "ROYALE_SINGLE", accept: ".safetensors"}, $("rySingle"), setSingle);
   $("rySingleBtns").replaceChildren(el("button", {class: "btn", text: "Choose…", onclick: () => pick($("rySingle").value || loraStart(), false, setSingle)}),
     up.btn, up.status);
   for (const [mode, p] of Object.entries(RY_MODES)) {
@@ -4928,11 +5008,11 @@ function wireProfiler() {
   for (const id of ["pfFamily", "pfSize", "pfPrompt", "pfClass"]) $(id).addEventListener("change", pfRemember);
   $("pfFamily").addEventListener("change", renderChoiceRefresh);
   $("pfLora").addEventListener("change", () => pfLora($("pfLora").value.trim(), true));
-  const up = uploadButton({kind: "path", key: "PROFILER_LORA"}, $("pfLora"), (p) => pfLora(p, true));
+  const up = uploadButton({kind: "path", key: "PROFILER_LORA", accept: ".safetensors"}, $("pfLora"), (p) => pfLora(p, true));
   $("pfLoraBtns").replaceChildren(el("button", {class: "btn", text: "Choose…", onclick: () =>
     pick($("pfLora").value || loraStart(), false, (p) => pfLora(p, true))}), up.btn, up.status);
   const addPhoto = (p) => { if (S.pf.photos.length < 3 && !S.pf.photos.includes(p)) S.pf.photos.push(p); pfPhotosDraw(); pfRemember(); };
-  const pup = uploadButton({kind: "path", key: "PROFILER_PHOTO"}, el("input", {type: "text"}), addPhoto);
+  const pup = uploadButton({kind: "path", key: "PROFILER_PHOTO", accept: "image/*"}, el("input", {type: "text"}), addPhoto);
   $("pfPhotoBtns").replaceChildren(el("button", {class: "btn btn-sm", text: "Choose…", onclick: () => {
     // the Samples gallery's picker (as LoRA Royale's), from the photos' folder; Choose folder… points it anywhere
     const dir = (p) => p.replace(/[\\/][^\\/]*$/, "");
@@ -5122,7 +5202,7 @@ function wireExtract() {
     extractName(); exRemember();
   });
   $("exSource").addEventListener("change", () => extractSource($("exSource").value.trim()));
-  const up = uploadButton({kind: "path", key: "EXTRACT_SOURCE"}, $("exSource"), extractSource);
+  const up = uploadButton({kind: "path", key: "EXTRACT_SOURCE", accept: ".safetensors"}, $("exSource"), extractSource);
   $("exSourceBtns").replaceChildren(el("button", {class: "btn", text: "Choose…", onclick: () =>
     pick($("exSource").value || loraStart(), false, extractSource)}), up.btn, up.status);
   $("exOutPick").addEventListener("click", () => pick($("exOutDir").value, true, (p) => { $("exOutDir").value = p; }));
@@ -5130,7 +5210,7 @@ function wireExtract() {
   document.querySelectorAll("#exModes .ry-tab").forEach((b) => b.addEventListener("click", () => exMode(b.dataset.exmode)));
   for (const [id, host] of [["exFtBase", "exFtBaseBtns"], ["exFtTuned", "exFtTunedBtns"]]) {
     const set = (p) => { $(id).value = p; exRemember(); };
-    const up = uploadButton({kind: "path", key: "EXTRACT_" + id}, $(id), set);
+    const up = uploadButton({kind: "path", key: "EXTRACT_" + id, accept: ".safetensors"}, $(id), set);
     $(host).replaceChildren(el("button", {class: "btn", text: "Choose…", onclick: () => pick($(id).value || S.outputDefault, false, set)}),
       up.btn, up.status);
     $(id).addEventListener("change", exRemember);
@@ -5153,7 +5233,7 @@ function mdWire() {
   el("div", {class: "field-row"}, el("span", {class: "field-label", text: "Description:"}),
     el("textarea", {rows: 4, "data-key": "modelspec.description"})));
   const load = (p) => { $("mdPath").value = p; mdLoad(p); };
-  const up = uploadButton({kind: "path", key: "METADATA_FILE"}, $("mdPath"), load);
+  const up = uploadButton({kind: "path", key: "METADATA_FILE", accept: ".safetensors"}, $("mdPath"), load);
   $("mdPathBtns").replaceChildren(el("button", {class: "btn", text: "Choose…", onclick: () => pick($("mdPath").value || loraStart(), false, load)}),
     up.btn, up.status);
   $("mdPath").addEventListener("change", () => mdLoad($("mdPath").value.trim()));
@@ -5161,7 +5241,7 @@ function mdWire() {
     try { const r = await api("/api/metadata/thumbnail", {path: p}); S.md.thumb = r.uri; mdThumb(); }
     catch (e) { $("mdSaveMsg").textContent = e.message; }
   };
-  const tup = uploadButton({kind: "path", key: "METADATA_THUMB"}, el("input", {type: "text"}), setThumb);
+  const tup = uploadButton({kind: "path", key: "METADATA_THUMB", accept: "image/*"}, el("input", {type: "text"}), setThumb);
   $("mdThumbBtns").replaceChildren(el("button", {class: "btn", text: "Replace…", onclick: () => pick(S.imageFolder, false, setThumb)}),
     tup.btn, tup.status);
   $("mdThumbClear").addEventListener("click", () => { S.md.thumb = null; mdThumb(); });
@@ -10039,6 +10119,10 @@ const capNormalise = (items) => {
     i.caption = i.caption.split(/\r?\n|\r/).filter((t) => t.trim()).join("\n");
 };
 
+// the Search box's words, read from one place: which files show and where a hit is painted are the same match, and
+// a line must never be shown with its hit left unpainted (or the colour left behind on a line that no longer matches)
+const capQuery = () => $("capSearch").value.trim().toLowerCase();
+
 // while captioning runs: the captions written so far fill in every few seconds - never over one you're editing
 async function captionsLive() {
   if (!S.imageFolder || !document.querySelector("#tab-captions.active")) return;
@@ -10126,7 +10210,7 @@ function renderCaptions() {
   const host = $("captionsGrid");
   host.innerHTML = "";
   const ext = $("captionExt").value.trim() || ".txt";
-  const q = $("capSearch").value.trim().toLowerCase();
+  const q = capQuery();
   const all = S.cap.items;
   let items = q ? all.filter((i) => i.name.toLowerCase().includes(q) || (i.caption || "").toLowerCase().includes(q)) : all;
   const sort = $("capSort").value, px = (i) => (i.size ? i.size[0] * i.size[1] : null);
@@ -10227,6 +10311,48 @@ function renderCaptions() {
   fitTexts(host);
 }
 
+// ---- a Captions search hit --------------------------------------------------------------------------------
+// A caption line is a plain textarea, and a textarea paints its own text: there is no way to put a colour behind one
+// phrase inside it. So the colour lives in a copy of the line - the same words, the same font, the same padding -
+// held behind the (already transparent) textarea, with every hit wrapped in a span. The copy is pinned to its row by
+// CSS (top, bottom and right), so it follows every resize and re-wraps exactly where the textarea does; only its
+// left edge is set here, because the line number's gutter comes and goes with Several captions and its width is a
+// flex-basis plus padding that no single number in the stylesheet gives. Nothing is built unless the Search box
+// holds words and this line holds a hit, so an ordinary render is exactly as it was; the copy is aria-hidden, so the
+// words are read once - by the textarea.
+const CAP_HL_STYLE = ["fontFamily", "fontSize", "fontWeight", "fontStyle", "fontVariant", "fontStretch",
+  "letterSpacing", "lineHeight", "whiteSpace", "overflowWrap", "wordBreak", "color", "textAlign", "textTransform",
+  "textIndent", "wordSpacing", "tabSize", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
+  "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth"];
+const capHlPaint = (ta) => {
+  if (ta.tagName !== "TEXTAREA" || !ta.closest(".caption-lines")) return;   // the prompt boxes elsewhere aren't captions
+  const q = capQuery(), text = ta.value, lower = text.toLowerCase();
+  let hl = ta._capHl;
+  if (!q || lower.indexOf(q) < 0) {
+    if (hl) { hl.remove(); ta._capHl = null; }
+    return;
+  }
+  if (!hl) {
+    hl = ta._capHl = el("div", {class: "cap-hl", "aria-hidden": "true"});
+    const cs = getComputedStyle(ta);              // the copy has to lay its text out exactly as the textarea does
+    for (const p of CAP_HL_STYLE) hl.style[p] = cs[p];
+    ta.parentElement.insertBefore(hl, ta);        // ahead of the box, so the words paint over the colour
+  }
+  hl.replaceChildren();
+  let at = 0;
+  for (;;) {
+    const hit = lower.indexOf(q, at);
+    if (hit < 0) break;
+    if (hit > at) hl.append(document.createTextNode(text.slice(at, hit)));
+    hl.append(el("span", {class: "cap-hl-hit", text: text.slice(hit, hit + q.length)}));
+    at = hit + q.length;
+  }
+  if (at < text.length) hl.append(document.createTextNode(text.slice(at)));
+};
+const capHlPlace = (ta) => {
+  if (ta._capHl) ta._capHl.style.left = ta.offsetLeft + "px";
+};
+
 // a caption file a line at a time, every other line shaded and numbered once there are two (the Samples tab's prompt
 // box): several captions per picture read at a glance. Enter starts a new line, Backspace at a line's start joins it to
 // the one above. .value is the whole file, so Save, Re-caption, the big view and the live refresh use it as they did
@@ -10243,6 +10369,7 @@ function captionLines(text, extra = "") {
     list.querySelectorAll(".prompt-num").forEach((n, i) => { n.textContent = i + 1; });
     list.classList.toggle("several", boxes().length > 1);
     list.append(join);                         // always last, after the lines
+    boxes().forEach(capHlPlace);               // the gutter arrives with the second line: the copies follow it
   };
   const changed = () => list.dispatchEvent(new Event("change"));
   join.addEventListener("click", () => {
@@ -12291,18 +12418,23 @@ async function uploadFiles(picked, opts = {}) {
   }
 }
 
+// a dropped file against an <input type=file> accept list (".onnx", "image/*", ...); no list = anything
+function uploadAccepts(f, accept) {
+  const toks = String(accept || "").split(",").map((t) => t.trim().toLowerCase()).filter(Boolean);
+  const name = (f.name || "").toLowerCase(), type = (f.type || "").toLowerCase();
+  return !toks.length || toks.some((t) => t.startsWith(".") ? name.endsWith(t) :
+    t.endsWith("/*") ? type.startsWith(t.slice(0, -1)) : type === t);
+}
+
 // an Upload button beside a form box whose file or folder may be on this computer, not the one training
 function uploadButton(r, input, set) {
   const status = el("div", {class: "field-hint upload-status"});
   const say = (t, bad) => { status.textContent = t; status.classList.toggle("bad", !!bad); };
   const picker = r.kind === "folder" ? el("input", {type: "file", webkitdirectory: true, hidden: true}) :
     el("input", {type: "file", hidden: true, accept: r.accept || ".safetensors,image/*,.mp4,audio/*,.m4a"});
-  picker.addEventListener("change", async () => {
-    const files = [...picker.files];
-    picker.value = "";
-    if (!files.length) return;
+  const take = async (files, top) => {
     if (r.kind === "folder") {
-      const top = (files[0].webkitRelativePath || "").split("/")[0];
+      top = top || (files[0].webkitRelativePath || "").split("/")[0];
       const name = tidyName(top).replace(/^[.\s]+/, "") || r.key.toLowerCase();
       return uploadFiles(files, {name, say, done: (folder) => { input.value = folder; set(folder); }});
     }
@@ -12321,9 +12453,39 @@ function uploadButton(r, input, set) {
       set(res.data.path);
       say(`Uploaded to ${res.data.path}` + ((res.data.replaced || []).length ? " (replacing the one there)." : "."));
     } catch (e) { say(`${f.name}: ${e.message}`, true); }
+  };
+  picker.addEventListener("change", () => {
+    const files = [...picker.files];
+    picker.value = "";
+    if (files.length) take(files);
   });
-  const btn = el("label", {class: "btn", title: "From the device you're using now, sent to the machine running Fizgig. On the computer running Fizgig itself there's no need: Choose… picks it directly."},
+  const btn = el("label", {class: "btn", title: "From the device you're using now, sent to the machine running Fizgig. On the computer running Fizgig itself there's no need: Choose… picks it directly. A file (or folder) dragged onto the box or this button goes up the same way."},
     r.kind === "folder" ? "Upload a folder…" : "Upload…", picker);
+  // a file dragged from the desktop onto the box or its Upload button goes up as Upload… sends it (#392)
+  const dropOn = (t) => {
+    const files = (e) => [...((e.dataTransfer && e.dataTransfer.types) || [])].includes("Files");
+    t.addEventListener("dragover", (e) => { if (files(e)) { e.preventDefault(); t.classList.add("drop-over"); } });
+    t.addEventListener("dragleave", () => t.classList.remove("drop-over"));
+    t.addEventListener("drop", async (e) => {
+      if (!files(e)) return;
+      e.preventDefault(); e.stopPropagation();
+      t.classList.remove("drop-over");
+      if (r.kind === "folder") {
+        const dir = [...e.dataTransfer.items].map((it) => it.webkitGetAsEntry && it.webkitGetAsEntry())
+          .find((en) => en && en.isDirectory);
+        if (!dir) return say("Drop a folder here.", true);
+        const all = [];
+        await collect(dir, all);
+        return all.length ? take(all, dir.name) : say(`${dir.name} is empty.`, true);
+      }
+      const f = [...e.dataTransfer.files][0];
+      if (!f) return;
+      if (!uploadAccepts(f, picker.accept)) return say(`${f.name} isn't a file this box takes.`, true);
+      take([f]);
+    });
+  };
+  dropOn(input);
+  dropOn(btn);
   return {btn, status};
 }
 
@@ -12334,12 +12496,14 @@ let wired = false;
 const LB_SIDE = "(min-width: 1100px) and (min-aspect-ratio: 5/4)";
 function fitText(ta, grow) {
   if (!ta || !ta.isConnected || !ta.offsetParent) return;
+  capHlPaint(ta);                            // the copy of this line the search hit, if it has one
   if (grow && ta.scrollHeight <= ta.clientHeight) return;
   // a caption line grows to all its text: the caption around it scrolls instead (.caption-lines, the big view's too)
   const max = ta.closest(".caption-lines") ? Infinity : Math.round(innerHeight * 0.4);
   const border = ta.offsetHeight - ta.clientHeight;
   ta.style.height = "";
   ta.style.height = Math.min(Math.max(ta.scrollHeight + border, ta.offsetHeight), max) + "px";
+  capHlPlace(ta);                            // the copy's left edge, once the box has its final width
 }
 const fitTexts = (host) => requestAnimationFrame(() => host.querySelectorAll("textarea.fit-text").forEach((t) => fitText(t)));
 document.addEventListener("input", (e) => { if (e.target.matches && e.target.matches("textarea.fit-text")) fitText(e.target, true); });
@@ -12727,6 +12891,13 @@ function wire() {
   notifyButton();
   $("galleryRun").addEventListener("change", () => { S.galleryRun = $("galleryRun").value; loadGallery(); });
   $("likBtn").addEventListener("click", likenessPicker);
+  $("likResume").addEventListener("click", async () => {
+    const d = S.lik.data || {};
+    $("likResume").style.display = "none";
+    $("likStatus").textContent = "🎯 Starting…";
+    try { await likenessSet(d.baselines || []); }
+    catch (e) { $("likStatus").textContent = "🎯 " + (e.message || "couldn't start"); }
+  });
   // the pill can be dragged anywhere on a wide window (kept in this browser; a double-click puts it back). A press
   // that didn't move it opens its list. A narrow window or a phone keeps it where it is
   {

@@ -402,7 +402,8 @@ PREF_DEFAULTS = {"lora_output_dir": "output_loras", "profiles_dir": "user_data/p
                  "studio_outputs_dir": "Studio_Outputs",
                  "runpod_stop_when_done": "0", "inference_blocks_to_swap": "Auto (detect from GPU)",
                  "inference_int8": "0" if ROCM_LAUNCH else "1", "inference_sageattention": "0", "lan_discovery": "1",
-                 "update_check": "1",
+                 "update_check": "1", "pin_block_swap": "0", "send_only_block_swap": "0", "rocm_conv_bands": "1",
+                 "rocm_miopen": "1",
                  # Choose…: the computer's own Open / folder window, or Fizgig's chooser (its buttons jump to the
                  # training and output folders). Off on Windows by default (#387), on elsewhere
                  "native_file_window": "0" if sys.platform == "win32" else "1"}
@@ -479,7 +480,7 @@ def set_folder_lora_name(folder, name):
 # the Preferences settings Reset to defaults puts back (the model files are never reset)
 SETTING_PREFS = ("lora_output_dir", "profiles_dir", "cache_dir", "studio_outputs_dir", "input_lora_dir", "input_ref_dir",
                  "inference_blocks_to_swap", "inference_int8", "inference_sageattention", "lan_discovery", "update_check",
-                 "native_file_window")
+                 "native_file_window", "pin_block_swap", "send_only_block_swap", "rocm_conv_bands", "rocm_miopen")
 
 
 def load_prefs() -> dict:
@@ -1231,7 +1232,8 @@ def _plan(family_key, values, image_folder, resume="", ft_continue=None, models=
         inference_int8=str(prefs.get("inference_int8", "")).strip() in ("1", "True", "true"),
         captioner=captioner if captioner and os.path.isfile(captioner) else "",
         caption_overrides=dict(raw_ovr) if isinstance(raw_ovr, dict) else {},
-        caption_concept=str((load_state().get("captions") or {}).get("concept") or ""))
+        caption_concept=str((load_state().get("captions") or {}).get("concept") or ""),
+        send_only_swap=str(prefs.get("send_only_block_swap", "0")).strip() in ("1", "True", "true"))
     # auto-recaption's trigger word per folder: a sub-folder's or another subject's own (the Captions tab's for it, else
     # the word its captions open with), never the training folder's
     trig = {launch.item_prefix(rel): subject_trigger(f, ext) for rel, f in launch.run_subfolders(desc, inputs)}
@@ -2771,7 +2773,7 @@ def _media_size(path):
                 from PIL import Image
                 with Image.open(path) as im:
                     from fizgig.utils.upright import upright_size
-                    wh = list(upright_size(im))
+                    wh = list(upright_size(im, path))
             else:
                 import cv2
                 cap = cv2.VideoCapture(path)
@@ -3632,6 +3634,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.json({"error": "bad host"}, 403)
         u = urlparse(self.path)
         path, qs = u.path, parse_qs(u.query)
+        if path.startswith("/api/") and not path.startswith("/api/app/"):
+            _page_seen[0] = time.time()          # a page is open (it asks for /api/run every 2 s)
         if path in ("/", "/index.html"):
             with open(os.path.join(STATIC_DIR, "index.html"), encoding="utf-8") as f:
                 page = f.read().replace("__FIZGIG_TOKEN__", TOKEN)
@@ -3698,6 +3702,8 @@ class Handler(BaseHTTPRequestHandler):
                               # answers), until Don't show this again
                               "sysmem_tip": sys.platform == "win32" and str(p.get("sysmem_tip_hidden") or "") != "1"
                               and _has_nvidia(),
+                              # the same tip on Preferences' Speed-ups card (Show how), hidden pop-up or not
+                              "sysmem_option": sys.platform == "win32" and _has_nvidia(),
                               "qt_disable_gpu": str(p.get("qt_disable_gpu") or "") == "1",
                               # the app window's GPU switch: Linux's (Qt WebEngine) and Windows' (WebView2) windows
                               "qt_gpu_option": sys.platform.startswith("linux") or sys.platform == "win32",
@@ -4504,7 +4510,10 @@ class Handler(BaseHTTPRequestHandler):
                         of = int(str(vals.get("MAX_TRAIN_EPOCHS") or "0").strip())
                     except ValueError:
                         of = 0
-                return self.json({"training": busy, "lora": lora, "saved": saved, "of": of, "queued": queued})
+                # page_age: seconds since a page last asked for anything (None: none yet), for a window that gave
+                # way to the browser - it stops the server once the browser is closed and nothing trains (#406)
+                return self.json({"training": busy, "lora": lora, "saved": saved, "of": of, "queued": queued,
+                                  "page_age": round(time.time() - _page_seen[0], 1) if _page_seen[0] else None})
             if busy:                              # cut off by quitting: offered again at the next start
                 with _lock:
                     cut = str(_run.get("history_id") or "")
@@ -5119,6 +5128,7 @@ class Handler(BaseHTTPRequestHandler):
                 if "inference_int8" in ch:
                     ch["inference_int8"] = "1" if ch["inference_int8"] in (True, "1", 1) else "0"
                 for k in ("lan_discovery", "update_check", "qt_disable_gpu", "inference_sageattention", "native_file_window",
+                          "pin_block_swap", "send_only_block_swap", "rocm_conv_bands", "rocm_miopen",
                           *(k for k in ch if k in autosave_keys)):
                     if k in ch:
                         ch[k] = "1" if ch[k] in (True, "1", 1) else "0"
@@ -5523,12 +5533,12 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError("Enter at least one prompt - each line becomes a row of the sheet.")
                     sheet_mode = str(b.get("sheet_mode") or "Without / with LoRA")
                     if sheet_mode == "Every epoch":
-                        cols = [[l, pth] for l, pth, _png in rendered if os.path.isfile(pth)]
-                        if not cols:
-                            raise ValueError('"Every epoch" reuses the epochs from the render at the top of this tab: '
-                                             'pick the training folder and Render epochs first (or use "Without / '
-                                             'with LoRA", which needs no epoch render).')
-                        cols = royale.pick_columns(cols, b.get("epochs"))
+                        folder = str(b.get("folder") or "").strip()
+                        run_items = (royale.scan(folder)["items"] if not single and folder and os.path.isdir(folder)
+                                     else [])
+                        cols = [list(c) for c in royale.sheet_columns(
+                            [[l, pth] for l, pth, _png in rendered if os.path.isfile(pth)],
+                            [[l, pth] for l, pth in run_items if os.path.isfile(pth)], b.get("epochs"))]
                     else:
                         if not lpath or not os.path.isfile(lpath):
                             raise ValueError("Pick a LoRA file (Single LoRA), or render epochs and slide to the one "
@@ -5958,6 +5968,7 @@ def _maps_has(output_dir, lora):
 _RESTART = [False]
 _SWITCH = [False]
 _SRV = [None]
+_page_seen = [0.0]                  # when a page last asked for anything (0: none yet); /api/app/busy's page_age
 
 
 def shutdown_for_switch():

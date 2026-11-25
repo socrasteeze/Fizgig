@@ -23,7 +23,7 @@ Fizgig ships as a ready-made cloud image: the whole app in a browser tab, not a 
 - **Disk** — ~10 GB for the venv, plus ~40 GB for model files.
 - **Full fine-tuning** (experimental, every model; Flux 3 Image Klein, Krea 2 and MiniMax H3 in the guides) — see [Full fine-tuning](#full-fine-tuning).
 - **Visual Studio Build Tools** (Windows only) — for InsightFace and the torch.compile speedup: **[aka.ms/vs/17/release/vs_BuildTools.exe](https://aka.ms/vs/17/release/vs_BuildTools.exe)**, tick **"Desktop development with C++"**. Without it everything works except the compile speedup.
-- **Microsoft Edge WebView2 Runtime** (Windows 10) — Fizgig's app window runs on it. Windows 11 has it built in, but it isn't always installed on Windows 10. If the window opens white, install it from **[developer.microsoft.com/microsoft-edge/webview2](https://developer.microsoft.com/microsoft-edge/webview2/)** (the **Evergreen Bootstrapper**). Without it, Fizgig opens in your browser instead.
+- **Microsoft Edge WebView2 Runtime** (Windows 10) — Fizgig's app window runs on it. Windows 11 has it built in, but it isn't always installed on Windows 10. If the window opens white, install it from **[developer.microsoft.com/microsoft-edge/webview2](https://developer.microsoft.com/microsoft-edge/webview2/)** (the **Evergreen Bootstrapper**). Without it, or if it's broken, Fizgig opens in your browser instead (the app's log says why); closing the browser then closes Fizgig, once any run that's training has finished. If reinstalling WebView2 doesn't bring the window back, uninstall it first, then install it again.
 
 ### System RAM
 
@@ -124,7 +124,7 @@ A failed clone, build or import check prints a warning and installation continue
 including `ensure_face_models()` for the face finder and AdaFace. The ROCm pin,
 bitsandbytes, GPU kernel and VRAM monitor checks are retained. Other architectures
 skip this optional build. Once installed, enable **Force SageAttention for Krea 2
-image generation** under **Preferences → Inference performance**; leave it off if
+image generation** under **Preferences → Speed-ups for your graphics card** (AMD); leave it off if
 the optional build failed.
 
 Linux ROCm cache scripts import `fizgig.rocm.cache_exit` only when `FIZGIG_GPU_BACKEND=rocm` (set by `launch_fizgig_amd.sh`); NVIDIA and other platforms call `main()` directly. Opt out with `FIZGIG_ROCM_NO_FAST_EXIT=1 ./launch_fizgig_amd.sh`.

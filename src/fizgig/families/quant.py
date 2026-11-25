@@ -154,7 +154,7 @@ def move(dit, device):
         move_nf4_to_device(dit, device)
 
 
-def load_base(driver, path, device, precision="bf16", blocks_to_swap=0, supports_backward=True):
+def load_base(driver, path, device, precision="bf16", blocks_to_swap=0, supports_backward=True, send_only=False):
     """The family's DiT at `precision`, optionally block-swapped. NF4 cannot swap (its weights are not .weight), so
     swap is dropped for it; a family whose driver has no block swap ignores the request. Returns (dit, swapped)."""
     swap = int(blocks_to_swap or 0)
@@ -182,8 +182,17 @@ def load_base(driver, path, device, precision="bf16", blocks_to_swap=0, supports
         dit = driver.load_dit(path, "cpu" if (swap or precision != "bf16") else device)
         quantize(dit, driver, precision, device, store_device="cpu" if swap else None)
     if swap:
-        driver.enable_block_swap(dit, swap, device, supports_backward)
-        logger.info(f"[block swap] {swap} blocks stream between CPU and GPU")
+        if send_only and getattr(driver, "send_only_block_swap", False):
+            driver.enable_block_swap(dit, swap, device, supports_backward, send_only=True)
+            off = getattr(dit, "offloader", None)
+            if hasattr(off, "copier"):
+                logger.info(f"[block swap] {swap} blocks' worth swapped, send-only: {off.S} blocks stream host -> "
+                            f"device through a {off.B}-slot GPU ring (same VRAM), nothing copied back")
+            else:
+                logger.info(f"[block swap] {swap} blocks stream between CPU and GPU (classic: send-only declined)")
+        else:
+            driver.enable_block_swap(dit, swap, device, supports_backward)
+            logger.info(f"[block swap] {swap} blocks stream between CPU and GPU")
     elif precision != "bf16":
         move(dit, device)
     return dit, swap
@@ -216,6 +225,26 @@ def swap_blocks_for(desc, per_block, short_gb):
     if short_gb <= 0:
         return 0
     return int(getattr(desc, "swap_ring_slots", 0) or 0) + math.ceil(short_gb / per_block)
+
+
+def pin_swap_ok(pinned_gb, available_gb=None):
+    """Whether the swapped blocks may live in pinned (page-locked) RAM - opt-in, and then only with the pinned size plus
+    4 GB free. It isn't a win everywhere (Krea 2, INT8, the existing swap): 1.5x on a 5090 with
+    128 GB (16 swapped, 1 MP: 3.06 -> 2.01 s/it), 4% on a 32 GB 4090 laptop, where 7.0 GB pinned took free RAM from a
+    2.6 GB low to 0.2 GB, and 5.5% slower on a 4070 Ti with 64 GB (22 swapped, 0.25 MP: 4.90 -> 5.17, @Murf-Code on
+    #403), with ~8 GB more RAM and 13.7 GiB of Windows shared GPU memory. Pinning with RAM nearly full has failed
+    before (#175). Off by default: Preferences > Speed-ups for your graphics card > "Keep swapped blocks in pinned
+    RAM" (pin_block_swap) turns it on, and FIZGIG_PIN_SWAP=0/1 wins over it."""
+    env = os.environ.get("FIZGIG_PIN_SWAP", "")
+    if env not in ("0", "1"):
+        from fizgig.user_data import pref
+        env = "1" if pref("pin_block_swap", "0") == "1" else "0"
+    if env != "1":
+        return False
+    if available_gb is None:
+        import psutil
+        available_gb = psutil.virtual_memory().available / 1e9
+    return available_gb >= float(pinned_gb) + 4.0
 
 
 TIGHT_MARGIN_GB = 0.5      # nf4 with no swap beats a swapped int8 base down to this much headroom
